@@ -57,3 +57,22 @@ actor DivTests do
     assert_eq(r, :caught)
   end
 end
+
+actor FailureTests do
+  test "bubble is catchable from a def" do
+    r = try do
+      temper_bubble()
+    catch do
+      :caught
+    end
+    assert_eq(r, :caught)
+  end
+  test "panic is catchable from a def" do
+    r = try do
+      temper_panic()
+    catch do
+      :caught
+    end
+    assert_eq(r, :caught)
+  end
+end

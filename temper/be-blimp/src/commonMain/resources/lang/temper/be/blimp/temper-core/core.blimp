@@ -130,3 +130,21 @@ def temper_int_rem(a: Int, b: Int) -> Int do
     _ -> rem(a, b)
   end
 end
+
+# ── Failure ──────────────────────────────────────────
+
+# `bubble` only parses inside an actor handler or a case arm, never at the top
+# of a `def` body, so these wrap it in a one-armed case to make it callable
+# from anywhere. Both are catchable with try/catch.
+
+def temper_bubble() -> Any do
+  case true do
+    true -> bubble :temper_bubble
+  end
+end
+
+def temper_panic() -> Any do
+  case true do
+    true -> bubble :temper_panic
+  end
+end

@@ -142,6 +142,7 @@ ForLoop ::= "for" & id%Id & "in" & iterable%Expr & "do" & body%Block & "end";
 Expr =
       Atom
     | BoolLit
+    | Hole
     | CaseExpr
     | Call
     | Id
@@ -281,6 +282,18 @@ StringLit.renderTo = `tokenSink.quoted(stringTokenText(value))`;
 BoolLit ::= (value%`Boolean` == true => "true") || "false";
 
 NilLit ::= "nil";
+
+/**
+ * `_ # Hole: fill this in`
+ *
+ * Blimp's typed gap. It compiles and type-checks, and reaching one at run time
+ * asks an agent to fill it. The comment runs to end of line, so a hole must be
+ * the last thing on its line -- the translator hoists one into its own
+ * assignment rather than leaving it mid-expression.
+ */
+Hole(directive%`String`);
+Hole.renderTo = `emitBlimpHole(tokenSink, directive)`;
+Hole.operatorDefinition = `null`;
 
 Comment(text%`String`);
 Comment.renderTo = `tokenSink.comment(blimpCommentText(text))`;

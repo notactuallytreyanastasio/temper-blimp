@@ -276,6 +276,14 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                         Blimp.NilLit(call.pos)
                     }
 
+                    // A hole's comment runs to end of line, so it gets a line
+                    // of its own rather than sitting inside a larger form.
+                    is Blimp.Hole -> {
+                        val holeId = Blimp.Id(call.pos, names.gensym("hole"))
+                        hoisted.add(Blimp.Assign(call.pos, target = holeId.deepCopy(), value = tree))
+                        holeId
+                    }
+
                     else -> tree as Blimp.Expr
                 }
             }
