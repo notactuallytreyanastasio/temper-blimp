@@ -205,6 +205,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
             is TmpL.WhileStatement -> translateWhileStatement(statement, out)
 
+            is TmpL.LocalFunctionDeclaration -> {
+                nameOf(statement.name)?.let { scopes.lastOrNull()?.add(it) }
+                out.add(
+                    Blimp.Assign(
+                        statement.pos,
+                        target = idOf(statement.name),
+                        value = translateLambda(statement),
+                    ),
+                )
+            }
+
             is TmpL.IfStatement -> translateIfStatement(statement, out)
 
             is TmpL.SetProperty -> translateSetProperty(statement, out)
@@ -538,6 +549,8 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
     private fun TmpL.Tree.findExit(insideLoop: Boolean): Boolean {
         when (this) {
+            // A nested function's returns and jumps are its own.
+            is TmpL.LocalFunctionDeclaration -> return false
             is TmpL.ReturnStatement -> return true
             is TmpL.BreakStatement -> if (!insideLoop || label != null) return true
             is TmpL.ContinueStatement -> if (!insideLoop) return true
@@ -721,6 +734,46 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             }
         }
         return out
+    }
+
+    /**
+     * A nested function becomes a `fn(...) do ... end` bound to its name.
+     *
+     * Blimp closures capture the enclosing environment by reference, and a
+     * lambda sees a local assigned after it was defined, so nothing has to be
+     * hoisted or reordered here.
+     *
+     * The enclosing loop and label context is set aside: a `return` inside the
+     * lambda is the lambda's own, not a jump out of the function around it.
+     */
+    private fun translateLambda(decl: TmpL.FunctionDeclarationOrMethod): Blimp.Lambda {
+        val pos = decl.pos
+        val thisName = decl.parameters.thisName?.let { nameOf(it) }
+        val formals = decl.parameters.parameters.filter { formal -> nameOf(formal.name) != thisName }
+        val scope = mutableSetOf<ResolvedName>()
+        formals.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
+
+        val outerLoops = loops.toList()
+        val outerLabels = labelContinuations.toMap()
+        loops.clear()
+        labelContinuations.clear()
+        scopes.addLast(scope)
+        val body = try {
+            translateBlock(decl.body)
+        } finally {
+            scopes.removeLast()
+            labelContinuations.clear()
+            labelContinuations.putAll(outerLabels)
+            loops.clear()
+            outerLoops.forEach { loops.addLast(it) }
+        }
+        return Blimp.Lambda(
+            pos,
+            params = formals.map { formal ->
+                Blimp.Param(formal.pos, id = idOf(formal.name), type = anyType(formal.pos))
+            },
+            body = body,
+        )
     }
 
     private fun translateBlock(block: TmpL.BlockStatement?): Blimp.Block {
