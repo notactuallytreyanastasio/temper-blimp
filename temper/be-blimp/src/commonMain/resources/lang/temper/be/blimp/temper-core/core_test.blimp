@@ -213,4 +213,17 @@ actor BuilderTests do
     assert_eq(temper_sort([3, 1, 2], fn(a: Int, b: Int) do a - b end), [1, 2, 3])
     assert_eq(temper_sort([3, 1, 2], fn(a: Int, b: Int) do b - a end), [3, 2, 1])
   end
+  test "a map built from a list of pairs" do
+    m = temper_new_map_from([temper_new_pair(200, "OK"), temper_new_pair(404, "Not Found")])
+    assert_eq(m <- :length(), 2)
+    assert_eq(m <- :get(200), "OK")
+    assert_eq(m <- :get(404), "Not Found")
+    assert(m <- :has(200))
+    assert(!(m <- :has(302)))
+  end
+  test "a map built from no pairs is empty" do
+    m = temper_new_map_from([])
+    assert_eq(m <- :length(), 0)
+    assert_eq(temper_len(m <- :keys()), 0)
+  end
 end

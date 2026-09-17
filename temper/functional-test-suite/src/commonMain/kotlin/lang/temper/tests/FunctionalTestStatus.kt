@@ -65,6 +65,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.TypesIntBasics,
         Ft.TypesListEmpty,
         Ft.TypesListReduce,
+        Ft.TypesMap,
         Ft.TypesStringBuild,
         Ft.TypesStringIsEmpty,
     )
