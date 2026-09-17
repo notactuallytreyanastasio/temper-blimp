@@ -176,3 +176,41 @@ actor MathTests do
     assert_eq(temper_pow(2.0, 0.0 - 2.0), 0.25)
   end
 end
+
+actor BuilderTests do
+  test "a builder accumulates and reads back" do
+    b = temper_new_list_builder()
+    b <- :add(1)
+    b <- :add(2)
+    b <- :add(3)
+    assert_eq(b <- :items, [1, 2, 3])
+    assert_eq(b <- :length, 3)
+    assert_eq(b <- :get(1), 2)
+  end
+  test "set, reverse, removeLast and clear" do
+    b = temper_new_list_builder()
+    b <- :addAll([1, 2, 3])
+    b <- :set(0, 9)
+    assert_eq(b <- :items, [9, 2, 3])
+    b <- :reverse
+    assert_eq(b <- :items, [3, 2, 9])
+    assert_eq(b <- :removeLast, 9)
+    assert_eq(b <- :items, [3, 2])
+    b <- :clear
+    assert(b <- :isEmpty)
+  end
+  test "operations accept a builder or a plain list" do
+    b = temper_new_list_builder()
+    b <- :addAll([3, 1, 2])
+    assert_eq(temper_len(b), 3)
+    assert_eq(temper_len([1, 2]), 2)
+    assert_eq(temper_map(b, fn(x: Int) do x * 2 end), [6, 2, 4])
+    assert_eq(temper_join(b, ",", fn(x: Int) do to_string(x) end), "3,1,2")
+  end
+  test "list slice and comparator sort" do
+    assert_eq(temper_list_slice([1, 2, 3, 4], 1, 3), [2, 3])
+    assert_eq(temper_list_slice([1, 2, 3], 0, 0), [])
+    assert_eq(temper_sort([3, 1, 2], fn(a: Int, b: Int) do a - b end), [1, 2, 3])
+    assert_eq(temper_sort([3, 1, 2], fn(a: Int, b: Int) do b - a end), [3, 2, 1])
+  end
+end

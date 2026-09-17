@@ -270,8 +270,8 @@ end
 # Blimp has map, reduce and sort but no filter or join, and its `reduce` takes
 # the initial value, so reduceFrom lines up with it directly.
 
-def temper_filter(items: List, keep: Any) -> List do
-  temper_filter_loop(items, keep, [])
+def temper_filter(items: Any, keep: Any) -> List do
+  temper_filter_loop(temper_items(items), keep, [])
 end
 
 def temper_filter_loop(items: List, keep: Any, acc: List) -> List do
@@ -287,7 +287,8 @@ def temper_filter_loop(items: List, keep: Any, acc: List) -> List do
   end
 end
 
-def temper_join(items: List, sep: String, show: Any) -> String do
+def temper_join(source: Any, sep: String, show: Any) -> String do
+  items = temper_items(source)
   case empty?(items) do
     true -> ""
     _ -> temper_join_loop(tail(items), sep, show, show(head(items)))
@@ -301,7 +302,8 @@ def temper_join_loop(items: List, sep: String, show: Any, acc: String) -> String
   end
 end
 
-def temper_for_each(items: List, body: Any) -> Any do
+def temper_for_each(source: Any, body: Any) -> Any do
+  items = temper_items(source)
   case empty?(items) do
     true -> nil
     _ ->
@@ -385,5 +387,136 @@ def temper_pow_whole(base: Float, exponent: Float) -> Float do
     true -> 1.0
     _ -> base * temper_pow_whole(base, exponent - 1.0)
   end
+end
+
+# ── Mutable lists ────────────────────────────────────
+#
+# Temper's ListBuilder is mutable and Blimp's lists are not, so a builder is
+# an actor holding a list. Every handler assigns the field name -- which
+# shadows the state -- and publishes with one `become`.
+
+actor TemperListBuilder do
+  state items: List :: []
+
+  on :__temper_types do reply [:ListBuilder, :Listed] end
+  on :items do reply items end
+  on :length do reply length(items) end
+  on :isEmpty do reply empty?(items) end
+  on :get(i: Int) do reply elem(items, i) end
+
+  on :add(x: Any) do
+    items = append(items, x)
+    become items: items
+    reply nil
+  end
+
+  on :addAll(xs: Any) do
+    items = items ++ temper_items(xs)
+    become items: items
+    reply nil
+  end
+
+  on :set(i: Int, v: Any) do
+    items = set_at(items, i, v)
+    become items: items
+    reply nil
+  end
+
+  on :reverse do
+    items = reverse(items)
+    become items: items
+    reply nil
+  end
+
+  on :clear do
+    become items: []
+    reply nil
+  end
+
+  on :removeLast do
+    n = length(items)
+    last = elem(items, n - 1)
+    items = temper_list_slice(items, 0, n - 1)
+    become items: items
+    reply last
+  end
+
+  on :sort(cmp: Any) do
+    items = temper_sort(items, cmp)
+    become items: items
+    reply nil
+  end
+end
+
+# A sequence argument may be a plain list or a builder actor; this is what
+# lets one set of operations serve both.
+def temper_items(x: Any) -> List do
+  case type_of(x) == :actor_ref do
+    true -> x <- :items
+    _ -> x
+  end
+end
+
+def temper_new_list_builder() -> Any do
+  spawn TemperListBuilder
+end
+
+# Blimp's slice is strings only, so lists get their own.
+def temper_list_slice(items: List, start: Int, stop: Int) -> List do
+  temper_list_slice_loop(items, start, stop, start, [])
+end
+
+def temper_list_slice_loop(items: List, start: Int, stop: Int, i: Int, acc: List) -> List do
+  case i >= stop or i >= length(items) do
+    true -> acc
+    _ -> temper_list_slice_loop(items, start, stop, i + 1, append(acc, elem(items, i)))
+  end
+end
+
+# Blimp's sort takes no comparator, so this is an insertion sort over one.
+def temper_sort(items: Any, cmp: Any) -> List do
+  temper_sort_loop(temper_items(items), [], cmp)
+end
+
+def temper_sort_loop(remaining: List, acc: List, cmp: Any) -> List do
+  case empty?(remaining) do
+    true -> acc
+    _ -> temper_sort_loop(tail(remaining), temper_insert(acc, head(remaining), cmp), cmp)
+  end
+end
+
+def temper_insert(sorted: List, x: Any, cmp: Any) -> List do
+  temper_insert_loop(sorted, x, cmp, [])
+end
+
+def temper_insert_loop(rest: List, x: Any, cmp: Any, acc: List) -> List do
+  case empty?(rest) do
+    true -> append(acc, x)
+    _ ->
+      h = head(rest)
+      case cmp(x, h) <= 0 do
+        true -> (append(acc, x)) ++ rest
+        _ -> temper_insert_loop(tail(rest), x, cmp, append(acc, h))
+      end
+  end
+end
+
+# Sequence operations that accept either a list or a builder.
+def temper_len(x: Any) -> Int do length(temper_items(x)) end
+def temper_is_empty(x: Any) -> Bool do
+  case type_of(x) == :string do
+    true -> empty?(x)
+    _ -> empty?(temper_items(x))
+  end
+end
+def temper_get(x: Any, i: Int) -> Any do elem(temper_items(x), i) end
+def temper_map(x: Any, f: Any) -> List do map(temper_items(x), f) end
+def temper_reduce(x: Any, init: Any, f: Any) -> Any do reduce(temper_items(x), init, f) end
+def temper_to_list(x: Any) -> List do temper_items(x) end
+
+def temper_new_list_builder_from(items: Any) -> Any do
+  b = spawn TemperListBuilder
+  b <- :addAll(temper_items(items))
+  b
 end
 
