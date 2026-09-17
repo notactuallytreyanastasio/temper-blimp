@@ -247,6 +247,10 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
         // Blimp's maps take string keys only, so a Temper map is an actor
         // holding entries. Pair is connected too, so it needs one as well.
+        // A StringIndex is an Int here, so `compareTo` cannot be a send. It is
+        // already mapped as `CmpGeneric`, but a direct call on the value
+        // arrives by connected key and would otherwise become `x <- :compareTo`.
+        BlimpConnectedCall("core.type StringIndexOption.compareTo()", TEMPER_CMP, cmpHelpers),
         BlimpConnectedCall("core.type Pair.constructor()", "temper_new_pair", needsCore),
         BlimpConnectedCall(
             "core.type Map.constructor()",

@@ -233,6 +233,31 @@ end
 # from the :__temper_types list every translated class carries, which names the
 # class and its supertypes so a subtype test works.
 def temper_is_a(value: Any, tag: Atom) -> Bool do
+  case tag do
+    # StringIndexOption is an Int here, split by sign, so these two tags are
+    # predicates rather than type names. Temper asks both ways: `i is
+    # StringIndex` and `i as NoStringIndex`.
+    :StringIndex -> temper_is_string_index(value)
+    :NoStringIndex -> temper_is_no_string_index(value)
+    _ -> temper_has_type(value, tag)
+  end
+end
+
+def temper_is_string_index(value: Any) -> Bool do
+  case type_of(value) == :integer do
+    true -> value >= 0
+    _ -> false
+  end
+end
+
+def temper_is_no_string_index(value: Any) -> Bool do
+  case type_of(value) == :integer do
+    true -> value < 0
+    _ -> false
+  end
+end
+
+def temper_has_type(value: Any, tag: Atom) -> Bool do
   t = type_of(value)
   case t == :actor_ref do
     true -> temper_list_has(value <- :__temper_types, tag)
@@ -691,6 +716,11 @@ end
 # indices are byte offsets, so it is 0. It arrives as a static property read,
 # which the backend flattens to this name.
 static_String__begin = 0
+
+# StringIndexOption is either a byte offset or the absence of one. Offsets are
+# non-negative, and core.temper requires `none` to sort before every valid
+# index, so -1 is the only value that can stand for it.
+static_StringIndex__none = 0 - 1
 
 def temper_is_code_point(cp: Int) -> Bool do
   case cp < 0 or cp > 1114111 do
