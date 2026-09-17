@@ -49,6 +49,7 @@ kotlin {
                 implementation project(':be-js')
                 implementation project(':be-lua')
                 implementation project(':be-py')
+                implementation project(':be-blimp')
                 implementation project(':be-rust')
 
                 // Dynamically add all subdirectories in external as project dependencies

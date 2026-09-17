@@ -1,4 +1,5 @@
 [
+"lang.temper.be.blimp.BlimpBackend$Factory",
 "lang.temper.be.cpp.CppBackend$Cpp",
 "lang.temper.be.cppv.CppBackend$Factory",
 "lang.temper.be.csharp.CSharpBackend$Factory",
