@@ -571,3 +571,25 @@ def temper_cast(value: Any, tag: Atom) -> Any do
   end
 end
 
+# ── Mutable captures ─────────────────────────────────
+#
+# A Blimp closure captures the values of names already bound when it is made,
+# and an assignment inside it is local to it. Temper closures capture by
+# reference and may assign, so a local a nested function writes to lives in a
+# cell instead, and the closure captures the cell.
+
+actor TemperCell do
+  state value: Any :: nil
+  on :get do reply value end
+  on :set(v: Any) do
+    become value: v
+    reply nil
+  end
+end
+
+def temper_new_cell(v: Any) -> Any do
+  c = spawn TemperCell
+  c <- :set(v)
+  c
+end
+
