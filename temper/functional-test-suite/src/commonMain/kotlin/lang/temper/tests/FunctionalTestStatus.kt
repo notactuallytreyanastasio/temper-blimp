@@ -48,6 +48,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.ClassesStaticProperties,
         Ft.ClassesStaticPropertiesScope,
         Ft.ControlFlowIfReturn,
+        Ft.ControlFlowLoops,
         Ft.InterfacesEmpty,
         Ft.InterfacesPropertyMembers,
         Ft.InterfacesPureVirtual,
