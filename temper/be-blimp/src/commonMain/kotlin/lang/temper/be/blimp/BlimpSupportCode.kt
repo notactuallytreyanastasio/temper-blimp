@@ -10,6 +10,7 @@ import lang.temper.name.ParsedName
 import lang.temper.name.name
 import lang.temper.type2.Type2
 import lang.temper.value.BuiltinOperatorId
+import lang.temper.value.pureVirtualBuiltinName
 
 /**
  * Support code that becomes Blimp syntax at the call site.
@@ -269,11 +270,25 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
  * Temper's `hole(directive)` becomes Blimp's own hole operator.
  *
  * This is the one place where Blimp can do more with a Temper construct than
- * the other backends: everywhere else a hole shares BuiltinOperatorId.Panic
- * and simply raises, but Blimp has a real typed gap that carries the directive
- * to whoever fills it.
+ * the other backends. A hole carries no BuiltinOperatorId, so a backend that
+ * has not been taught about one says so at build time; Blimp has a real typed
+ * gap that carries the directive to whoever fills it.
  */
 internal object Hole : BlimpInlineSupportCode("hole") {
     override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
         Blimp.Hole(pos, directive = (args.firstOrNull() as? Blimp.StringLit)?.value ?: "fill this in")
+}
+
+/**
+ * The body of an abstract method that a concrete class must override.
+ *
+ * Reaching one means dispatch found no implementation, which in Blimp means
+ * the actor simply has no such handler -- but the marker still reaches the
+ * translator for the abstract declaration itself, so it raises.
+ */
+internal object PureVirtual : BlimpInlineSupportCode(pureVirtualBuiltinName.builtinKey) {
+    override val preludeHelpers: Set<String> get() = setOf(TEMPER_PANIC)
+
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(TEMPER_PANIC, null)), args = listOf())
 }

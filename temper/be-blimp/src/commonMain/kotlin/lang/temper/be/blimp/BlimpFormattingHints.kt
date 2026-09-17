@@ -27,7 +27,7 @@ object BlimpFormattingHints : FormattingHints {
         // `print(x)` and `on :add(item)`, but not `x = (a + b) * c`, where the
         // parenthesis is a grouping the formatter inserted after an operator.
         following.text == "(" &&
-            (preceding.type in callableTypes || preceding.text in setOf(")", "]", "bubbles")) -> false
+            (preceding.type in callableTypes || preceding.text in setOf(")", "]", "bubbles", "fn")) -> false
         following.text == "," -> false
         preceding.text in openers -> false
         following.text in setOf(")", "]", "}") -> false

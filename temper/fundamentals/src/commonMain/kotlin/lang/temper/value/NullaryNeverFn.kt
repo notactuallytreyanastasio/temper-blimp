@@ -121,8 +121,12 @@ object PureVirtual : NullaryNeverFn {
  * backend translates a hole to its own hole operator, which asks an agent to
  * fill the gap.
  *
- * Shares [BuiltinOperatorId.Panic] so that a backend which has not been taught
- * about holes still gets correct behaviour for free.
+ * Deliberately has no [BuiltinOperatorId]. Sharing Panic's would hand every
+ * backend an argument its panic call does not expect -- most of them route
+ * Panic to the same zero-argument bubble they use for [BubbleFn], and C-family
+ * backends would not compile. Without one, a backend that has not been taught
+ * about holes reports "Cannot translate builtin hole", which is a clean
+ * diagnostic rather than broken output, and opting in is one map entry.
  */
 object HoleFn : NullaryNeverFn {
     override val name = "hole"
@@ -132,8 +136,6 @@ object HoleFn : NullaryNeverFn {
 
     override fun invoke(args: ActualValues, cb: InterpreterCallback, interpMode: InterpMode): Result =
         throw Panic("Hole invoked @ ${cb.pos}")
-
-    override val builtinOperatorId get() = BuiltinOperatorId.Panic
 
     override val callMayFailPerSe: Boolean get() = false
 }
