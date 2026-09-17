@@ -131,14 +131,30 @@ internal const val PUTS = "puts"
 internal class BlimpConnectedSend(
     connectedKey: String,
     private val message: String,
+    /**
+     * Messages to use at particular argument counts, excluding the receiver.
+     *
+     * Blimp dispatches a handler on its name alone, not its arity, so a Temper
+     * method with optional parameters arrives at several arities and needs a
+     * name for each. `ListBuilder.splice` takes three optional parameters and
+     * so turns up with one, two or three.
+     */
+    private val byArity: Map<Int, String> = mapOf(),
 ) : BlimpInlineSupportCode(connectedKey) {
     override val preludeHelpers: Set<String> get() = needsCore
 
-    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree = Blimp.Send(
-        pos,
-        target = args.first(),
-        message = Blimp.MessageCall(pos, name = Blimp.Atom(pos, message), args = args.drop(1)),
-    )
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree {
+        val actuals = args.drop(1)
+        return Blimp.Send(
+            pos,
+            target = args.first(),
+            message = Blimp.MessageCall(
+                pos,
+                name = Blimp.Atom(pos, byArity[actuals.size] ?: message),
+                args = actuals,
+            ),
+        )
+    }
 }
 
 /**
@@ -174,6 +190,9 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             preludeHelpers = setOf(TEMPER_FLOAT_TO_STRING),
         ),
         // Int
+        // `ignore(x)` evaluates x for effect and discards it. Blimp has no such
+        // builtin, but an identity call is the same thing here.
+        BlimpConnectedCall("core.ignore()", "temper_identity", setOf(TEMPER_IDENTITY)),
         BlimpConnectedCall("core.type Int32.min()", "min"),
         BlimpConnectedCall("core.type Int32.max()", "max"),
         BlimpConnectedCall("core.type Int32.toInt64()", "to_int"),
@@ -211,8 +230,9 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
         // A ListBuilder is an actor, so its methods are sends.
         BlimpConnectedCall("core.type ListBuilder.constructor()", "temper_new_list_builder", needsCore),
-        BlimpConnectedSend("core.type ListBuilder.add()", "add"),
-        BlimpConnectedSend("core.type ListBuilder.addAll()", "addAll"),
+        BlimpConnectedSend("core.type ListBuilder.add()", "add", mapOf(2 to "add_at")),
+        BlimpConnectedSend("core.type ListBuilder.splice()", "splice", mapOf(1 to "splice_from", 2 to "splice_range")),
+        BlimpConnectedSend("core.type ListBuilder.addAll()", "addAll", mapOf(2 to "addAll_at")),
         BlimpConnectedSend("core.type ListBuilder.set()", "set"),
         BlimpConnectedSend("core.type ListBuilder.reverse()", "reverse"),
         BlimpConnectedSend("core.type ListBuilder.clear()", "clear"),
@@ -284,6 +304,9 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
+
+/** A cast that can fail: checks the tag and bubbles if it does not match. */
+internal const val TEMPER_CAST = "temper_cast"
 
 /** temper-core's runtime type test, and the handler every translated actor carries. */
 internal const val TEMPER_IS_A = "temper_is_a"
@@ -373,8 +396,10 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
     // Boolean negation is `!`; `not` is a builtin function, not an operator.
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
-    // `++` concatenates strings.
-    infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // StrCat is variadic -- `"a" ++ b ++ "c"` arrives as one call with three
+    // arguments -- and Blimp's `concat` builtin is too, so the operator form
+    // would silently drop everything past the second.
+    call(BuiltinOperatorId.StrCat, "concat"),
     // Blimp has no bitwise operators; temper-core does these arithmetically.
     call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
     call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),
