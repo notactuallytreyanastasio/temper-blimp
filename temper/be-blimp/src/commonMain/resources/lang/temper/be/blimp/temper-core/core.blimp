@@ -124,6 +124,116 @@ def temper_int_div(a: Int, b: Int) -> Int do
   end
 end
 
+# ── Parsing integers with a radix ────────────────────
+#
+# Blimp's `to_int` reads decimal only and takes no radix, so `"7FFFFFFF"
+# .toInt32(16)` needs this. The accumulator runs *negative*: the negative range
+# is one wider than the positive one, so a positive accumulator could not hold
+# Int64's minimum, and `"-8000000000000000"` has to parse.
+
+def temper_int64_min() -> Int do
+  0 - 9223372036854775807 - 1
+end
+
+def temper_digit_value(c: Int) -> Int do
+  case c >= 48 and c <= 57 do
+    true -> c - 48
+    _ -> temper_digit_alpha(c)
+  end
+end
+
+def temper_digit_alpha(c: Int) -> Int do
+  case c >= 65 and c <= 90 do
+    true -> c - 55
+    _ -> temper_digit_lower(c)
+  end
+end
+
+def temper_digit_lower(c: Int) -> Int do
+  case c >= 97 and c <= 122 do
+    true -> c - 87
+    _ -> 0 - 1
+  end
+end
+
+def temper_parse_int64(s: String, radix: Int) -> Int do
+  n = length(s)
+  case n == 0 do
+    true -> temper_bubble()
+    _ -> temper_parse_signed(s, radix, n)
+  end
+end
+
+def temper_parse_signed(s: String, radix: Int, n: Int) -> Int do
+  case char_code(s, 0) == 45 do
+    true -> temper_parse_from(s, radix, 1, n, true)
+    _ -> temper_parse_from(s, radix, 0, n, false)
+  end
+end
+
+def temper_parse_from(s: String, radix: Int, start: Int, n: Int, neg: Bool) -> Int do
+  case start >= n do
+    # A sign with no digits after it is not a number.
+    true -> temper_bubble()
+    _ -> temper_parse_end(temper_parse_digits(s, radix, start, n, 0), neg)
+  end
+end
+
+def temper_parse_digits(s: String, radix: Int, i: Int, n: Int, acc: Int) -> Int do
+  case i >= n do
+    true -> acc
+    _ -> temper_parse_digits(s, radix, i + 1, n, temper_parse_step(acc, radix, temper_digit_value(char_code(s, i))))
+  end
+end
+
+def temper_parse_step(acc: Int, radix: Int, d: Int) -> Int do
+  case d < 0 or d >= radix do
+    true -> temper_bubble()
+    _ -> temper_parse_scale(acc, radix, d)
+  end
+end
+
+# Checked before multiplying, because the multiply itself now wraps silently.
+def temper_parse_scale(acc: Int, radix: Int, d: Int) -> Int do
+  case acc < temper_int64_min() / radix do
+    true -> temper_bubble()
+    _ -> temper_parse_subtract(acc * radix, d)
+  end
+end
+
+def temper_parse_subtract(scaled: Int, d: Int) -> Int do
+  case scaled < temper_int64_min() + d do
+    true -> temper_bubble()
+    _ -> scaled - d
+  end
+end
+
+def temper_parse_end(acc: Int, neg: Bool) -> Int do
+  case neg do
+    true -> acc
+    _ -> temper_parse_positive(acc)
+  end
+end
+
+def temper_parse_positive(acc: Int) -> Int do
+  case acc == temper_int64_min() do
+    # The one magnitude that has no positive counterpart.
+    true -> temper_bubble()
+    _ -> 0 - acc
+  end
+end
+
+def temper_parse_int32(s: String, radix: Int) -> Int do
+  temper_fit_int32(temper_parse_int64(s, radix))
+end
+
+def temper_fit_int32(v: Int) -> Int do
+  case v < 0 - 2147483648 or v > 2147483647 do
+    true -> temper_bubble()
+    _ -> v
+  end
+end
+
 def temper_int_rem(a: Int, b: Int) -> Int do
   case b == 0 do
     true -> bubble :divide_by_zero

@@ -178,6 +178,13 @@ internal class BlimpConnectedCall(
         Blimp.Call(pos, callee = Blimp.Id(pos, OutName(byArity[args.size] ?: fn, null)), args = args)
 }
 
+/** temper-core's checked narrowing from Int64 to Int32: bubbles rather than wrapping. */
+internal const val TEMPER_FIT_INT32 = "temper_fit_int32"
+
+/** temper-core's radix integer parsers, which Blimp's `to_int` cannot stand in for. */
+internal const val TEMPER_PARSE_INT32 = "temper_parse_int32"
+internal const val TEMPER_PARSE_INT64 = "temper_parse_int64"
+
 /** The temper-core helper that builds a map from a list of `Pair`s. */
 internal const val TEMPER_NEW_MAP_FROM = "temper_new_map_from"
 
@@ -206,8 +213,31 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.ignore()", "temper_identity", setOf(TEMPER_IDENTITY)),
         BlimpConnectedCall("core.type Int32.min()", "min"),
         BlimpConnectedCall("core.type Int32.max()", "max"),
+        // Blimp has one integer type, so Int64 shares Int32's builtins.
+        BlimpConnectedCall("core.type Int64.min()", "min"),
+        BlimpConnectedCall("core.type Int64.max()", "max"),
         BlimpConnectedCall("core.type Int32.toInt64()", "to_int"),
-        BlimpConnectedCall("core.type String.toInt32()", "to_int"),
+        // Blimp has one integer type, so narrowing is arithmetic, not a cast.
+        // The two spellings differ in what they do when it does not fit:
+        // `toInt32` bubbles, `toInt32Unsafe` wraps.
+        BlimpConnectedCall("core.type Int64.toInt32()", TEMPER_FIT_INT32, needsCore),
+        BlimpConnectedCall("core.type Int64.toInt32Unsafe()", TEMPER_INT32, setOf(TEMPER_INT32)),
+        // Blimp's `to_int` reads decimal and takes no radix, so `"7FFFFFFF"
+        // .toInt32(16)` needs a real parser. It also answers 0 for text that is
+        // not a number at all, where Temper bubbles, so even the no-radix form
+        // goes through temper-core.
+        BlimpConnectedCall(
+            "core.type String.toInt32()",
+            TEMPER_PARSE_INT32,
+            needsCore,
+            byArity = mapOf(2 to TEMPER_PARSE_INT32),
+        ),
+        BlimpConnectedCall(
+            "core.type String.toInt64()",
+            TEMPER_PARSE_INT64,
+            needsCore,
+            byArity = mapOf(2 to TEMPER_PARSE_INT64),
+        ),
         // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
         // on both strings and lists.
         BlimpConnectedCall("core.type Listed.get isEmpty()", "temper_is_empty", needsCore),
