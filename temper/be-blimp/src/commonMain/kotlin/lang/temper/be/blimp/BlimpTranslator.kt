@@ -787,9 +787,14 @@ internal class BlimpTranslator(
         val label = nameOf(labeled.label.id)
         val previous = label?.let { labelContinuations.put(it, continuation to loops.size) }
         try {
+            // The continuation is both where `break L` goes and where running
+            // off the end of the block goes -- they are the same place, the
+            // statements after the block. Not passing it as `outer` meant a
+            // path that simply reached the end of the block skipped them: in a
+            // desugared `for`, that is the `i++`, so the loop never advanced.
             return when (val inner = labeled.statement) {
-                is TmpL.BlockStatement -> translateBody(inner.statements, out)
-                else -> translateBody(listOf(inner), out)
+                is TmpL.BlockStatement -> translateBody(inner.statements, out, continuation)
+                else -> translateBody(listOf(inner), out, continuation)
             }
         } finally {
             if (label != null) {
