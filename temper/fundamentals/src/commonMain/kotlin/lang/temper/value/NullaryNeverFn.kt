@@ -108,6 +108,37 @@ object PureVirtual : NullaryNeverFn {
 }
 
 /**
+ * A typed gap in a program: code that has not been written yet.
+ *
+ * <!-- snippet: builtin/hole -->
+ * # `hole(directive)`
+ * A placeholder that type-checks as a value of any type, so it can stand in a
+ * branch you have not filled in without widening the enclosing signature.
+ * Reaching one panics.
+ *
+ * [directive] says what belongs there. It is a string so that it survives to
+ * the backends, which are free to do more with it than panic: the Blimp
+ * backend translates a hole to its own hole operator, which asks an agent to
+ * fill the gap.
+ *
+ * Shares [BuiltinOperatorId.Panic] so that a backend which has not been taught
+ * about holes still gets correct behaviour for free.
+ */
+object HoleFn : NullaryNeverFn {
+    override val name = "hole"
+
+    // (String) -> Void  &  <T>(String) -> Never<T>
+    override val sigs = nullaryNeverReturnsSigs(requiredInputTypes = listOf(WKT.stringType2)) { it }
+
+    override fun invoke(args: ActualValues, cb: InterpreterCallback, interpMode: InterpMode): Result =
+        throw Panic("Hole invoked @ ${cb.pos}")
+
+    override val builtinOperatorId get() = BuiltinOperatorId.Panic
+
+    override val callMayFailPerSe: Boolean get() = false
+}
+
+/**
  * Marker for bodies of abstract functions that must be connected.
  */
 object AbstractPanic : NullaryNeverFn {

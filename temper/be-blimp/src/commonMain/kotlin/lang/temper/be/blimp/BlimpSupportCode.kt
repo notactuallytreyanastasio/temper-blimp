@@ -179,6 +179,10 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** temper-core helpers that raise from anywhere, including a plain `def` body. */
+internal const val TEMPER_BUBBLE = "temper_bubble"
+internal const val TEMPER_PANIC = "temper_panic"
+
 /** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
 internal const val TEMPER_INT_DIV = "temper_int_div"
 internal const val TEMPER_INT_REM = "temper_int_rem"
@@ -254,12 +258,22 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     BlimpOperatorSupportCode("not_null", BuiltinOperatorId.NotNull) { _, args -> args[0] },
     // Temper's list constructor is variadic; Blimp has a list literal.
     BlimpOperatorSupportCode("list", BuiltinOperatorId.Listify) { pos, args -> Blimp.ListLit(pos, items = args) },
-    // Both raise; Blimp's bubble is caught by try/catch, which is what
-    // BubbleBranchStrategy.Exceptions expects.
-    BlimpOperatorSupportCode("bubble", BuiltinOperatorId.Bubble) { pos, _ ->
-        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_bubble"))
-    },
-    BlimpOperatorSupportCode("panic", BuiltinOperatorId.Panic) { pos, _ ->
-        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_panic"))
-    },
+    // `bubble` only parses inside a handler or a case arm, so both go through
+    // temper-core helpers that are callable from anywhere and catchable by
+    // try/catch, which is what BubbleBranchStrategy.Exceptions expects.
+    call(BuiltinOperatorId.Bubble, TEMPER_BUBBLE, setOf(TEMPER_BUBBLE)),
+    call(BuiltinOperatorId.Panic, TEMPER_PANIC, setOf(TEMPER_PANIC)),
 ).associateBy { it.builtinOperatorId!! }
+
+/**
+ * Temper's `hole(directive)` becomes Blimp's own hole operator.
+ *
+ * This is the one place where Blimp can do more with a Temper construct than
+ * the other backends: everywhere else a hole shares BuiltinOperatorId.Panic
+ * and simply raises, but Blimp has a real typed gap that carries the directive
+ * to whoever fills it.
+ */
+internal object Hole : BlimpInlineSupportCode("hole") {
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
+        Blimp.Hole(pos, directive = (args.firstOrNull() as? Blimp.StringLit)?.value ?: "fill this in")
+}

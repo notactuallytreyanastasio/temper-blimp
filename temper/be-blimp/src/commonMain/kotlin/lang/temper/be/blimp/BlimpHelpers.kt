@@ -1,5 +1,7 @@
 package lang.temper.be.blimp
 
+import lang.temper.format.TokenSink
+
 /**
  * Quotes a string as a Blimp string literal.
  *
@@ -49,3 +51,14 @@ internal fun blimpCommentText(text: String): String =
             else -> "# $line"
         }
     }
+
+/**
+ * Emits `_ # Hole: directive`.
+ *
+ * The directive is flattened to one line because a Blimp comment runs to end
+ * of line and would otherwise swallow the rest of the statement.
+ */
+internal fun emitBlimpHole(tokenSink: TokenSink, directive: String) {
+    tokenSink.value("_")
+    tokenSink.comment("# Hole: ${directive.replace(Regex("\\s+"), " ").trim()}")
+}

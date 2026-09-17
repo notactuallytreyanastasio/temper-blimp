@@ -53,8 +53,12 @@ object BlimpSupportNetwork : SupportNetwork {
 
     override fun representationOfVoid(genre: Genre): RepresentationOfVoid = RepresentationOfVoid.ReifyVoid
 
-    override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? =
-        builtin.builtinOperatorId?.let { blimpOperators[it] }
+    override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? = when {
+        // A hole shares BuiltinOperatorId.Panic so untaught backends still get
+        // correct behaviour, so match the name first to catch it here.
+        builtin.name == "hole" -> Hole
+        else -> builtin.builtinOperatorId?.let { blimpOperators[it] }
+    }
 
     override fun optionalSupportCode(
         optionalSupportCodeKind: OptionalSupportCodeKind,

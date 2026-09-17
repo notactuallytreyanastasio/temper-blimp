@@ -1119,6 +1119,45 @@ object Blimp {
     }
 
     /**
+     * `_ # Hole: fill this in`
+     *
+     * Blimp's typed gap. It compiles and type-checks, and reaching one at run time
+     * asks an agent to fill it. The comment runs to end of line, so a hole must be
+     * the last thing on its line -- the translator hoists one into its own
+     * assignment rather than leaving it mid-expression.
+     */
+    class Hole(
+        pos: Position,
+        var directive: String,
+    ) : BaseTree(pos), Expr {
+        override val operatorDefinition: BlimpOperatorDefinition?
+            get() = null
+        override fun renderTo(
+            tokenSink: TokenSink,
+        ) {
+            emitBlimpHole(tokenSink, directive)
+        }
+        override val codeFormattingTemplate: CodeFormattingTemplate?
+            get() = null
+        override fun deepCopy(): Hole {
+            return Hole(pos, directive = this.directive)
+        }
+        override val childMemberRelationships
+            get() = cmr
+        override fun equals(
+            other: Any?,
+        ): Boolean {
+            return other is Hole && this.directive == other.directive
+        }
+        override fun hashCode(): Int {
+            return directive.hashCode()
+        }
+        companion object {
+            private val cmr = ChildMemberRelationships()
+        }
+    }
+
+    /**
      * `case subject do pat -> body end`
      *
      * Blimp's parser accepts `case` on the right of an assignment but not as a
