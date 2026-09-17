@@ -1,0 +1,282 @@
+// Output grammar for Blimp, an actor-oriented language.
+// See: https://github.com/notactuallytreyanastasio/blimp
+//
+// Blimp is newline-significant and block-structured with `do` ... `end`.
+// Its only abstraction is the actor: a class becomes an `actor`, its fields
+// become `state`, its methods become `on :name(...)` handlers, and a method
+// call becomes a synchronous `obj <- :name(args)` send.
+//
+// Only the syntax this backend actually emits is modelled here. Blimp has no
+// `if`, no `while`, no `return`, and no module system, so none appear below.
+
+let namespace = "Blimp";
+
+let imports = """
+  "lang.temper.format.OutputToken
+  "lang.temper.format.OutputTokenType
+  "lang.temper.format.TokenSerializable
+  "lang.temper.format.TokenSink
+  "lang.temper.name.OutName
+  "lang.temper.name.name
+;
+
+Program = SourceFile;
+
+SourceFile ::= items%Item*"\n";
+SourceFile.items.default = `listOf()`;
+
+Item =
+      ActorDecl
+    | Comment
+    | DefDecl
+    | Statement
+    ;
+
+// ── Declarations ─────────────────────────────────────────────────────────
+
+/**
+ * `actor Shop.Checkout do ... end`
+ *
+ * Blimp has no module system; a dotted actor name is both the namespace and
+ * the supervision edge, so Temper's module paths land in [name].
+ */
+ActorDecl ::=
+      doc%Comment?
+    & "actor" & name%Name
+    & "do"
+    & states%StateDecl*"\n"
+    & handlers%Handler*"\n"
+    & "end"
+    ;
+ActorDecl.doc.default = `null`;
+ActorDecl.states.default = `listOf()`;
+ActorDecl.handlers.default = `listOf()`;
+
+/** `state total: Float :: 0.0` */
+StateDecl ::= "state" & id%Id & ":" & type%TypeRef & "::" & init%Expr;
+
+/** `on :charge(payment: Payment) when ready bubbles(CascadeBubble) do ... end` */
+Handler ::=
+      "on" & message%Atom
+    & ((params%Param => "(" & params%Param*"," & ")") || ())
+    & ((guard%Expr => "when" & guard) || ())
+    & ((bubbles%Id => "bubbles" & "(" & bubbles & ")") || ())
+    & "do"
+    & body%Block
+    & "end"
+    ;
+Handler.params.default = `listOf()`;
+Handler.guard.default = `null`;
+Handler.bubbles.default = `null`;
+
+/**
+ * `def name(a: Int) -> Int do ... end`
+ *
+ * Reserved for the support layer and for lowered loops; user-facing Temper
+ * declarations become actors.
+ */
+DefDecl ::=
+      doc%Comment?
+    & "def" & id%Id
+    & "(" & params%Param*"," & ")"
+    & ((returnType%TypeRef => "->" & returnType) || ())
+    & "do"
+    & body%Block
+    & "end"
+    ;
+DefDecl.doc.default = `null`;
+DefDecl.params.default = `listOf()`;
+DefDecl.returnType.default = `null`;
+
+Param ::= id%Id & ((type%TypeRef => ":" & type) || ());
+Param.type.default = `null`;
+
+/** Blimp's type annotations are shallow: Int, Float, String, Bool, Atom, List, Map, Any. */
+TypeRef = Id;
+
+// ── Statements ───────────────────────────────────────────────────────────
+
+Block ::= statements%Statement*"\n";
+Block.statements.default = `listOf()`;
+
+Statement =
+      Assign
+    | Become
+    | BubbleStmt
+    | Comment
+    | ExprStatement
+    | ForLoop
+    | Reply
+    ;
+
+ExprStatement ::= expr%Expr;
+
+/** Blimp rebinds within a block, so this covers both declaration and update. */
+Assign ::= target%Id & "=" & value%Expr;
+
+/** `become items: [], total: 0.0` */
+Become ::= "become" & fields%BecomeField+",";
+
+BecomeField ::= id%Id & ":" & value%Expr;
+
+Reply ::= "reply" & value%Expr;
+
+BubbleStmt ::= "bubble" & value%Expr;
+
+ForLoop ::= "for" & id%Id & "in" & iterable%Expr & "do" & body%Block & "end";
+
+// ── Expressions ──────────────────────────────────────────────────────────
+
+Expr =
+      Atom
+    | BoolLit
+    | CaseExpr
+    | Call
+    | Id
+    | Lambda
+    | ListLit
+    | MapLit
+    | Member
+    | Name
+    | NilLit
+    | NumberLit
+    | Operation
+    | Send
+    | Spawn
+    | StringLit
+    | TryCatch
+    | TupleLit
+    ;
+
+Call ::= callee%Expr & "(" & args%Expr*"," & ")";
+Call.args.default = `listOf()`;
+
+/**
+ * `case subject do pat -> body end`
+ *
+ * Blimp's parser accepts `case` on the right of an assignment but not as a
+ * call argument, so the translator hoists it into a temporary.
+ */
+CaseExpr ::= "case" & subject%Expr & "do" & arms%CaseArm*"\n" & "end";
+
+CaseArm ::=
+      pattern%Pattern
+    & ((guard%Expr => "when" & guard) || ())
+    & "->"
+    & body%Block
+    ;
+CaseArm.guard.default = `null`;
+
+Lambda ::= "fn" & "(" & params%Param*"," & ")" & "do" & body%Block & "end";
+Lambda.params.default = `listOf()`;
+
+ListLit ::= "[" & items%Expr*"," & "]";
+ListLit.items.default = `listOf()`;
+
+/** Blimp map literals take static identifier keys only; dynamic keys go through `put`. */
+MapLit ::= "%{" & entries%MapEntry*"," & "}";
+MapLit.entries.default = `listOf()`;
+
+MapEntry ::= key%Id & ":" & value%Expr;
+
+TupleLit ::= "{" & items%Expr*"," & "}";
+TupleLit.items.default = `listOf()`;
+
+Member ::= obj%Expr & "." & id%Id;
+
+/** `checkout <- :add(item)` -- synchronous, evaluates to the handler's reply. */
+Send ::= target%Expr & "<-" & message%Message;
+
+Message = Atom | MessageCall;
+
+MessageCall ::= name%Atom & "(" & args%Expr*"," & ")";
+MessageCall.args.default = `listOf()`;
+
+/** `spawn Shop.Checkout, region: :us` */
+Spawn ::= "spawn" & name%Name & ((inits%SpawnInit => "," & inits%SpawnInit*",") || ());
+Spawn.inits.default = `listOf()`;
+
+SpawnInit ::= id%Id & ":" & value%Expr;
+
+/** `try do ... catch e do ... end` -- Temper's bubbles land here. */
+TryCatch ::=
+      "try" & "do"
+    & body%Block
+    & "catch" & ((id%Id => id) || ())
+    & "do"
+    & handler%Block
+    & "end"
+    ;
+TryCatch.id.default = `null`;
+
+Operation ::=
+      ((left%Expr => left) || ())
+    & operator%Operator
+    & ((right%Expr => right) || ())
+    ;
+Operation.left.default = `null`;
+Operation.right.default = `null`;
+Operation.operatorDefinition = `operator.operator.operatorDefinition`;
+
+Operator(operator%`BlimpOperator`);
+Operator.renderTo = `operator.emit(tokenSink)`;
+
+// ── Patterns ─────────────────────────────────────────────────────────────
+
+Pattern =
+      Atom
+    | BoolLit
+    | ConsPattern
+    | Id
+    | ListPattern
+    | NilLit
+    | NumberLit
+    | StringLit
+    | TuplePattern
+    | Wildcard
+    ;
+
+Wildcard ::= "_";
+
+/** `[head | tail]` */
+ConsPattern ::= "[" & head%Pattern & "|" & tail%Pattern & "]";
+
+ListPattern ::= "[" & items%Pattern*"," & "]";
+ListPattern.items.default = `listOf()`;
+
+TuplePattern ::= "{" & items%Pattern*"," & "}";
+TuplePattern.items.default = `listOf()`;
+
+// ── Leaves ───────────────────────────────────────────────────────────────
+
+Id(outName%`OutName`);
+Id.renderTo = `tokenSink.name(outName, inOperatorPosition = false)`;
+
+/** A dotted actor path: `Shop.Checkout.TaxCalculator`. */
+Name ::= segments%Id+".";
+
+/** `:ok`, `:add` -- emitted as a single token so no space creeps after the colon. */
+Atom(text%`String`);
+Atom.renderTo = `tokenSink.emit(OutputToken(":$text", OutputTokenType.OtherValue))`;
+Atom.operatorDefinition = `null`;
+
+NumberLit(value%`Number`);
+NumberLit.renderTo = `tokenSink.number(blimpNumberText(value))`;
+
+StringLit(value%`String`);
+StringLit.renderTo = `tokenSink.quoted(stringTokenText(value))`;
+
+BoolLit ::= (value%`Boolean` == true => "true") || "false";
+
+NilLit ::= "nil";
+
+Comment(text%`String`);
+Comment.renderTo = `tokenSink.comment(blimpCommentText(text))`;
+Comment.operatorDefinition = `null`;
+
+// ── Parenthesization ─────────────────────────────────────────────────────
+
+Call.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
+Member.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
+Name.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
+Send.operatorDefinition = `BlimpOperatorDefinition.Send`;
