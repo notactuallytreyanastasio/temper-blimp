@@ -410,8 +410,44 @@ actor TemperListBuilder do
     reply nil
   end
 
+  on :add_at(x: Any, at: Int) do
+    items = temper_list_insert(items, at, x)
+    become items: items
+    reply nil
+  end
+
+  on :splice_from(index: Int) do
+    items = temper_list_slice(items, 0, index)
+    become items: items
+    reply nil
+  end
+
+  on :splice_range(index: Int, removeCount: Int) do
+    before = temper_list_slice(items, 0, index)
+    after = temper_list_slice(items, index + removeCount, length(items))
+    items = before ++ after
+    become items: items
+    reply nil
+  end
+
+  on :splice(index: Int, removeCount: Int, newValues: Any) do
+    before = temper_list_slice(items, 0, index)
+    after = temper_list_slice(items, index + removeCount, length(items))
+    items = (before ++ temper_items(newValues)) ++ after
+    become items: items
+    reply nil
+  end
+
   on :addAll(xs: Any) do
     items = items ++ temper_items(xs)
+    become items: items
+    reply nil
+  end
+
+  on :addAll_at(xs: Any, at: Int) do
+    before = temper_list_slice(items, 0, at)
+    after = temper_list_slice(items, at, length(items))
+    items = (before ++ temper_items(xs)) ++ after
     become items: items
     reply nil
   end
@@ -520,3 +556,8 @@ def temper_new_list_builder_from(items: Any) -> Any do
   b
 end
 
+# Blimp handlers dispatch on name alone, not arity, so the two shapes of
+# Temper's ListBuilder.add reach different messages.
+def temper_list_insert(items: List, at: Int, x: Any) -> List do
+  (temper_list_slice(items, 0, at) ++ [x]) ++ temper_list_slice(items, at, length(items))
+end
