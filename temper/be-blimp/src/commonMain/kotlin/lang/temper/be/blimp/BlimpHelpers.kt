@@ -40,6 +40,10 @@ internal fun blimpNumberText(value: Number): String = when (value) {
         else -> value.toString()
     }
     is Float -> blimpNumberText(value.toDouble())
+    // Blimp's lexer reads the minus as the prefix operator and the digits on
+    // their own, so the most negative Int64 has no literal form: the digits
+    // alone do not fit. Checked against the interpreter.
+    Long.MIN_VALUE -> "(0 - ${Long.MAX_VALUE} - 1)"
     else -> value.toString()
 }
 

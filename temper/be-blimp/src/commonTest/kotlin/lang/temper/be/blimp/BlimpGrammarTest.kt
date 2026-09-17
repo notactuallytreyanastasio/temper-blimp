@@ -344,4 +344,18 @@ class BlimpGrammarTest {
             Blimp.Assign(p0, target = id("x"), value = Blimp.StringLit(p0, "a\nb\"c\\d")),
         )
     }
+
+    /**
+     * `-9223372036854775808` is a parse error in Blimp, not a number.
+     *
+     * The lexer reads the minus as the prefix operator and then the digits on
+     * their own, which do not fit in a signed 64-bit integer. Checked against
+     * the interpreter: `0 - 9223372036854775807 - 1` prints the value.
+     */
+    @Test
+    fun int64MinIsNotALiteral() {
+        assertEquals("(0 - 9223372036854775807 - 1)", blimpNumberText(Long.MIN_VALUE))
+        assertEquals("9223372036854775807", blimpNumberText(Long.MAX_VALUE))
+        assertEquals("-5", blimpNumberText(-5))
+    }
 }
