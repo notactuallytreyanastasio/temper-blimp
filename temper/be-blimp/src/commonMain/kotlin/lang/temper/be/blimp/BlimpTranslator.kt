@@ -53,6 +53,16 @@ private const val LOOP_BREAK = "break"
 private const val LOOP_CONTINUE = "continue"
 private const val LOOP_FALL = "fall"
 
+/** A lowered loop finished on its own terms: the test failed, or a `break`. */
+private const val LOOP_DONE = "done"
+
+/**
+ * Something inside a lowered loop wants out past it: a `return`, or a `break`
+ * to a label registered outside the loop. The signal carries a destination id
+ * and a payload so the call site can decide whether it can honour it.
+ */
+private const val LOOP_ESCAPE = "escape"
+
 /**
  * Turns one [TmpL.Module] into Blimp items.
  *
@@ -332,8 +342,16 @@ internal class BlimpTranslator(
                 val registered = label?.let { labelContinuations[it] }
                 val loop = loops.lastOrNull()
                 when {
+                    // The loop this break leaves still has to report that it
+                    // finished, so the jump cannot just call the continuation.
                     registered != null && registered.second != loops.size ->
-                        TODO("break across a loop boundary: $statement")
+                        out.add(
+                            loops.last().escape(
+                                statement.pos,
+                                escapeIdFor(label!!),
+                                Blimp.NilLit(statement.pos),
+                            ),
+                        )
                     registered?.first != null -> out.add(registered.first!!.callFrom(statement.pos))
                     registered != null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
                     // An unlabelled break leaves the innermost lowered loop.
@@ -353,11 +371,18 @@ internal class BlimpTranslator(
             }
 
             // A Blimp block's value is its last statement, so a trailing return
-            // is just that expression. Anything else needs continuation
-            // splitting, which is not built yet.
-            is TmpL.ReturnStatement -> when (val returned = statement.expression) {
-                null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
-                else -> out.add(Blimp.ExprStatement(statement.pos, translateExpressionHoisting(returned, out)))
+            // is just that expression. Inside a lowered loop it cannot be:
+            // the body's last expression is the loop's signal, so a return has
+            // to travel out as one and be re-raised at the call site.
+            is TmpL.ReturnStatement -> {
+                val returned = when (val expression = statement.expression) {
+                    null -> Blimp.NilLit(statement.pos)
+                    else -> translateExpressionHoisting(expression, out)
+                }
+                when (val loop = loops.lastOrNull()) {
+                    null -> out.add(Blimp.ExprStatement(statement.pos, returned))
+                    else -> out.add(loop.escape(statement.pos, escapeIdFor(FunctionReturn), returned))
+                }
             }
 
             else -> TODO("statement: $statement")
@@ -631,6 +656,10 @@ internal class BlimpTranslator(
                 true
             }
             is TmpL.LabeledStatement -> translateLabeledBlock(split, continuation, out)
+            is TmpL.WhileStatement -> {
+                translateWhileStatement(split, out, continuation, escaping = true)
+                true
+            }
             is TmpL.TryStatement -> {
                 translateReturningTry(split, continuation, out)
                 // Both arms end in an exit or in the continuation call.
@@ -787,7 +816,41 @@ internal class BlimpTranslator(
             pos,
             Blimp.ListLit(pos, items = listOf(Blimp.Atom(pos, tag)) + carried.map { it.deepCopy() }),
         )
+
+        /**
+         * `[:escape, carried..., dest, payload]`.
+         *
+         * The destination and payload sit after the carried values so that
+         * `elem(r, i + 1)` reads a carried value whichever kind of signal
+         * came back, and only the tag says which one it is.
+         */
+        fun escapeOf(pos: Position, dest: Blimp.Expr, payload: Blimp.Expr): Blimp.Statement =
+            Blimp.ExprStatement(
+                pos,
+                Blimp.ListLit(
+                    pos,
+                    items = listOf(Blimp.Atom(pos, LOOP_ESCAPE)) +
+                        carried.map { it.deepCopy() } + listOf(dest, payload),
+                ),
+            )
+
+        fun escape(pos: Position, dest: Int, payload: Blimp.Expr): Blimp.Statement =
+            escapeOf(pos, Blimp.NumberLit(pos, dest), payload)
     }
+
+    /** The destination of an escape that leaves the enclosing function entirely. */
+    private object FunctionReturn
+
+    /**
+     * Small integer ids for escape destinations, so a signal can name one.
+     *
+     * A destination is either a labelled block (keyed by its [ResolvedName])
+     * or [FunctionReturn]. Ids are global to the module; a call site only
+     * builds arms for the destinations it can actually honour.
+     */
+    private val escapeIds = mutableMapOf<Any, Int>()
+
+    private fun escapeIdFor(dest: Any): Int = escapeIds.getOrPut(dest) { escapeIds.size }
 
     private class Continuation(val id: Blimp.Id, val params: List<Blimp.Id>) {
         fun callFrom(pos: Position): Blimp.Statement = Blimp.ExprStatement(
@@ -1601,10 +1664,21 @@ internal class BlimpTranslator(
      * one is getting the values back out of a branch at all. A `return` out of
      * a loop still needs continuation splitting threaded through here.
      */
-    private fun translateWhileStatement(loop: TmpL.WhileStatement, out: MutableList<Blimp.Statement>) {
-        if (loop.body.containsReturn()) {
-            TODO("return out of a loop: $loop")
-        }
+    private fun translateWhileStatement(
+        loop: TmpL.WhileStatement,
+        out: MutableList<Blimp.Statement>,
+        /** Where a path that leaves the loop normally should go, if anywhere. */
+        continuation: Continuation? = null,
+        /**
+         * Whether anything inside can leave the loop entirely.
+         *
+         * Set by [translateBody] when the loop is the statement it split on,
+         * which is exactly when the body holds a `return` or a `break` to a
+         * label outside. The call site then has to decode an escape; without
+         * one the loop only ever reports `:done`.
+         */
+        escaping: Boolean = false,
+    ) {
         val pos = loop.pos
         val carried = loopCarriedNames(loop)
         val loopFn = Blimp.Id(pos, names.gensym("loop"))
@@ -1660,6 +1734,15 @@ internal class BlimpTranslator(
                     arms = listOf(
                         Blimp.CaseArm(
                             pos,
+                            pattern = Blimp.Atom(pos, LOOP_ESCAPE),
+                            guard = null,
+                            body = Blimp.Block(
+                                pos,
+                                statements = listOf(Blimp.ExprStatement(pos, signalId.deepCopy())),
+                            ),
+                        ),
+                        Blimp.CaseArm(
+                            pos,
                             pattern = Blimp.Atom(pos, LOOP_BREAK),
                             guard = null,
                             body = Blimp.Block(
@@ -1667,7 +1750,11 @@ internal class BlimpTranslator(
                                 statements = listOf(
                                     Blimp.ExprStatement(
                                         pos,
-                                        Blimp.ListLit(pos, items = carriedIds.map { it.deepCopy() }),
+                                        Blimp.ListLit(
+                                            pos,
+                                            items =
+                                            listOf(Blimp.Atom(pos, LOOP_DONE)) + carriedIds.map { it.deepCopy() },
+                                        ),
                                     ),
                                 ),
                             ),
@@ -1726,7 +1813,12 @@ internal class BlimpTranslator(
                                             statements = listOf(
                                                 Blimp.ExprStatement(
                                                     pos,
-                                                    Blimp.ListLit(pos, items = carriedIds.map { it.deepCopy() }),
+                                                    Blimp.ListLit(
+                                                        pos,
+                                                        items =
+                                                        listOf(Blimp.Atom(pos, LOOP_DONE)) +
+                                                            carriedIds.map { it.deepCopy() },
+                                                    ),
                                                 ),
                                             ),
                                         ),
@@ -1749,18 +1841,110 @@ internal class BlimpTranslator(
             ),
         )
         carriedIds.forEachIndexed { index, id ->
-            out.add(
-                Blimp.Assign(
+            out.add(Blimp.Assign(pos, target = id.deepCopy(), value = elemOf(pos, resultId, index + 1)))
+        }
+        if (escaping) {
+            out.add(decodeEscape(pos, resultId, carriedIds.size, continuation))
+        }
+    }
+
+    /**
+     * The statement that reads an `:escape` back out of a finished loop.
+     *
+     *     case elem(r, 0) do
+     *       :escape -> case elem(r, n + 1) do
+     *           0 -> cont_3(x)          # a labelled block that ends here
+     *           1 -> elem(r, n + 2)     # the function's return value
+     *           _ -> [:escape, ...]     # not ours: hand it to the loop outside
+     *         end
+     *       _ -> cont_3(x)
+     *     end
+     *
+     * A destination belongs to this call site when the number of loops open
+     * where it was registered matches the number open here. Anything else is
+     * re-raised, so an escape crossing several loops is decoded once per loop
+     * until it reaches the one that can honour it.
+     */
+    private fun decodeEscape(
+        pos: Position,
+        resultId: Blimp.Id,
+        carriedCount: Int,
+        continuation: Continuation?,
+    ): Blimp.Statement {
+        val dest = elemOf(pos, resultId, carriedCount + 1)
+        val payload = elemOf(pos, resultId, carriedCount + 2)
+        val enclosing = loops.lastOrNull()
+        // Falling off the end of a loop body is itself a signal, so a loop
+        // nested in another cannot just evaluate to nil here.
+        val fallThrough = when {
+            continuation != null -> continuation.callFrom(pos)
+            enclosing != null -> enclosing.signal(pos, LOOP_FALL)
+            else -> Blimp.ExprStatement(pos, Blimp.NilLit(pos))
+        }
+        val arms = mutableListOf<Blimp.CaseArm>()
+        for ((destination, id) in escapeIds) {
+            val action = when {
+                destination === FunctionReturn && loops.isEmpty() ->
+                    Blimp.ExprStatement(pos, payload.deepCopy())
+                destination is ResolvedName ->
+                    labelContinuations[destination]
+                        ?.takeIf { it.second == loops.size }
+                        // A labelled block with nothing after it means "skip
+                        // the rest of this loop body", which is a fall, not nil.
+                        ?.let { it.first?.callFrom(pos) ?: fallThrough }
+                else -> null
+            } ?: continue
+            arms.add(
+                Blimp.CaseArm(
                     pos,
-                    target = id.deepCopy(),
-                    value = Blimp.Call(
-                        pos,
-                        callee = Blimp.Id(pos, OutName("elem", null)),
-                        args = listOf(resultId.deepCopy(), Blimp.NumberLit(pos, index)),
-                    ),
+                    pattern = Blimp.NumberLit(pos, id),
+                    guard = null,
+                    body = Blimp.Block(pos, statements = listOf(action)),
                 ),
             )
         }
+        arms.add(
+            Blimp.CaseArm(
+                pos,
+                guard = null,
+                pattern = Blimp.Wildcard(pos),
+                body = Blimp.Block(
+                    pos,
+                    statements = listOf(
+                        when (enclosing) {
+                            null -> Blimp.ExprStatement(pos, Blimp.NilLit(pos))
+                            else -> enclosing.escapeOf(pos, dest.deepCopy(), payload.deepCopy())
+                        },
+                    ),
+                ),
+            ),
+        )
+        return Blimp.ExprStatement(
+            pos,
+            Blimp.CaseExpr(
+                pos,
+                subject = elemOf(pos, resultId, 0),
+                arms = listOf(
+                    Blimp.CaseArm(
+                        pos,
+                        pattern = Blimp.Atom(pos, LOOP_ESCAPE),
+                        guard = null,
+                        body = Blimp.Block(
+                            pos,
+                            statements = listOf(
+                                Blimp.ExprStatement(pos, Blimp.CaseExpr(pos, subject = dest, arms = arms)),
+                            ),
+                        ),
+                    ),
+                    Blimp.CaseArm(
+                        pos,
+                        pattern = Blimp.Wildcard(pos),
+                        guard = null,
+                        body = Blimp.Block(pos, statements = listOf(fallThrough)),
+                    ),
+                ),
+            ),
+        )
     }
 
     /**
