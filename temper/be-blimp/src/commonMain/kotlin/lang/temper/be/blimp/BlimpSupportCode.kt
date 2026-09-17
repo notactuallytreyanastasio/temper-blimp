@@ -179,6 +179,10 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
+internal const val TEMPER_INT_DIV = "temper_int_div"
+internal const val TEMPER_INT_REM = "temper_int_rem"
+
 /**
  * Builtin operators this backend knows, keyed by [BuiltinOperatorId].
  *
@@ -234,4 +238,28 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
     // `++` concatenates strings.
     infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // Generic comparisons fall back to Blimp's polymorphic operators.
+    infix(BuiltinOperatorId.LtGeneric, BlimpOperator.LessThan),
+    infix(BuiltinOperatorId.LeGeneric, BlimpOperator.LessEquals),
+    infix(BuiltinOperatorId.GtGeneric, BlimpOperator.GreaterThan),
+    infix(BuiltinOperatorId.GeGeneric, BlimpOperator.GreaterEquals),
+    // The unchecked variants bubble on a zero divisor, as Temper's Int does.
+    call(BuiltinOperatorId.DivIntInt, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.ModIntInt, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
+    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.ModIntInt64, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
+    // `nil?` is Blimp's null test; a non-null assertion is the value itself,
+    // because Temper has already proved it.
+    call(BuiltinOperatorId.IsNull, "nil?"),
+    BlimpOperatorSupportCode("not_null", BuiltinOperatorId.NotNull) { _, args -> args[0] },
+    // Temper's list constructor is variadic; Blimp has a list literal.
+    BlimpOperatorSupportCode("list", BuiltinOperatorId.Listify) { pos, args -> Blimp.ListLit(pos, items = args) },
+    // Both raise; Blimp's bubble is caught by try/catch, which is what
+    // BubbleBranchStrategy.Exceptions expects.
+    BlimpOperatorSupportCode("bubble", BuiltinOperatorId.Bubble) { pos, _ ->
+        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_bubble"))
+    },
+    BlimpOperatorSupportCode("panic", BuiltinOperatorId.Panic) { pos, _ ->
+        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_panic"))
+    },
 ).associateBy { it.builtinOperatorId!! }

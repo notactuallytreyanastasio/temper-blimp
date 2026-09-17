@@ -179,6 +179,8 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
             is TmpL.WhileStatement -> translateWhileStatement(statement, out)
 
+            is TmpL.IfStatement -> translateIfStatement(statement, out)
+
             // A Blimp block's value is its last statement, so a trailing return
             // is just that expression. Anything else needs continuation
             // splitting, which is not built yet.
@@ -222,7 +224,20 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             is TmpL.InlineSupportCodeWrapper -> {
                 val supportCode = fn.supportCode as BlimpInlineSupportCode
                 preludeHelpers.addAll(supportCode.preludeHelpers)
-                supportCode.callFactory(call.pos, call.parameters.map { translateActual(it) }) as Blimp.Expr
+                when (
+                    val tree = supportCode.callFactory(call.pos, call.parameters.map { translateActual(it) })
+                ) {
+                    // `bubble` is a statement in Blimp, so in expression
+                    // position it is hoisted ahead and the expression it
+                    // replaces evaluates to nil -- which is unreachable,
+                    // because the bubble has already left.
+                    is Blimp.Statement -> {
+                        hoisted.add(tree)
+                        Blimp.NilLit(call.pos)
+                    }
+
+                    else -> tree as Blimp.Expr
+                }
             }
 
             is TmpL.FnReference -> Blimp.Call(
@@ -297,6 +312,95 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val statements = mutableListOf<Blimp.Statement>()
         block?.statements?.forEach { translateStatementInto(it, statements) }
         return Blimp.Block(block?.pos ?: module.pos, statements = statements)
+    }
+
+    // ── Branching ────────────────────────────────────────────────────────
+
+    /**
+     * Blimp has no `if`, and a two-armed `case` is not a drop-in replacement.
+     *
+     * Checked against the interpreter: an assignment inside a `case` arm does
+     * not reliably survive the arm. `case c do true -> x = 1 ... end` leaves
+     * `x` untouched afterwards. So a branch that assigns anything has to hand
+     * its values out as the `case` expression's value and let the call site
+     * put them back, the same shape the loop lowering uses.
+     *
+     *     branch = case c do
+     *       true ->
+     *         x = 1
+     *         [x]
+     *       _ ->
+     *         x = 2
+     *         [x]
+     *     end
+     *     x = elem(branch, 0)
+     */
+    private fun translateIfStatement(statement: TmpL.IfStatement, out: MutableList<Blimp.Statement>) {
+        val pos = statement.pos
+        val test = translateExpressionHoisting(statement.test, out)
+        val consequent = mutableListOf<Blimp.Statement>()
+        translateStatementInto(statement.consequent, consequent)
+        val alternate = mutableListOf<Blimp.Statement>()
+        statement.alternate?.let { translateStatementInto(it, alternate) }
+
+        val assigned = assignedEnclosingNames(statement)
+        val ids = assigned.map { Blimp.Id(pos, names.outName(it)) }
+        if (ids.isEmpty()) {
+            if (consequent.isEmpty()) consequent.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+            if (alternate.isEmpty()) alternate.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+        } else {
+            consequent.add(Blimp.ExprStatement(pos, Blimp.ListLit(pos, items = ids.map { it.deepCopy() })))
+            alternate.add(Blimp.ExprStatement(pos, Blimp.ListLit(pos, items = ids.map { it.deepCopy() })))
+        }
+
+        val caseExpr = Blimp.CaseExpr(
+            pos,
+            subject = test,
+            arms = listOf(
+                Blimp.CaseArm(
+                    pos,
+                    pattern = Blimp.BoolLit(pos, true),
+                    guard = null,
+                    body = Blimp.Block(pos, statements = consequent),
+                ),
+                Blimp.CaseArm(
+                    pos,
+                    pattern = Blimp.Wildcard(pos),
+                    guard = null,
+                    body = Blimp.Block(pos, statements = alternate),
+                ),
+            ),
+        )
+        if (ids.isEmpty()) {
+            out.add(Blimp.ExprStatement(pos, caseExpr))
+            return
+        }
+        val resultId = Blimp.Id(pos, names.gensym("branch"))
+        out.add(Blimp.Assign(pos, target = resultId.deepCopy(), value = caseExpr))
+        ids.forEachIndexed { index, id ->
+            out.add(
+                Blimp.Assign(
+                    pos,
+                    target = id.deepCopy(),
+                    value = Blimp.Call(
+                        pos,
+                        callee = Blimp.Id(pos, OutName("elem", null)),
+                        args = listOf(resultId.deepCopy(), Blimp.NumberLit(pos, index)),
+                    ),
+                ),
+            )
+        }
+    }
+
+    /** Enclosing-scope names either branch assigns to, sorted for stable output. */
+    private fun assignedEnclosingNames(statement: TmpL.Statement): List<ResolvedName> {
+        val enclosing = scopes.flatten().toSet()
+        val assigned = mutableSetOf<ResolvedName>()
+        statement.boundaryDescent { node ->
+            if (node is TmpL.Assignment) nameOf(node.left)?.let(assigned::add)
+            true
+        }
+        return assigned.filter { it in enclosing }.sortedBy { names.outName(it).outputNameText }
     }
 
     // ── Loop lowering ────────────────────────────────────────────────────
