@@ -204,6 +204,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
             is TmpL.SetProperty -> translateSetProperty(statement, out)
 
+            // `break L` leaves the labelled block, which is a tail call to the
+            // continuation holding whatever followed it.
+            is TmpL.BreakStatement -> {
+                val label = statement.label?.id?.let { nameOf(it) }
+                val continuation = label?.let { labelContinuations[it] }
+                when (continuation) {
+                    null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
+                    else -> out.add(continuation.callFrom(statement.pos))
+                }
+            }
+
             // A Blimp block's value is its last statement, so a trailing return
             // is just that expression. Anything else needs continuation
             // splitting, which is not built yet.
@@ -330,7 +341,6 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val scope = mutableSetOf<ResolvedName>()
         decl.parameters.parameters.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
         scopes.addLast(scope)
-        checkOnlyTrailingReturn(decl.body)
         val body = try {
             translateBlock(decl.body)
         } finally {
@@ -346,37 +356,206 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     }
 
     /**
-     * Rejects a `return` that is not the function body's last statement.
+     * Translates a statement list, splitting at the first early `return`.
      *
-     * Blimp has no `return`: a body's value is its final statement. A trailing
-     * return is therefore free, but an early one needs the remaining
-     * statements hoisted into a continuation `def`. Until that exists this
-     * fails loudly rather than dropping the control flow.
+     * Blimp has no `return`: a block's value is its last statement. A trailing
+     * return is therefore free, but an early one needs the statements after it
+     * lifted into a continuation `def` that the non-returning paths tail-call.
+     * Nothing is duplicated, because only the fall-through calls it.
+     *
+     *     if (c) { return a }
+     *     return b
+     *
+     * becomes
+     *
+     *     case c do
+     *       true -> a
+     *       _ -> b
+     *     end
      */
-    private fun checkOnlyTrailingReturn(block: TmpL.BlockStatement?) {
-        val statements = block?.statements ?: return
-        statements.forEachIndexed { index, statement ->
-            val isLast = index == statements.lastIndex
-            val hasReturn = when (statement) {
-                is TmpL.ReturnStatement -> !isLast
-                else -> statement.anyChildRecursiveReturn()
-            }
-            if (hasReturn) TODO("early return: $statement")
+    private fun translateBody(statements: List<TmpL.Statement>, out: MutableList<Blimp.Statement>) {
+        val splitIndex = statements.indexOfFirst { statement ->
+            !statement.isExit() && statement.containsExit()
+        }
+        if (splitIndex < 0) {
+            statements.forEach { translateStatementInto(it, out) }
+            return
+        }
+        statements.subList(0, splitIndex).forEach { translateStatementInto(it, out) }
+        val split = statements[splitIndex]
+        val tail = statements.subList(splitIndex + 1, statements.size)
+        val continuation = when {
+            tail.isEmpty() -> null
+            else -> makeContinuation(tail, split.pos)
+        }
+        when (split) {
+            is TmpL.IfStatement -> translateReturningIf(split, continuation, out)
+            is TmpL.LabeledStatement -> translateLabeledBlock(split, continuation, out)
+            else -> TODO("early exit inside: $split")
         }
     }
 
-    private fun TmpL.Statement.anyChildRecursiveReturn(): Boolean {
+    /**
+     * A labelled block, which is how the frontend expresses an early `return`.
+     *
+     *     fn__4: { if (c) { return__0 = "yes"; break fn__4 } ... }
+     *     return return__0
+     *
+     * `break fn__4` means "skip the rest of this block", which is exactly a
+     * call to the continuation holding the statements after the block.
+     */
+    private fun translateLabeledBlock(
+        labeled: TmpL.LabeledStatement,
+        continuation: Continuation?,
+        out: MutableList<Blimp.Statement>,
+    ) {
+        val label = nameOf(labeled.label.id)
+        val previous = label?.let { labelContinuations.put(it, continuation) }
+        try {
+            when (val inner = labeled.statement) {
+                is TmpL.BlockStatement -> translateBody(inner.statements, out)
+                else -> translateBody(listOf(inner), out)
+            }
+        } finally {
+            if (label != null) {
+                when (previous) {
+                    null -> labelContinuations.remove(label)
+                    else -> labelContinuations[label] = previous
+                }
+            }
+        }
+    }
+
+    /** Statements that end a path: the continuation picks up from here. */
+    private fun TmpL.Statement.isExit(): Boolean = this is TmpL.ReturnStatement || this is TmpL.BreakStatement
+
+    private fun TmpL.Statement.containsExit(): Boolean {
         var found = false
         boundaryDescent { node ->
-            if (node is TmpL.ReturnStatement) found = true
+            if (node is TmpL.ReturnStatement || node is TmpL.BreakStatement) found = true
             !found
         }
         return found
     }
 
+    /** Continuations for labelled blocks, so a `break L` knows where to go. */
+    private val labelContinuations = mutableMapOf<ResolvedName, Continuation?>()
+
+    private class Continuation(val id: Blimp.Id, val params: List<Blimp.Id>) {
+        fun callFrom(pos: Position): Blimp.Statement = Blimp.ExprStatement(
+            pos,
+            Blimp.Call(pos, callee = id.deepCopy(), args = params.map { it.deepCopy() }),
+        )
+    }
+
+    /** Lifts [tail] into a top-level `def` taking the enclosing locals it uses. */
+    private fun makeContinuation(tail: List<TmpL.Statement>, pos: Position): Continuation {
+        val enclosing = scopes.flatten().toSet()
+        val mentioned = mutableSetOf<ResolvedName>()
+        tail.forEach { statement ->
+            statement.boundaryDescent { node ->
+                when (node) {
+                    is TmpL.Reference -> nameOf(node.id)?.let(mentioned::add)
+                    is TmpL.Assignment -> nameOf(node.left)?.let(mentioned::add)
+                    else -> {}
+                }
+                true
+            }
+        }
+        val params = mentioned
+            .filter { it in enclosing }
+            .sortedBy { names.outName(it).outputNameText }
+            .map { Blimp.Id(pos, names.outName(it)) }
+        val id = Blimp.Id(pos, names.gensym("cont"))
+        val body = mutableListOf<Blimp.Statement>()
+        translateBody(tail, body)
+        declarations.add(
+            Blimp.DefDecl(
+                pos,
+                id = id.deepCopy(),
+                params = params.map { Blimp.Param(pos, id = it.deepCopy(), type = anyType(pos)) },
+                returnType = anyType(pos),
+                body = Blimp.Block(pos, statements = body),
+            ),
+        )
+        return Continuation(id, params)
+    }
+
+    /**
+     * An `if` where at least one branch returns.
+     *
+     * The case expression's value is the function's value, so a branch that
+     * returns supplies its value directly and a branch that falls through ends
+     * in the continuation call.
+     */
+    private fun translateReturningIf(
+        statement: TmpL.IfStatement,
+        continuation: Continuation?,
+        out: MutableList<Blimp.Statement>,
+    ) {
+        val pos = statement.pos
+        val test = translateExpressionHoisting(statement.test, out)
+        val consequent = translateBranch(statement.consequent, continuation, pos)
+        val alternate = when (val alternate = statement.alternate) {
+            null -> mutableListOf<Blimp.Statement>().also { branch ->
+                continuation?.let { branch.add(it.callFrom(pos)) }
+                    ?: branch.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+            }
+            else -> translateBranch(alternate, continuation, pos)
+        }
+        out.add(
+            Blimp.ExprStatement(
+                pos,
+                Blimp.CaseExpr(
+                    pos,
+                    subject = test,
+                    arms = listOf(
+                        Blimp.CaseArm(
+                            pos,
+                            pattern = Blimp.BoolLit(pos, true),
+                            guard = null,
+                            body = Blimp.Block(pos, statements = consequent),
+                        ),
+                        Blimp.CaseArm(
+                            pos,
+                            pattern = Blimp.Wildcard(pos),
+                            guard = null,
+                            body = Blimp.Block(pos, statements = alternate),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun translateBranch(
+        branch: TmpL.Statement,
+        continuation: Continuation?,
+        pos: Position,
+    ): MutableList<Blimp.Statement> {
+        val statements = when (branch) {
+            is TmpL.BlockStatement -> branch.statements
+            else -> listOf(branch)
+        }
+        val out = mutableListOf<Blimp.Statement>()
+        when {
+            // Ends in a return or a break: that path supplies the arm's value.
+            statements.lastOrNull()?.isExit() == true -> translateBody(statements, out)
+            // Exits somewhere other than the end; threading the continuation
+            // into a nested split is not built yet.
+            statements.any { it.containsExit() } -> TODO("conditional early exit: $branch")
+            else -> {
+                statements.forEach { translateStatementInto(it, out) }
+                continuation?.let { out.add(it.callFrom(pos)) }
+                    ?: out.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+            }
+        }
+        return out
+    }
+
     private fun translateBlock(block: TmpL.BlockStatement?): Blimp.Block {
         val statements = mutableListOf<Blimp.Statement>()
-        block?.statements?.forEach { translateStatementInto(it, statements) }
+        block?.statements?.let { translateBody(it, statements) }
         return Blimp.Block(block?.pos ?: module.pos, statements = statements)
     }
 
@@ -475,8 +654,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         scopes.addLast(scope)
         val statements = mutableListOf<Blimp.Statement>()
         val mutated = try {
-            checkOnlyTrailingReturn(method.body)
-            method.body?.statements?.forEach { translateStatementInto(it, statements) }
+            method.body?.statements?.let { translateBody(it, statements) }
             actorScope!!.mutated.toList()
         } finally {
             scopes.removeLast()

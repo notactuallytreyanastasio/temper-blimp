@@ -39,6 +39,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.AlgosHelloFromClassToTop,
         Ft.AlgosHelloWorld,
         Ft.ClassesPrivateMethod,
+        Ft.ControlFlowIfReturn,
         Ft.ImportsTypes,
         Ft.SemanticsConstness,
         Ft.SemanticsMutuallyReferencingTypes,
