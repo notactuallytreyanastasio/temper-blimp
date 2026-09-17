@@ -34,6 +34,7 @@ import lang.temper.value.ComparableTypeTag
 import lang.temper.value.CoverFunction
 import lang.temper.value.Fail
 import lang.temper.value.HelpSnippet
+import lang.temper.value.HoleFn
 import lang.temper.value.InstancePropertyRecord
 import lang.temper.value.InternalFeatureKey
 import lang.temper.value.InterpreterCallback
@@ -1589,6 +1590,7 @@ object BuiltinFuns {
     val dataFileMacro: NamedBuiltinFun = DataFileMacro
 
     val bubble: NamedBuiltinFun = BubbleFn
+    val hole: NamedBuiltinFun = HoleFn
     val panic: NamedBuiltinFun = PanicFn
     val voidishPanic: NamedBuiltinFun = VoidishPanicFn
 
@@ -1609,6 +1611,7 @@ object BuiltinFuns {
     val vStrRawMacro = Value(strRawMacro)
     val vCharTagFn = Value(charTagFn)
     val vBubble = Value(bubble)
+    val vHole = Value(hole)
     val vPanic = Value(panic)
     val vVoidishPanic = Value(voidishPanic)
     val vCommaFn = Value(commaFn)

@@ -112,6 +112,7 @@ private object Builtins {
             "NaN" to Value(Double.NaN, TFloat64),
 
             keyPair(BuiltinFuns.vBubble),
+            keyPair(BuiltinFuns.vHole),
             keyPair(BuiltinFuns.vPanic),
             keyPair(BuiltinFuns.vAssertMacro),
             keyPair(BuiltinFuns.vAsFn),
