@@ -1,0 +1,40 @@
+actor CoreTests do
+  test "int32 wraps positive overflow" do
+    assert_eq(temper_int32(2147483647 + 1), 0 - 2147483648)
+  end
+  test "int32 wraps negative overflow" do
+    assert_eq(temper_int32(0 - 2147483648 - 1), 2147483647)
+  end
+  test "int32 leaves in-range alone" do
+    assert_eq(temper_int32(0), 0)
+    assert_eq(temper_int32(2147483647), 2147483647)
+    assert_eq(temper_int32(0 - 2147483648), 0 - 2147483648)
+  end
+  test "float keeps its decimal point" do
+    assert_eq(temper_float_to_string(1.0), "1.0")
+    assert_eq(temper_float_to_string(1.5), "1.5")
+  end
+  test "string length counts code points" do
+    assert_eq(temper_string_length("hello"), 5)
+    assert_eq(temper_string_length("héllo"), 5)
+    assert_eq(temper_string_length("日本語"), 3)
+    assert_eq(temper_string_length(""), 0)
+  end
+  test "code points decode" do
+    assert_eq(u8_code_points("héllo"), [104, 233, 108, 108, 111])
+    assert_eq(u8_code_points("日本語"), [26085, 26412, 35486])
+  end
+  test "encode round-trips every width" do
+    assert_eq(u8_encode(104), "h")
+    assert_eq(u8_encode(233), "é")
+    assert_eq(u8_encode(8364), "€")
+    assert_eq(u8_encode(128512), "😀")
+  end
+  test "next advances by sequence width" do
+    assert_eq(temper_string_next("héllo", 0), 1)
+    assert_eq(temper_string_next("héllo", 1), 3)
+  end
+  test "code point at index" do
+    assert_eq(temper_string_code_point_at("héllo", 1), 233)
+  end
+end
