@@ -12,6 +12,17 @@ import lang.temper.type2.Type2
 import lang.temper.value.BuiltinOperatorId
 import lang.temper.value.pureVirtualBuiltinName
 
+/** temper-core shims over Blimp builtins whose shape differs from Temper's. */
+internal const val TEMPER_SLICE = "temper_slice"
+internal const val TEMPER_STRING_END = "temper_string_end"
+internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
+internal const val TEMPER_IDENTITY = "temper_identity"
+
+/** The UTF-8 layer, which the code-point string operations all lean on. */
+internal val utf8Helpers = setOf(
+    "temper_string_code_point_at", "temper_string_next", "u8_encode", "u8_decode_at", "u8_seq_len",
+)
+
 /**
  * Support code that becomes Blimp syntax at the call site.
  *
@@ -121,6 +132,33 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             TEMPER_FLOAT_TO_STRING,
             preludeHelpers = setOf(TEMPER_FLOAT_TO_STRING),
         ),
+        // Int
+        BlimpConnectedCall("core.type Int32.min()", "min"),
+        BlimpConnectedCall("core.type Int32.max()", "max"),
+        BlimpConnectedCall("core.type Int32.toInt64()", "to_int"),
+        BlimpConnectedCall("core.type String.toInt32()", "to_int"),
+        // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
+        // on both strings and lists.
+        BlimpConnectedCall("core.type Listed.get isEmpty()", "empty?"),
+        BlimpConnectedCall("core.type Listed.get length()", "length"),
+        BlimpConnectedCall("core.type Listed.get()", "elem"),
+        BlimpConnectedCall("core.type List.get length()", "length"),
+        BlimpConnectedCall("core.type List.get()", "elem"),
+        BlimpConnectedCall("core.type ListBuilder.get length()", "length"),
+        BlimpConnectedCall("core.type Listed.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type List.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        // String. Its indices are byte offsets, which is what Blimp uses too.
+        BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
+        BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type String.split()", "split"),
+        BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
+        BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
+        BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
+        BlimpConnectedCall("core.type String.next()", "temper_string_next", utf8Helpers),
+        BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode", utf8Helpers),
+        // Blimp's slice takes a length; Temper's takes an exclusive end.
+        BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        BlimpConnectedCall("core.type Listed.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
     ).associateBy { it.connectedKey }
 
 /**

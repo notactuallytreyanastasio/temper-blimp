@@ -240,3 +240,28 @@ def temper_is_a(value: Any, tag: Atom) -> Bool do
   end
 end
 
+# ── Core API shims ───────────────────────────────────
+
+# Blimp's slice takes a LENGTH, not an end index: slice("hello", 0, 4) is
+# "hell". Temper's second argument is an exclusive end.
+def temper_slice(s: Any, start: Int, stop: Int) -> Any do
+  case stop <= start do
+    true -> ""
+    _ -> slice(s, start, stop - start)
+  end
+end
+
+# Temper's String indices are byte offsets, and `end` is one past the last.
+def temper_string_end(s: String) -> Int do
+  length(s)
+end
+
+def temper_string_has_index(s: String, i: Int) -> Bool do
+  i >= 0 and i < length(s)
+end
+
+# Some Temper conversions are no-ops in Blimp.
+def temper_identity(x: Any) -> Any do
+  x
+end
+

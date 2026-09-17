@@ -127,3 +127,17 @@ actor TypeTests do
     assert(temper_is_a([1], :list))
   end
 end
+
+actor ShimTests do
+  test "slice end is exclusive" do
+    assert_eq(temper_slice("hello", 1, 3), "el")
+    assert_eq(temper_slice("hello", 0, 5), "hello")
+    assert_eq(temper_slice("hello", 2, 2), "")
+  end
+  test "string end and hasIndex" do
+    assert_eq(temper_string_end("abc"), 3)
+    assert(temper_string_has_index("abc", 0))
+    assert(temper_string_has_index("abc", 2))
+    refute(temper_string_has_index("abc", 3))
+  end
+end

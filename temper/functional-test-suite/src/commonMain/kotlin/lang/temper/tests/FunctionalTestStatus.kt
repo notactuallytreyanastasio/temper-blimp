@@ -49,6 +49,9 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.SemanticsConstness,
         Ft.SemanticsMutuallyReferencingTypes,
         Ft.SemanticsTypeCheckedLocals,
+        Ft.TypesIntBasics,
+        Ft.TypesListEmpty,
+        Ft.TypesStringIsEmpty,
     )
     onlyPasses(
         cppv(198),
