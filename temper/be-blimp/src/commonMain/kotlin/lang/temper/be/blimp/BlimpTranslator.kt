@@ -451,7 +451,12 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
      *       _ -> b
      *     end
      */
-    private fun translateBody(statements: List<TmpL.Statement>, out: MutableList<Blimp.Statement>): Boolean {
+    private fun translateBody(
+        statements: List<TmpL.Statement>,
+        out: MutableList<Blimp.Statement>,
+        /** Where a path that runs off the end of [statements] should go, if anywhere. */
+        outer: Continuation? = null,
+    ): Boolean {
         val splitIndex = statements.indexOfFirst { statement ->
             !statement.isExit() && statement.containsExit()
         }
@@ -463,8 +468,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val split = statements[splitIndex]
         val tail = statements.subList(splitIndex + 1, statements.size)
         val continuation = when {
-            tail.isEmpty() -> null
-            else -> makeContinuation(tail, split.pos)
+            // Nothing follows, so a path that falls through carries on to
+            // whatever the enclosing block was going to do.
+            tail.isEmpty() -> outer
+            else -> makeContinuation(tail, split.pos, outer)
         }
         return when (split) {
             is TmpL.IfStatement -> {
@@ -596,7 +603,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     }
 
     /** Lifts [tail] into a top-level `def` taking the enclosing locals it uses. */
-    private fun makeContinuation(tail: List<TmpL.Statement>, pos: Position): Continuation {
+    private fun makeContinuation(tail: List<TmpL.Statement>, pos: Position, outer: Continuation? = null): Continuation {
         val enclosing = scopes.flatten().toSet()
         val mentioned = mutableSetOf<ResolvedName>()
         tail.forEach { statement ->
@@ -615,7 +622,13 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             .map { Blimp.Id(pos, names.outName(it)) }
         val id = Blimp.Id(pos, names.gensym("cont"))
         val body = mutableListOf<Blimp.Statement>()
-        endLoopPath(translateBody(tail, body), body, pos)
+        val terminated = translateBody(tail, body, outer)
+        when {
+            terminated -> {}
+            // A continuation that runs off its end hands control on.
+            outer != null -> body.add(outer.callFrom(pos))
+            else -> endLoopPath(false, body, pos)
+        }
         declarations.add(
             Blimp.DefDecl(
                 pos,
@@ -721,9 +734,18 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         when {
             // Ends in a return or a break: that path supplies the arm's value.
             statements.lastOrNull()?.isExit() == true -> translateBody(statements, out)
-            // Exits somewhere other than the end; threading the continuation
-            // into a nested split is not built yet.
-            statements.any { it.containsExit() } -> TODO("conditional early exit: $branch")
+            // Exits on some paths but not all: split inside the branch, with
+            // this branch's continuation as where the surviving paths go.
+            statements.any { it.containsExit() } -> {
+                val terminated = translateBody(statements, out, continuation)
+                if (!terminated) {
+                    when {
+                        continuation != null -> out.add(continuation.callFrom(pos))
+                        loops.isNotEmpty() -> out.add(loops.last().signal(pos, LOOP_FALL))
+                        else -> {}
+                    }
+                }
+            }
             else -> {
                 statements.forEach { translateStatementInto(it, out) }
                 when {
