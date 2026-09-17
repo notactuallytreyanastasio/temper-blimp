@@ -29,6 +29,9 @@ internal abstract class BlimpInlineSupportCode(
 
     override val baseName: ParsedName get() = ParsedName(connectedKey)
 
+    /** temper-core helpers this support code's expansion calls, if any. */
+    open val preludeHelpers: Set<String> get() = setOf()
+
     override val needsThisEquivalent: Boolean get() = false
 
     override fun renderTo(tokenSink: TokenSink) = tokenSink.name(baseName, inOperatorPosition = false)
@@ -85,9 +88,178 @@ internal object ConsoleLog : BlimpInlineSupportCode("core.type Console.log()") {
 /** The Blimp builtin that writes a string to stdout unquoted and untruncated. */
 internal const val PUTS = "puts"
 
+/**
+ * A `@connected` member that becomes a call to a Blimp builtin or a
+ * temper-core helper, with the receiver passed as the first argument.
+ */
+internal class BlimpConnectedCall(
+    connectedKey: String,
+    private val fn: String,
+    override val preludeHelpers: Set<String> = setOf(),
+) : BlimpInlineSupportCode(connectedKey) {
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(fn, null)), args = args)
+}
+
+/** The temper-core helper that restores a whole float's decimal point. */
+internal const val TEMPER_FLOAT_TO_STRING = "temper_float_to_string"
+
 /** Every `@connected` key be-blimp understands, keyed by the key string. */
 internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
     listOf(
         ConsoleLog,
         GetConsole,
+        // Blimp's to_string covers Int, Int64, Boolean and String directly.
+        BlimpConnectedCall("core.type Int32.toString()", "to_string"),
+        BlimpConnectedCall("core.type Int64.toString()", "to_string"),
+        BlimpConnectedCall("core.type Boolean.toString()", "to_string"),
+        BlimpConnectedCall("core.type String.toString()", "to_string"),
+        // Float needs the helper: Blimp prints a whole float as "1", Temper as "1.0".
+        BlimpConnectedCall(
+            "core.type Float64.toString()",
+            TEMPER_FLOAT_TO_STRING,
+            preludeHelpers = setOf(TEMPER_FLOAT_TO_STRING),
+        ),
     ).associateBy { it.connectedKey }
+
+/**
+ * A builtin operator that becomes a Blimp expression.
+ *
+ * [connectedKey] is only a name hint here; these arrive through
+ * `getSupportCode(NamedBuiltinFun)` keyed on [builtinOperatorId], not through
+ * a `@connected` key.
+ */
+internal class BlimpOperatorSupportCode(
+    name: String,
+    operatorId: BuiltinOperatorId,
+    override val preludeHelpers: Set<String> = setOf(),
+    private val build: (Position, List<Blimp.Expr>) -> Blimp.Tree,
+) : BlimpInlineSupportCode(name, operatorId) {
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree = build(pos, args)
+}
+
+/** `a <op> b`. */
+private fun infix(id: BuiltinOperatorId, op: BlimpOperator) = BlimpOperatorSupportCode(op.name, id) { pos, args ->
+    Blimp.Operation(pos, left = args[0], operator = Blimp.Operator(pos, op), right = args[1])
+}
+
+/** `<op> a`. */
+private fun prefix(id: BuiltinOperatorId, op: BlimpOperator) = BlimpOperatorSupportCode(op.name, id) { pos, args ->
+    Blimp.Operation(pos, left = null, operator = Blimp.Operator(pos, op), right = args[0])
+}
+
+/** `f(a, b, ...)`, a call to a Blimp builtin or a temper-core helper. */
+private fun call(id: BuiltinOperatorId, fn: String, helpers: Set<String> = setOf()) =
+    BlimpOperatorSupportCode(fn, id, helpers) { pos, args ->
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(fn, null)), args = args)
+    }
+
+/**
+ * `temper_int32(a <op> b)`.
+ *
+ * Temper's Int is 32-bit and wraps; Blimp's is 64-bit and panics the process
+ * on i64 overflow. Both operands are already in range, so a product stays well
+ * under 2^62 and wrapping after each operation never trips that panic. This is
+ * the same shape as be-rust's `wrapping_add` / `wrapping_mul`.
+ */
+private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
+    BlimpOperatorSupportCode("int32_${op.name}", id, setOf(TEMPER_INT32)) { pos, args ->
+        Blimp.Call(
+            pos,
+            callee = Blimp.Id(pos, OutName(TEMPER_INT32, null)),
+            args = listOf(
+                when (args.size) {
+                    1 -> Blimp.Operation(pos, left = null, operator = Blimp.Operator(pos, op), right = args[0])
+                    else -> Blimp.Operation(pos, left = args[0], operator = Blimp.Operator(pos, op), right = args[1])
+                },
+            ),
+        )
+    }
+
+/** The temper-core helper that wraps an Int to 32 bits. */
+internal const val TEMPER_INT32 = "temper_int32"
+
+/** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
+internal const val TEMPER_INT_DIV = "temper_int_div"
+internal const val TEMPER_INT_REM = "temper_int_rem"
+
+/**
+ * Builtin operators this backend knows, keyed by [BuiltinOperatorId].
+ *
+ * Anything absent makes the frontend report "Cannot translate builtin X not
+ * supported by Blimp Backend", which is the intended way to find the next gap.
+ */
+internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = listOf(
+    // Int arithmetic wraps to 32 bits.
+    wrapping(BuiltinOperatorId.PlusIntInt, BlimpOperator.Addition),
+    wrapping(BuiltinOperatorId.MinusIntInt, BlimpOperator.Subtraction),
+    wrapping(BuiltinOperatorId.TimesIntInt, BlimpOperator.Multiplication),
+    wrapping(BuiltinOperatorId.MinusInt, BlimpOperator.Negate),
+    // Int64 is Blimp's native width, so no wrapping. It does inherit Blimp's
+    // panic on i64 overflow where Temper would wrap.
+    infix(BuiltinOperatorId.PlusIntInt64, BlimpOperator.Addition),
+    infix(BuiltinOperatorId.MinusIntInt64, BlimpOperator.Subtraction),
+    infix(BuiltinOperatorId.TimesIntInt64, BlimpOperator.Multiplication),
+    prefix(BuiltinOperatorId.MinusInt64, BlimpOperator.Negate),
+    // Blimp's `/` truncates toward zero on Int and `rem` matches its sign,
+    // which is what Temper wants. There is no `%` operator.
+    infix(BuiltinOperatorId.DivIntIntSafe, BlimpOperator.Division),
+    infix(BuiltinOperatorId.DivIntInt64Safe, BlimpOperator.Division),
+    call(BuiltinOperatorId.ModIntIntSafe, "rem"),
+    call(BuiltinOperatorId.ModIntInt64Safe, "rem"),
+    // Float64 maps straight across.
+    infix(BuiltinOperatorId.PlusFltFlt, BlimpOperator.Addition),
+    infix(BuiltinOperatorId.MinusFltFlt, BlimpOperator.Subtraction),
+    infix(BuiltinOperatorId.TimesFltFlt, BlimpOperator.Multiplication),
+    infix(BuiltinOperatorId.DivFltFlt, BlimpOperator.Division),
+    prefix(BuiltinOperatorId.MinusFlt, BlimpOperator.Negate),
+    // Comparisons. Blimp compares Int, Float and String with the same operators.
+    infix(BuiltinOperatorId.LtIntInt, BlimpOperator.LessThan),
+    infix(BuiltinOperatorId.LeIntInt, BlimpOperator.LessEquals),
+    infix(BuiltinOperatorId.GtIntInt, BlimpOperator.GreaterThan),
+    infix(BuiltinOperatorId.GeIntInt, BlimpOperator.GreaterEquals),
+    infix(BuiltinOperatorId.EqIntInt, BlimpOperator.Equals),
+    infix(BuiltinOperatorId.NeIntInt, BlimpOperator.NotEquals),
+    infix(BuiltinOperatorId.LtFltFlt, BlimpOperator.LessThan),
+    infix(BuiltinOperatorId.LeFltFlt, BlimpOperator.LessEquals),
+    infix(BuiltinOperatorId.GtFltFlt, BlimpOperator.GreaterThan),
+    infix(BuiltinOperatorId.GeFltFlt, BlimpOperator.GreaterEquals),
+    infix(BuiltinOperatorId.EqFltFlt, BlimpOperator.Equals),
+    infix(BuiltinOperatorId.NeFltFlt, BlimpOperator.NotEquals),
+    infix(BuiltinOperatorId.LtStrStr, BlimpOperator.LessThan),
+    infix(BuiltinOperatorId.LeStrStr, BlimpOperator.LessEquals),
+    infix(BuiltinOperatorId.GtStrStr, BlimpOperator.GreaterThan),
+    infix(BuiltinOperatorId.GeStrStr, BlimpOperator.GreaterEquals),
+    infix(BuiltinOperatorId.EqStrStr, BlimpOperator.Equals),
+    infix(BuiltinOperatorId.NeStrStr, BlimpOperator.NotEquals),
+    infix(BuiltinOperatorId.EqGeneric, BlimpOperator.Equals),
+    infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
+    // Boolean negation is `!`; `not` is a builtin function, not an operator.
+    prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
+    // `++` concatenates strings.
+    infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // Generic comparisons fall back to Blimp's polymorphic operators.
+    infix(BuiltinOperatorId.LtGeneric, BlimpOperator.LessThan),
+    infix(BuiltinOperatorId.LeGeneric, BlimpOperator.LessEquals),
+    infix(BuiltinOperatorId.GtGeneric, BlimpOperator.GreaterThan),
+    infix(BuiltinOperatorId.GeGeneric, BlimpOperator.GreaterEquals),
+    // The unchecked variants bubble on a zero divisor, as Temper's Int does.
+    call(BuiltinOperatorId.DivIntInt, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.ModIntInt, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
+    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.ModIntInt64, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
+    // `nil?` is Blimp's null test; a non-null assertion is the value itself,
+    // because Temper has already proved it.
+    call(BuiltinOperatorId.IsNull, "nil?"),
+    BlimpOperatorSupportCode("not_null", BuiltinOperatorId.NotNull) { _, args -> args[0] },
+    // Temper's list constructor is variadic; Blimp has a list literal.
+    BlimpOperatorSupportCode("list", BuiltinOperatorId.Listify) { pos, args -> Blimp.ListLit(pos, items = args) },
+    // Both raise; Blimp's bubble is caught by try/catch, which is what
+    // BubbleBranchStrategy.Exceptions expects.
+    BlimpOperatorSupportCode("bubble", BuiltinOperatorId.Bubble) { pos, _ ->
+        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_bubble"))
+    },
+    BlimpOperatorSupportCode("panic", BuiltinOperatorId.Panic) { pos, _ ->
+        Blimp.BubbleStmt(pos, value = Blimp.Atom(pos, "temper_panic"))
+    },
+).associateBy { it.builtinOperatorId!! }

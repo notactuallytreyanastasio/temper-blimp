@@ -1184,8 +1184,8 @@ object Blimp {
         callee: Expr,
         args: Iterable<Expr> = listOf(),
     ) : BaseTree(pos), Expr {
-        override val operatorDefinition
-            get() = BlimpOperatorDefinition.Postfix
+        override val operatorDefinition: BlimpOperatorDefinition?
+            get() = null
         override val codeFormattingTemplate: CodeFormattingTemplate
             get() = sharedCodeFormattingTemplate24
         override val formatElementCount

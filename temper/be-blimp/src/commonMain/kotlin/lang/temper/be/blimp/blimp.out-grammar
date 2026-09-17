@@ -288,7 +288,10 @@ Comment.operatorDefinition = `null`;
 
 // ── Parenthesization ─────────────────────────────────────────────────────
 
-Call.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
+// Deliberately NOT Call.operatorDefinition: an operator definition applies to
+// every child, so marking a call as postfix parenthesizes its arguments too,
+// turning `puts(to_string(x))` into `puts((to_string(x)))`. Callees are always
+// plain names here, so nothing needs the parentheses.
 Member.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
 Name.operatorDefinition = `BlimpOperatorDefinition.Postfix`;
 Send.operatorDefinition = `BlimpOperatorDefinition.Send`;

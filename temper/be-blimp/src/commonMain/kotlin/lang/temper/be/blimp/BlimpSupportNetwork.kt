@@ -53,10 +53,8 @@ object BlimpSupportNetwork : SupportNetwork {
 
     override fun representationOfVoid(genre: Genre): RepresentationOfVoid = RepresentationOfVoid.ReifyVoid
 
-    // TODO Map builtin operators onto Blimp's operators and builtins. Until
-    //  then the translator falls back to the Temper implementations, which is
-    //  enough to get the first functional tests through the pipeline.
-    override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? = null
+    override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? =
+        builtin.builtinOperatorId?.let { blimpOperators[it] }
 
     override fun optionalSupportCode(
         optionalSupportCodeKind: OptionalSupportCodeKind,

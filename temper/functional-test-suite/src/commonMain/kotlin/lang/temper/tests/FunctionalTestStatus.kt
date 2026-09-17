@@ -35,7 +35,13 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
     // `blimp()` skips without claiming one.
     onlyPasses(
         blimp(),
+        Ft.AlgosFibonacci,
+        Ft.AlgosHelloFromClassToTop,
         Ft.AlgosHelloWorld,
+        Ft.ClassesPrivateMethod,
+        Ft.ImportsTypes,
+        Ft.SemanticsConstness,
+        Ft.SemanticsMutuallyReferencingTypes,
     )
     onlyPasses(
         cppv(198),
