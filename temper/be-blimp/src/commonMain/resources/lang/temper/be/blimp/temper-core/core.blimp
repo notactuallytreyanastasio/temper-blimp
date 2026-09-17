@@ -714,3 +714,127 @@ def temper_reduce_from_index(source: Any, init: Any, index: Int, f: Any) -> Any 
   reduce(temper_list_slice(items, index, length(items)), init, f)
 end
 
+# ── Maps ─────────────────────────────────────────────
+#
+# Blimp's own maps take string keys only, and Temper's take anything that is a
+# MapKey, so a map here is an actor holding a list of [key, value] entries.
+# Lookup is linear, which is honest rather than fast; a hashed version would
+# need a hash Blimp does not expose.
+
+actor TemperPair do
+  state k: Any :: nil
+  state v: Any :: nil
+  on :__temper_types do reply [:Pair] end
+  on :key do reply k end
+  on :value do reply v end
+  on :__new(key: Any, value: Any) do
+    k = key
+    v = value
+    become k: k, v: v
+    reply nil
+  end
+end
+
+def temper_new_pair(key: Any, value: Any) -> Any do
+  p = spawn TemperPair
+  p <- :__new(key, value)
+  p
+end
+
+actor TemperMap do
+  state entries: List :: []
+
+  on :__temper_types do reply [:Map, :MapBuilder, :Mapped] end
+  on :entries do reply entries end
+  on :length do reply length(entries) end
+  on :isEmpty do reply empty?(entries) end
+  on :keys do reply map(entries, fn(e: List) do elem(e, 0) end) end
+  on :values do reply map(entries, fn(e: List) do elem(e, 1) end) end
+  on :toList do reply map(entries, fn(e: List) do temper_new_pair(elem(e, 0), elem(e, 1)) end) end
+  on :has(key: Any) do reply temper_entry_index(entries, key) >= 0 end
+
+  on :get(key: Any) do
+    i = temper_entry_index(entries, key)
+    case i < 0 do
+      true -> bubble :no_such_key
+      _ -> reply elem(elem(entries, i), 1)
+    end
+  end
+
+  on :getOr(key: Any, fallback: Any) do
+    i = temper_entry_index(entries, key)
+    case i < 0 do
+      true -> reply fallback
+      _ -> reply elem(elem(entries, i), 1)
+    end
+  end
+
+  on :set(key: Any, value: Any) do
+    i = temper_entry_index(entries, key)
+    entries = case i < 0 do
+      true -> append(entries, [key, value])
+      _ -> set_at(entries, i, [key, value])
+    end
+    become entries: entries
+    reply nil
+  end
+
+  on :remove(key: Any) do
+    i = temper_entry_index(entries, key)
+    case i < 0 do
+      true -> bubble :no_such_key
+      _ ->
+        old = elem(elem(entries, i), 1)
+        before = temper_list_slice(entries, 0, i)
+        after = temper_list_slice(entries, i + 1, length(entries))
+        entries = before ++ after
+        become entries: entries
+        reply old
+    end
+  end
+
+  on :clear do
+    become entries: []
+    reply nil
+  end
+
+  on :forEach(body: Any) do
+    temper_for_each(entries, fn(e: List) do body(elem(e, 0), elem(e, 1)) end)
+    reply nil
+  end
+
+  on :copyFrom(other: Any) do
+    entries = other <- :entries
+    become entries: entries
+    reply nil
+  end
+end
+
+def temper_entry_index(entries: List, key: Any) -> Int do
+  temper_entry_index_loop(entries, key, 0)
+end
+
+def temper_entry_index_loop(entries: List, key: Any, i: Int) -> Int do
+  case i >= length(entries) do
+    true -> 0 - 1
+    _ -> case elem(elem(entries, i), 0) == key do
+      true -> i
+      _ -> temper_entry_index_loop(entries, key, i + 1)
+    end
+  end
+end
+
+def temper_new_map() -> Any do
+  spawn TemperMap
+end
+
+def temper_copy_map(source: Any) -> Any do
+  m = spawn TemperMap
+  m <- :copyFrom(source)
+  m
+end
+
+def temper_map_to_list_with(source: Any, f: Any) -> List do
+  map(source <- :entries, fn(e: List) do f(elem(e, 0), elem(e, 1)) end)
+end
+
