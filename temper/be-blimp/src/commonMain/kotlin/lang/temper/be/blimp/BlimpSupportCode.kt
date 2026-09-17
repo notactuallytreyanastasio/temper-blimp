@@ -18,6 +18,14 @@ internal const val TEMPER_STRING_END = "temper_string_end"
 internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
 internal const val TEMPER_IDENTITY = "temper_identity"
 
+/**
+ * Marks that the translated module needs temper-core spliced in.
+ *
+ * The backend emits the whole prelude when any helper is used, so the exact
+ * names matter only as a flag.
+ */
+internal val needsCore = setOf("temper_core")
+
 /** Comparison helpers, since Blimp's < and > are a type error on strings. */
 internal const val TEMPER_CMP = "temper_cmp"
 internal val strCmpHelpers = setOf(
@@ -114,6 +122,26 @@ internal object ConsoleLog : BlimpInlineSupportCode("core.type Console.log()") {
 internal const val PUTS = "puts"
 
 /**
+ * A `@connected` member that becomes a message send to the receiver.
+ *
+ * Temper's mutable ListBuilder has no counterpart in Blimp, where lists are
+ * immutable, so temper-core makes it an actor -- which is what the language is
+ * for -- and its methods are ordinary sends.
+ */
+internal class BlimpConnectedSend(
+    connectedKey: String,
+    private val message: String,
+) : BlimpInlineSupportCode(connectedKey) {
+    override val preludeHelpers: Set<String> get() = needsCore
+
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree = Blimp.Send(
+        pos,
+        target = args.first(),
+        message = Blimp.MessageCall(pos, name = Blimp.Atom(pos, message), args = args.drop(1)),
+    )
+}
+
+/**
  * A `@connected` member that becomes a call to a Blimp builtin or a
  * temper-core helper, with the receiver passed as the first argument.
  */
@@ -152,14 +180,14 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type String.toInt32()", "to_int"),
         // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
         // on both strings and lists.
-        BlimpConnectedCall("core.type Listed.get isEmpty()", "empty?"),
-        BlimpConnectedCall("core.type Listed.get length()", "length"),
-        BlimpConnectedCall("core.type Listed.get()", "elem"),
-        BlimpConnectedCall("core.type List.get length()", "length"),
-        BlimpConnectedCall("core.type List.get()", "elem"),
+        BlimpConnectedCall("core.type Listed.get isEmpty()", "temper_is_empty", needsCore),
+        BlimpConnectedCall("core.type Listed.get length()", "temper_len", needsCore),
+        BlimpConnectedCall("core.type Listed.get()", "temper_get", needsCore),
+        BlimpConnectedCall("core.type List.get length()", "temper_len", needsCore),
+        BlimpConnectedCall("core.type List.get()", "temper_get", needsCore),
         BlimpConnectedCall("core.type ListBuilder.get length()", "length"),
-        BlimpConnectedCall("core.type Listed.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
-        BlimpConnectedCall("core.type List.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type Listed.toList()", "temper_to_list", needsCore),
+        BlimpConnectedCall("core.type List.toList()", "temper_to_list", needsCore),
         // String. Its indices are byte offsets, which is what Blimp uses too.
         BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
         BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
@@ -171,16 +199,33 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode", utf8Helpers),
         // Blimp's slice takes a length; Temper's takes an exclusive end.
         BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
-        BlimpConnectedCall("core.type Listed.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        BlimpConnectedCall("core.type Listed.slice()", "temper_list_slice", needsCore),
         // map, reduce and sort are Blimp builtins with the same argument order;
         // filter, join and forEach are not, so temper-core supplies them.
-        BlimpConnectedCall("core.type Listed.map()", "map"),
-        BlimpConnectedCall("core.type Listed.sorted()", "sort"),
-        BlimpConnectedCall("core.type Listed.reduceFrom()", "reduce"),
+        BlimpConnectedCall("core.type Listed.map()", "temper_map", needsCore),
+        BlimpConnectedCall("core.type Listed.sorted()", "temper_sort", needsCore),
+        BlimpConnectedCall("core.type Listed.reduceFrom()", "temper_reduce", needsCore),
         BlimpConnectedCall("core.type Listed.filter()", "temper_filter", listHelpers),
         BlimpConnectedCall("core.type Listed.join()", "temper_join", listHelpers),
         BlimpConnectedCall("core.type Listed.forEach()", "temper_for_each", listHelpers),
         BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
+        // A ListBuilder is an actor, so its methods are sends.
+        BlimpConnectedCall("core.type ListBuilder.constructor()", "temper_new_list_builder", needsCore),
+        BlimpConnectedSend("core.type ListBuilder.add()", "add"),
+        BlimpConnectedSend("core.type ListBuilder.addAll()", "addAll"),
+        BlimpConnectedSend("core.type ListBuilder.set()", "set"),
+        BlimpConnectedSend("core.type ListBuilder.reverse()", "reverse"),
+        BlimpConnectedSend("core.type ListBuilder.clear()", "clear"),
+        BlimpConnectedSend("core.type ListBuilder.removeLast()", "removeLast"),
+        BlimpConnectedSend("core.type ListBuilder.sort()", "sort"),
+        BlimpConnectedSend("core.type ListBuilder.get length()", "length"),
+        BlimpConnectedSend("core.type ListBuilder.get()", "get"),
+        // Reading a builder back out, and sorting with a comparator, which
+        // Blimp's own sort does not take.
+        BlimpConnectedCall("core.type ListBuilder.toList()", "temper_to_list", needsCore),
+        BlimpConnectedCall("core.type ListBuilder.toListBuilder()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type Listed.toListBuilder()", "temper_new_list_builder_from", needsCore),
+        BlimpConnectedCall("core.type List.toListBuilder()", "temper_new_list_builder_from", needsCore),
     ).associateBy { it.connectedKey }
 
 /**
