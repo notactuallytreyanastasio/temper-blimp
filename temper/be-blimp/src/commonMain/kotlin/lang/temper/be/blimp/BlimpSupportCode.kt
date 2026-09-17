@@ -180,6 +180,20 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** temper-core bit operations, done arithmetically since Blimp has no bitwise operators. */
+internal const val TEMPER_BIT_AND = "temper_bit_and"
+internal const val TEMPER_BIT_OR = "temper_bit_or"
+internal const val TEMPER_BIT_XOR = "temper_bit_xor"
+internal const val TEMPER_BIT_NOT = "temper_bit_not"
+internal const val TEMPER_SHL32 = "temper_shl32"
+internal const val TEMPER_SHR32 = "temper_shr32"
+internal const val TEMPER_USHR32 = "temper_ushr32"
+
+/** Everything a bit operation leans on: the loop, the unsigned view and the wrap. */
+private val bitHelpers = setOf(
+    "temper_bitop", "temper_bitop_loop", "temper_u32", TEMPER_INT32, "temper_pow2",
+)
+
 /** temper-core helpers that raise from anywhere, including a plain `def` body. */
 internal const val TEMPER_BUBBLE = "temper_bubble"
 internal const val TEMPER_PANIC = "temper_panic"
@@ -243,6 +257,14 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
     // `++` concatenates strings.
     infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // Blimp has no bitwise operators; temper-core does these arithmetically.
+    call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
+    call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),
+    call(BuiltinOperatorId.BitwiseXor32, TEMPER_BIT_XOR, bitHelpers + TEMPER_BIT_XOR),
+    call(BuiltinOperatorId.BitwiseNegation32, TEMPER_BIT_NOT, setOf(TEMPER_BIT_NOT, TEMPER_INT32)),
+    call(BuiltinOperatorId.BitwiseShl32, TEMPER_SHL32, bitHelpers + TEMPER_SHL32),
+    call(BuiltinOperatorId.BitwiseShr32, TEMPER_SHR32, bitHelpers + TEMPER_SHR32),
+    call(BuiltinOperatorId.BitwiseShrUnsigned32, TEMPER_USHR32, bitHelpers + TEMPER_USHR32),
     // Generic comparisons fall back to Blimp's polymorphic operators.
     infix(BuiltinOperatorId.LtGeneric, BlimpOperator.LessThan),
     infix(BuiltinOperatorId.LeGeneric, BlimpOperator.LessEquals),

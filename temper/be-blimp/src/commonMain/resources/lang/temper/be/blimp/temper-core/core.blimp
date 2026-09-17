@@ -148,3 +148,71 @@ def temper_panic() -> Any do
     true -> bubble :temper_panic
   end
 end
+
+# ── Bit operations ───────────────────────────────────
+#
+# Blimp has no bitwise operators, so these do it arithmetically over the
+# unsigned 32-bit view and wrap the result back to signed.
+
+# Unsigned 32-bit view, so the bit loops only ever see non-negative numbers.
+def temper_u32(n: Int) -> Int do
+  m = rem(n, 4294967296)
+  case m < 0 do
+    true -> m + 4294967296
+    _ -> m
+  end
+end
+
+# One loop drives all three of and/or/xor; `which` picks the rule.
+def temper_bitop(which: Atom, a: Int, b: Int) -> Int do
+  temper_int32(temper_bitop_loop(which, temper_u32(a), temper_u32(b), 0, 1))
+end
+
+def temper_bitop_loop(which: Atom, a: Int, b: Int, acc: Int, place: Int) -> Int do
+  case a == 0 and b == 0 do
+    true -> acc
+    _ ->
+      x = rem(a, 2)
+      y = rem(b, 2)
+      bit = case which do
+        :and -> x * y
+        :or -> case x + y > 0 do
+          true -> 1
+          _ -> 0
+        end
+        _ -> rem(x + y, 2)
+      end
+      temper_bitop_loop(which, a / 2, b / 2, acc + (bit * place), place * 2)
+  end
+end
+
+def temper_bit_and(a: Int, b: Int) -> Int do temper_bitop(:and, a, b) end
+def temper_bit_or(a: Int, b: Int) -> Int do temper_bitop(:or, a, b) end
+def temper_bit_xor(a: Int, b: Int) -> Int do temper_bitop(:xor, a, b) end
+def temper_bit_not(a: Int) -> Int do temper_int32(0 - a - 1) end
+
+def temper_pow2(n: Int) -> Int do
+  case n <= 0 do
+    true -> 1
+    _ -> 2 * temper_pow2(n - 1)
+  end
+end
+
+def temper_shl32(a: Int, n: Int) -> Int do
+  temper_int32(a * temper_pow2(rem(n, 32)))
+end
+
+# Arithmetic shift right: Blimp's `/` truncates toward zero, so a negative
+# value needs the floor, which is what a shift means.
+def temper_shr32(a: Int, n: Int) -> Int do
+  d = temper_pow2(rem(n, 32))
+  q = a / d
+  case a < 0 and rem(a, d) != 0 do
+    true -> q - 1
+    _ -> q
+  end
+end
+
+def temper_ushr32(a: Int, n: Int) -> Int do
+  temper_int32(temper_u32(a) / temper_pow2(rem(n, 32)))
+end

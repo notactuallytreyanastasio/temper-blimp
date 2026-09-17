@@ -76,3 +76,33 @@ actor FailureTests do
     assert_eq(r, :caught)
   end
 end
+
+actor BitTests do
+  test "and" do
+    assert_eq(temper_bit_and(12, 10), 8)
+    assert_eq(temper_bit_and(0, 255), 0)
+    assert_eq(temper_bit_and(0 - 1, 255), 255)
+  end
+  test "or" do
+    assert_eq(temper_bit_or(12, 10), 14)
+    assert_eq(temper_bit_or(0, 0), 0)
+    assert_eq(temper_bit_or(0 - 1, 0), 0 - 1)
+  end
+  test "xor" do
+    assert_eq(temper_bit_xor(12, 10), 6)
+    assert_eq(temper_bit_xor(255, 255), 0)
+    assert_eq(temper_bit_xor(0 - 1, 0 - 1), 0)
+  end
+  test "not" do
+    assert_eq(temper_bit_not(0), 0 - 1)
+    assert_eq(temper_bit_not(12), 0 - 13)
+  end
+  test "shifts" do
+    assert_eq(temper_shl32(1, 4), 16)
+    assert_eq(temper_shl32(1, 31), 0 - 2147483648)
+    assert_eq(temper_shr32(16, 2), 4)
+    assert_eq(temper_shr32(0 - 16, 2), 0 - 4)
+    assert_eq(temper_shr32(0 - 1, 1), 0 - 1)
+    assert_eq(temper_ushr32(0 - 1, 28), 15)
+  end
+end
