@@ -141,6 +141,7 @@ internal class BlimpTranslator(
     private var hoisted = mutableListOf<Blimp.Statement>()
 
     fun translateModule(): Translated {
+        processImports()
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
@@ -162,6 +163,30 @@ internal class BlimpTranslator(
     private fun preludeCall(pos: lang.temper.log.Position, helper: String, args: List<Blimp.Expr>): Blimp.Expr {
         preludeHelpers.add(helper)
         return Blimp.Call(pos, callee = Blimp.Id(pos, lang.temper.name.OutName(helper, null)), args = args)
+    }
+
+    /**
+     * Binds each imported name to the exporting module's name.
+     *
+     * Blimp has one flat namespace and every module lands in the same file, so
+     * an import is an alias rather than a lookup. The exporting module is
+     * translated first, so its value is already bound by the time this runs.
+     */
+    private fun processImports() {
+        for (import in module.imports) {
+            val local = import.localName ?: continue
+            val localName = nameOf(local) ?: continue
+            val externalName = nameOf(import.externalName) ?: continue
+            if (localName == externalName) continue
+            moduleScope.add(localName)
+            mainStatements.add(
+                Blimp.Assign(
+                    import.pos,
+                    target = Blimp.Id(import.pos, names.outName(localName)),
+                    value = Blimp.Id(import.pos, names.outName(externalName)),
+                ),
+            )
+        }
     }
 
     // ── Top levels ───────────────────────────────────────────────────────

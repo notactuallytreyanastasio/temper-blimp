@@ -228,6 +228,8 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Listed.map()", "temper_map", needsCore),
         BlimpConnectedCall("core.type Listed.sorted()", "temper_sort", needsCore),
         BlimpConnectedCall("core.type Listed.reduceFrom()", "temper_reduce", needsCore),
+        BlimpConnectedCall("core.type Listed.reduce()", "temper_reduce1", needsCore),
+        BlimpConnectedCall("core.type Listed.reduceFromIndex()", "temper_reduce_from_index", needsCore),
         BlimpConnectedCall("core.type Listed.filter()", "temper_filter", listHelpers),
         BlimpConnectedCall("core.type Listed.join()", "temper_join", listHelpers),
         BlimpConnectedCall("core.type Listed.forEach()", "temper_for_each", listHelpers),

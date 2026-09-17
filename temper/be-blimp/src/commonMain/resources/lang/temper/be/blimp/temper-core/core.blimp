@@ -699,3 +699,18 @@ def temper_is_code_point(cp: Int) -> Bool do
   end
 end
 
+# Temper's reduce with no initial value folds from the first element, and
+# bubbles on an empty sequence because there is nothing to start from.
+def temper_reduce1(source: Any, f: Any) -> Any do
+  items = temper_items(source)
+  case empty?(items) do
+    true -> temper_bubble()
+    _ -> reduce(tail(items), head(items), f)
+  end
+end
+
+def temper_reduce_from_index(source: Any, init: Any, index: Int, f: Any) -> Any do
+  items = temper_items(source)
+  reduce(temper_list_slice(items, index, length(items)), init, f)
+end
+
