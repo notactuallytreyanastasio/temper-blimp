@@ -421,7 +421,10 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     prefix(BuiltinOperatorId.MinusInt64, BlimpOperator.Negate),
     // Blimp's `/` truncates toward zero on Int and `rem` matches its sign,
     // which is what Temper wants. There is no `%` operator.
-    infix(BuiltinOperatorId.DivIntIntSafe, BlimpOperator.Division),
+    // `-2147483648 / -1` is the one division whose result leaves Int32 range,
+    // so this wraps like every other Int32 operation. Int64 division below
+    // does not: there is no wider type to come back from.
+    wrapping(BuiltinOperatorId.DivIntIntSafe, BlimpOperator.Division),
     infix(BuiltinOperatorId.DivIntInt64Safe, BlimpOperator.Division),
     call(BuiltinOperatorId.ModIntIntSafe, "rem"),
     call(BuiltinOperatorId.ModIntInt64Safe, "rem"),
