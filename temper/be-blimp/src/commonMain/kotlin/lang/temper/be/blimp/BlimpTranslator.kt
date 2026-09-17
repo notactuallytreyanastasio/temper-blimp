@@ -209,6 +209,23 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
             is TmpL.SetProperty -> translateSetProperty(statement, out)
 
+            is TmpL.TryStatement -> translateTryStatement(statement, out)
+
+            // With BubbleBranchStrategy.Exceptions a throw carries no operand.
+            is TmpL.ThrowStatement -> {
+                preludeHelpers.add(TEMPER_BUBBLE)
+                out.add(
+                    Blimp.ExprStatement(
+                        statement.pos,
+                        Blimp.Call(
+                            statement.pos,
+                            callee = Blimp.Id(statement.pos, OutName(TEMPER_BUBBLE, null)),
+                            args = listOf(),
+                        ),
+                    ),
+                )
+            }
+
             // `break L` leaves the labelled block, which is a tail call to the
             // continuation holding whatever followed it.
             is TmpL.BreakStatement -> {
@@ -445,6 +462,11 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                 true
             }
             is TmpL.LabeledStatement -> translateLabeledBlock(split, continuation, out)
+            is TmpL.TryStatement -> {
+                translateReturningTry(split, continuation, out)
+                // Both arms end in an exit or in the continuation call.
+                true
+            }
             else -> TODO("early exit inside: $split")
         }
     }
@@ -638,6 +660,36 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                             body = Blimp.Block(pos, statements = alternate),
                         ),
                     ),
+                ),
+            ),
+        )
+    }
+
+    /**
+     * A `try` where at least one arm leaves the enclosing block.
+     *
+     * The try expression's value is the block's value, so an arm that returns
+     * supplies its value directly and one that falls through ends in the
+     * continuation call -- the same shape [translateReturningIf] uses.
+     */
+    private fun translateReturningTry(
+        statement: TmpL.TryStatement,
+        continuation: Continuation?,
+        out: MutableList<Blimp.Statement>,
+    ) {
+        val pos = statement.pos
+        if (statement.recover is TmpL.ThrowStatement) {
+            translateBody(listOf(statement.tried), out)
+            return
+        }
+        out.add(
+            Blimp.ExprStatement(
+                pos,
+                Blimp.TryCatch(
+                    pos,
+                    body = Blimp.Block(pos, statements = translateBranch(statement.tried, continuation, pos)),
+                    id = null,
+                    handler = Blimp.Block(pos, statements = translateBranch(statement.recover, continuation, pos)),
                 ),
             ),
         )
@@ -978,6 +1030,53 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                     value = elemOf(pos, resultId, index),
                 ),
             )
+        }
+    }
+
+    /**
+     * `try do ... catch do ... end`.
+     *
+     * Checked against the interpreter: an assignment in the *try* body escapes
+     * it, but one in the *catch* body does not. Rather than depend on that
+     * asymmetry, both arms hand their values out as the expression's value and
+     * the call site puts them back, the same shape `if` and loops use.
+     *
+     * A recover clause that is a bare rethrow is elided, as be-rust does.
+     */
+    private fun translateTryStatement(statement: TmpL.TryStatement, out: MutableList<Blimp.Statement>) {
+        val pos = statement.pos
+        if (statement.recover is TmpL.ThrowStatement) {
+            translateStatementInto(statement.tried, out)
+            return
+        }
+        val tried = mutableListOf<Blimp.Statement>()
+        translateStatementInto(statement.tried, tried)
+        val recover = mutableListOf<Blimp.Statement>()
+        translateStatementInto(statement.recover, recover)
+
+        val assigned = assignedEnclosingNames(statement)
+        val ids = assigned.map { Blimp.Id(pos, names.outName(it)) }
+        if (ids.isEmpty()) {
+            if (tried.isEmpty()) tried.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+            if (recover.isEmpty()) recover.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+        } else {
+            tried.add(Blimp.ExprStatement(pos, Blimp.ListLit(pos, items = ids.map { it.deepCopy() })))
+            recover.add(Blimp.ExprStatement(pos, Blimp.ListLit(pos, items = ids.map { it.deepCopy() })))
+        }
+        val tryCatch = Blimp.TryCatch(
+            pos,
+            body = Blimp.Block(pos, statements = tried),
+            id = null,
+            handler = Blimp.Block(pos, statements = recover),
+        )
+        if (ids.isEmpty()) {
+            out.add(Blimp.ExprStatement(pos, tryCatch))
+            return
+        }
+        val resultId = Blimp.Id(pos, names.gensym("recovered"))
+        out.add(Blimp.Assign(pos, target = resultId.deepCopy(), value = tryCatch))
+        ids.forEachIndexed { index, id ->
+            out.add(Blimp.Assign(pos, target = id.deepCopy(), value = elemOf(pos, resultId, index)))
         }
     }
 

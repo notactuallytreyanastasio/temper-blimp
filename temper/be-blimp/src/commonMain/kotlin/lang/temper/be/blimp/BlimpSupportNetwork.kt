@@ -57,6 +57,7 @@ object BlimpSupportNetwork : SupportNetwork {
         // A hole shares BuiltinOperatorId.Panic so untaught backends still get
         // correct behaviour, so match the name first to catch it here.
         builtin.name == "hole" -> Hole
+        builtin.name == PureVirtual.connectedKey -> PureVirtual
         else -> builtin.builtinOperatorId?.let { blimpOperators[it] }
     }
 
