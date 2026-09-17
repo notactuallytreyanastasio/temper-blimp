@@ -153,3 +153,26 @@ actor ListTests do
     assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
   end
 end
+
+actor MathTests do
+  test "cmp is -1, 0 or 1" do
+    assert_eq(temper_cmp(1, 2), 0 - 1)
+    assert_eq(temper_cmp(2, 1), 1)
+    assert_eq(temper_cmp(2, 2), 0)
+    assert_eq(temper_cmp("a", "b"), 0 - 1)
+    assert_eq(temper_cmp("b", "a"), 1)
+    assert_eq(temper_cmp("a", "a"), 0)
+    assert_eq(temper_cmp("a", "ab"), 0 - 1)
+    assert(temper_str_lt("apple", "banana"))
+    refute(temper_str_gt("a", "b"))
+  end
+  test "float remainder truncates toward zero" do
+    assert_eq(temper_fmod(7.0, 2.0), 1.0)
+    assert_eq(temper_fmod(0.0 - 7.0, 2.0), 0.0 - 1.0)
+  end
+  test "pow handles whole exponents both ways" do
+    assert_eq(temper_pow(2.0, 3.0), 8.0)
+    assert_eq(temper_pow(2.0, 0.0), 1.0)
+    assert_eq(temper_pow(2.0, 0.0 - 2.0), 0.25)
+  end
+end

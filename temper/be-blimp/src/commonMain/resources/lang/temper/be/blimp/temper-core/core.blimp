@@ -310,3 +310,80 @@ def temper_for_each(items: List, body: Any) -> Any do
   end
 end
 
+# ── Comparison and float maths ───────────────────────
+
+# Blimp cannot compare strings with < or >, so strings go byte by byte.
+def temper_str_cmp(a: String, b: String) -> Int do
+  temper_str_cmp_loop(a, b, 0)
+end
+
+def temper_str_cmp_loop(a: String, b: String, i: Int) -> Int do
+  case i >= length(a) do
+    true -> case i >= length(b) do
+      true -> 0
+      _ -> 0 - 1
+    end
+    _ -> case i >= length(b) do
+      true -> 1
+      _ ->
+        x = char_code(a, i)
+        y = char_code(b, i)
+        case x == y do
+          true -> temper_str_cmp_loop(a, b, i + 1)
+          _ -> case x < y do
+            true -> 0 - 1
+            _ -> 1
+          end
+        end
+    end
+  end
+end
+
+# Temper's `<=>` is -1, 0 or 1.
+def temper_cmp(a: Any, b: Any) -> Int do
+  case type_of(a) == :string do
+    true -> temper_str_cmp(a, b)
+    _ -> case a < b do
+      true -> 0 - 1
+      _ -> case a > b do
+        true -> 1
+        _ -> 0
+      end
+    end
+  end
+end
+
+def temper_str_lt(a: String, b: String) -> Bool do temper_str_cmp(a, b) < 0 end
+def temper_str_le(a: String, b: String) -> Bool do temper_str_cmp(a, b) <= 0 end
+def temper_str_gt(a: String, b: String) -> Bool do temper_str_cmp(a, b) > 0 end
+def temper_str_ge(a: String, b: String) -> Bool do temper_str_cmp(a, b) >= 0 end
+
+# Float remainder, truncated toward zero like Temper's.
+def temper_fmod(a: Float, b: Float) -> Float do
+  q = a / b
+  t = case q < 0.0 do
+    true -> 0.0 - floor(0.0 - q)
+    _ -> floor(q)
+  end
+  a - (b * t)
+end
+
+# Exponentiation by squaring. Only whole exponents; anything else bubbles,
+# because Blimp has no general pow to fall back on.
+def temper_pow(base: Float, exponent: Float) -> Float do
+  case exponent - floor(exponent) != 0.0 do
+    true -> temper_bubble()
+    _ -> case exponent < 0.0 do
+      true -> 1.0 / temper_pow_whole(base, 0.0 - exponent)
+      _ -> temper_pow_whole(base, exponent)
+    end
+  end
+end
+
+def temper_pow_whole(base: Float, exponent: Float) -> Float do
+  case exponent <= 0.0 do
+    true -> 1.0
+    _ -> base * temper_pow_whole(base, exponent - 1.0)
+  end
+end
+

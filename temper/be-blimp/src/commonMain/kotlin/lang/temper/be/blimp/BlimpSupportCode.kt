@@ -18,6 +18,14 @@ internal const val TEMPER_STRING_END = "temper_string_end"
 internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
 internal const val TEMPER_IDENTITY = "temper_identity"
 
+/** Comparison helpers, since Blimp's < and > are a type error on strings. */
+internal const val TEMPER_CMP = "temper_cmp"
+internal val strCmpHelpers = setOf(
+    "temper_str_cmp", "temper_str_cmp_loop",
+    "temper_str_lt", "temper_str_le", "temper_str_gt", "temper_str_ge",
+)
+internal val cmpHelpers = strCmpHelpers + TEMPER_CMP
+
 /** List operations Blimp lacks, plus the loops they run on. */
 internal val listHelpers = setOf(
     "temper_filter", "temper_filter_loop", "temper_join", "temper_join_loop", "temper_for_each",
@@ -302,13 +310,21 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.GeFltFlt, BlimpOperator.GreaterEquals),
     infix(BuiltinOperatorId.EqFltFlt, BlimpOperator.Equals),
     infix(BuiltinOperatorId.NeFltFlt, BlimpOperator.NotEquals),
-    infix(BuiltinOperatorId.LtStrStr, BlimpOperator.LessThan),
-    infix(BuiltinOperatorId.LeStrStr, BlimpOperator.LessEquals),
-    infix(BuiltinOperatorId.GtStrStr, BlimpOperator.GreaterThan),
-    infix(BuiltinOperatorId.GeStrStr, BlimpOperator.GreaterEquals),
+    // Blimp's < and > are a type error on strings, so these go through
+    // temper-core, which compares byte by byte.
+    call(BuiltinOperatorId.LtStrStr, "temper_str_lt", strCmpHelpers),
+    call(BuiltinOperatorId.LeStrStr, "temper_str_le", strCmpHelpers),
+    call(BuiltinOperatorId.GtStrStr, "temper_str_gt", strCmpHelpers),
+    call(BuiltinOperatorId.GeStrStr, "temper_str_ge", strCmpHelpers),
     infix(BuiltinOperatorId.EqStrStr, BlimpOperator.Equals),
     infix(BuiltinOperatorId.NeStrStr, BlimpOperator.NotEquals),
     infix(BuiltinOperatorId.EqGeneric, BlimpOperator.Equals),
+    call(BuiltinOperatorId.CmpIntInt, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpFltFlt, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpStrStr, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpGeneric, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.ModFltFlt, "temper_fmod", setOf("temper_fmod")),
+    call(BuiltinOperatorId.PowFltFlt, "temper_pow", setOf("temper_pow", "temper_pow_whole", TEMPER_BUBBLE)),
     infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
     // Boolean negation is `!`; `not` is a builtin function, not an operator.
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
