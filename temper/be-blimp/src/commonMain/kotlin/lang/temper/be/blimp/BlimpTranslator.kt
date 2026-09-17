@@ -557,7 +557,7 @@ internal class BlimpTranslator(
                 ),
             ),
         )
-        return cased
+        return bindIfCase(pos, cased, hoisted)
     }
 
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
@@ -798,6 +798,22 @@ internal class BlimpTranslator(
                 }
             }
         }
+    }
+
+    /**
+     * Binds [expr] to a name when it is a `case`, because Blimp only accepts
+     * one on the right-hand side of an assignment.
+     *
+     * Verified against the interpreter: `reply case c do ... end`,
+     * `f(case ...)`, `[case ...]`, `become s: case ...` and `"a" ++ case ...`
+     * are all parse errors, while `x = case ... end` is fine. So a `case` that
+     * is going to be used as a value has to be given a name first.
+     */
+    private fun bindIfCase(pos: Position, expr: Blimp.Expr, out: MutableList<Blimp.Statement>): Blimp.Expr {
+        if (expr !is Blimp.CaseExpr) return expr
+        val id = Blimp.Id(pos, names.gensym("cased"))
+        out.add(Blimp.Assign(pos, target = id.deepCopy(), value = expr))
+        return id
     }
 
     private fun elemOf(pos: Position, list: Blimp.Id, index: Int): Blimp.Expr = Blimp.Call(
@@ -1439,7 +1455,9 @@ internal class BlimpTranslator(
         val replyValue = when (val last = statements.lastOrNull()) {
             is Blimp.ExprStatement -> {
                 statements.removeAt(statements.lastIndex)
-                last.expr
+                // A `case` is a legal statement but not a legal reply value,
+                // and lowering an `if` that returns produces exactly that.
+                bindIfCase(pos, last.expr, statements)
             }
             else -> Blimp.NilLit(pos)
         }
