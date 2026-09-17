@@ -213,10 +213,13 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             // continuation holding whatever followed it.
             is TmpL.BreakStatement -> {
                 val label = statement.label?.id?.let { nameOf(it) }
-                val continuation = label?.let { labelContinuations[it] }
+                val registered = label?.let { labelContinuations[it] }
                 val loop = loops.lastOrNull()
                 when {
-                    continuation != null -> out.add(continuation.callFrom(statement.pos))
+                    registered != null && registered.second != loops.size ->
+                        TODO("break across a loop boundary: $statement")
+                    registered?.first != null -> out.add(registered.first!!.callFrom(statement.pos))
+                    registered != null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
                     // An unlabelled break leaves the innermost lowered loop.
                     label == null && loop != null -> out.add(loop.signal(statement.pos, LOOP_BREAK))
                     label != null -> TODO("break to a label that is not an enclosing block: $statement")
@@ -467,7 +470,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         out: MutableList<Blimp.Statement>,
     ): Boolean {
         val label = nameOf(labeled.label.id)
-        val previous = label?.let { labelContinuations.put(it, continuation) }
+        val previous = label?.let { labelContinuations.put(it, continuation to loops.size) }
         try {
             return when (val inner = labeled.statement) {
                 is TmpL.BlockStatement -> translateBody(inner.statements, out)
@@ -505,33 +508,33 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     /**
      * Whether this statement can leave the enclosing block.
      *
-     * A `break` or `continue` inside a nested loop belongs to that loop and is
-     * handled by its own lowering, so the walk stops at a loop boundary and
-     * only a `return` from inside one still counts as an escape.
+     * A loop captures its own unlabelled `break` and `continue`, so the walk
+     * treats those as handled once it is inside one. A *labelled* break still
+     * escapes: that is how the frontend spells "continue the outer loop".
      */
-    private fun TmpL.Statement.containsExit(): Boolean {
-        // A loop captures its own break and continue, wherever it sits.
-        if (this is TmpL.WhileStatement) return containsReturn()
-        var found = false
-        boundaryDescent { node ->
-            when {
-                found -> false
-                node is TmpL.WhileStatement -> {
-                    if (node.containsReturn()) found = true
-                    false
-                }
-                node is TmpL.ReturnStatement || node is TmpL.BreakStatement || node is TmpL.ContinueStatement -> {
-                    found = true
-                    false
-                }
-                else -> true
-            }
+    private fun TmpL.Statement.containsExit(): Boolean = findExit(insideLoop = this is TmpL.WhileStatement)
+
+    private fun TmpL.Tree.findExit(insideLoop: Boolean): Boolean {
+        when (this) {
+            is TmpL.ReturnStatement -> return true
+            is TmpL.BreakStatement -> if (!insideLoop || label != null) return true
+            is TmpL.ContinueStatement -> if (!insideLoop) return true
+            else -> {}
         }
-        return found
+        val nested = insideLoop || this is TmpL.WhileStatement
+        for (index in 0 until childCount) {
+            if (childOrNull(index)?.findExit(nested) == true) return true
+        }
+        return false
     }
 
-    /** Continuations for labelled blocks, so a `break L` knows where to go. */
-    private val labelContinuations = mutableMapOf<ResolvedName, Continuation?>()
+    /**
+     * Continuations for labelled blocks, so a `break L` knows where to go,
+     * paired with how many loops were open when the label was registered.
+     * A jump that crosses a loop boundary cannot just call the continuation --
+     * the loop it leaves still has to report that it finished.
+     */
+    private val labelContinuations = mutableMapOf<ResolvedName, Pair<Continuation?, Int>>()
 
     /** Enclosing lowered loops, innermost last, so `break` and `continue` know their target. */
     private val loops = ArrayDeque<LoopSignals>()
