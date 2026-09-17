@@ -295,6 +295,44 @@ object Blimp {
         }
     }
 
+    /**
+     * Raw Blimp source spliced in verbatim, used for the temper-core prelude.
+     *
+     * Blimp has no module system, so support code cannot be a separate file that
+     * the output imports -- it has to be part of the one emitted file. be-lua's
+     * `Connected` node does the same for raw Lua.
+     */
+    class Prelude(
+        pos: Position,
+        var source: String,
+    ) : BaseTree(pos), Item {
+        override val operatorDefinition: BlimpOperatorDefinition?
+            get() = null
+        override fun renderTo(
+            tokenSink: TokenSink,
+        ) {
+            tokenSink.value(source)
+        }
+        override val codeFormattingTemplate: CodeFormattingTemplate?
+            get() = null
+        override fun deepCopy(): Prelude {
+            return Prelude(pos, source = this.source)
+        }
+        override val childMemberRelationships
+            get() = cmr
+        override fun equals(
+            other: Any?,
+        ): Boolean {
+            return other is Prelude && this.source == other.source
+        }
+        override fun hashCode(): Int {
+            return source.hashCode()
+        }
+        companion object {
+            private val cmr = ChildMemberRelationships()
+        }
+    }
+
     sealed interface Expr : Tree {
         override fun deepCopy(): Expr
     }

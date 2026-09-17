@@ -8,7 +8,9 @@ import lang.temper.be.tmpl.TmpLTranslator
 import lang.temper.common.MimeType
 import lang.temper.frontend.Module
 import lang.temper.fs.ResourceDescriptor
+import lang.temper.fs.declareResources
 import lang.temper.log.FilePath
+import lang.temper.log.dirPath
 import lang.temper.log.filePath
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
@@ -59,15 +61,23 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
     override fun translate(finished: TmpL.ModuleSet): List<OutputFileSpecification> {
         val declarations = mutableListOf<Blimp.Item>()
         val mainStatements = mutableListOf<Blimp.Statement>()
+        val preludeHelpers = mutableSetOf<String>()
         for (module in finished.modules) {
             val translated = BlimpTranslator(module).translateModule()
             declarations.addAll(translated.declarations)
             mainStatements.addAll(translated.mainStatements)
+            preludeHelpers.addAll(translated.preludeHelpers)
+        }
+        // The prelude is spliced in rather than imported, because Blimp has no
+        // module system, and only when something actually called into it.
+        val prelude = when {
+            preludeHelpers.isEmpty() -> listOf()
+            else -> listOf(Blimp.Prelude(finished.pos, preludeResource.load()))
         }
         return listOf(
             TranslatedFileSpecification(
                 path = filePath(MAIN_FILE),
-                content = Blimp.SourceFile(finished.pos, items = declarations + mainStatements),
+                content = Blimp.SourceFile(finished.pos, items = prelude + declarations + mainStatements),
                 mimeType = mimeType,
             ),
         )
@@ -85,6 +95,13 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         const val MAIN_FILE = "main.blimp"
 
         val mimeType = MimeType("text", "blimp")
+
+        /** temper-core, written in Blimp, spliced into output that needs it. */
+        internal val preludeResource: ResourceDescriptor =
+            declareResources(
+                base = dirPath("lang", "temper", "be", "blimp", "temper-core"),
+                filePath("core.blimp"),
+            ).single()
 
         /**
          * <!-- snippet: backend/blimp/id -->
@@ -114,8 +131,14 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 ),
             )
 
-        // TODO A temper-core written in Blimp: UTF-8 aware strings, maps with
-        //  non-string keys, list helpers, and a raw `puts`.
+        /**
+         * Empty on purpose.
+         *
+         * This mechanism copies a runtime library beside the output, which
+         * only helps a target language that can import it. Blimp cannot, so
+         * temper-core is spliced into the emitted file as a [Blimp.Prelude]
+         * instead. See [preludeResource].
+         */
         override val coreLibraryResources: List<ResourceDescriptor> = listOf()
 
         override fun make(setup: BackendSetup<BlimpBackend>) = BlimpBackend(setup)

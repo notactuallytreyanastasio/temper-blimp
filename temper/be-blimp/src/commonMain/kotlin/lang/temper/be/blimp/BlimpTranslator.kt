@@ -46,6 +46,14 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     private val mainStatements = mutableListOf<Blimp.Statement>()
 
     /**
+     * temper-core helpers this module called, e.g. `temper_int32`.
+     *
+     * Blimp has no module system, so the backend splices the prelude source
+     * into the one output file, and only when something actually needs it.
+     */
+    private val preludeHelpers = mutableSetOf<String>()
+
+    /**
      * Statements hoisted out of the expression currently being translated.
      *
      * Blimp accepts `x = case ... end` but rejects `f(case ... end)`, so an
@@ -58,10 +66,25 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
-        return Translated(declarations = declarations.toList(), mainStatements = mainStatements.toList())
+        return Translated(
+            declarations = declarations.toList(),
+            mainStatements = mainStatements.toList(),
+            preludeHelpers = preludeHelpers.toSet(),
+        )
     }
 
-    data class Translated(val declarations: List<Blimp.Item>, val mainStatements: List<Blimp.Statement>)
+    data class Translated(
+        val declarations: List<Blimp.Item>,
+        val mainStatements: List<Blimp.Statement>,
+        val preludeHelpers: Set<String>,
+    )
+
+    /** Records that [helper] from temper-core is needed, and returns a call to it. */
+    @Suppress("unused") // Used as the expression translator grows past literals.
+    private fun preludeCall(pos: lang.temper.log.Position, helper: String, args: List<Blimp.Expr>): Blimp.Expr {
+        preludeHelpers.add(helper)
+        return Blimp.Call(pos, callee = Blimp.Id(pos, lang.temper.name.OutName(helper, null)), args = args)
+    }
 
     // ── Top levels ───────────────────────────────────────────────────────
 

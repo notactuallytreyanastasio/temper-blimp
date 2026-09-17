@@ -29,8 +29,20 @@ Item =
       ActorDecl
     | Comment
     | DefDecl
+    | Prelude
     | Statement
     ;
+
+/**
+ * Raw Blimp source spliced in verbatim, used for the temper-core prelude.
+ *
+ * Blimp has no module system, so support code cannot be a separate file that
+ * the output imports -- it has to be part of the one emitted file. be-lua's
+ * `Connected` node does the same for raw Lua.
+ */
+Prelude(source%`String`);
+Prelude.renderTo = `tokenSink.value(source)`;
+Prelude.operatorDefinition = `null`;
 
 // ── Declarations ─────────────────────────────────────────────────────────
 

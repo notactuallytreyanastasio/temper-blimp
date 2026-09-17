@@ -112,6 +112,7 @@ internal fun staticallyTypeds(vararg issues: Int): IssueCheck = { backendId ->
         else -> Disposition.Run
     }
 }
+internal val blimp = BackendId("blimp")
 internal val cpp = BackendId("cpp")
 internal val cppv = BackendId("cppv")
 internal val js = BackendId("js")
