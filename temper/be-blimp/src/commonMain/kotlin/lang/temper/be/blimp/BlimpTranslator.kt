@@ -251,6 +251,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         is TmpL.Reference -> idOf(expression.id)
         is TmpL.This -> Blimp.Id(expression.pos, OutName("self", null))
         is TmpL.GetProperty -> translateGetProperty(expression)
+        // Temper has already checked the type, and a Blimp actor dispatches on
+        // whatever it actually is, so a cast carries no runtime meaning.
+        is TmpL.CastExpression -> translateExpression(expression.expr)
+        is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
         else -> TODO("expression: $expression")
     }
 
@@ -278,6 +282,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
             // `obj <- :method(args)`. The receiver is on the callable, not in
             // parameters, which is exactly the shape a send wants.
+            // A static method has no receiver actor, so it is a plain call to
+            // the flat name the declaration emitted.
+            is TmpL.MethodReference if fn.subject is TmpL.TypeSubject -> Blimp.Call(
+                call.pos,
+                callee = Blimp.Id(
+                    call.pos,
+                    OutName(staticName(typeSubjectName(fn.subject as TmpL.TypeSubject), fn.methodName), null),
+                ),
+                args = call.parameters.map { translateActual(it) },
+            )
+
             is TmpL.MethodReference -> Blimp.Send(
                 call.pos,
                 target = translateSubject(fn.subject),
@@ -334,7 +349,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     // ── Declarations ─────────────────────────────────────────────────────
 
     /** A Temper function becomes a top-level `def`. */
-    private fun translateFunction(decl: TmpL.FunctionDeclarationOrMethod): Blimp.DefDecl {
+    private fun translateFunction(
+        decl: TmpL.FunctionDeclarationOrMethod,
+        nameOverride: String? = null,
+    ): Blimp.DefDecl {
         val params = decl.parameters.parameters.map { formal ->
             Blimp.Param(formal.pos, id = idOf(formal.name), type = anyType(formal.pos))
         }
@@ -348,7 +366,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         }
         return Blimp.DefDecl(
             decl.pos,
-            id = idOf(decl.name),
+            id = when (nameOverride) {
+                null -> idOf(decl.name)
+                else -> Blimp.Id(decl.pos, OutName(nameOverride, null))
+            },
             params = params,
             returnType = anyType(decl.pos),
             body = body,
@@ -571,9 +592,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
      * another actor with its own handlers.
      */
     private fun processTypeDeclaration(decl: TmpL.TypeDeclaration) {
+        if (decl.kind == TmpL.TypeDeclarationKind.Interface) {
+            // Blimp has no interface concept and does not need one: dispatch
+            // is a send, so an implementation only has to carry the handlers.
+            // A default method body comes along through `decl.inherited` on the
+            // concrete class.
+            return
+        }
         if (decl.kind != TmpL.TypeDeclarationKind.Class) {
             TODO("${decl.kind} declaration: ${decl.name}")
         }
+        val typePrefix = names.outName(nameOf(decl.name)!!).outputNameText
         val pos = decl.pos
         val properties = decl.members
             .filterIsInstance<TmpL.InstanceProperty>()
@@ -600,6 +629,18 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                     handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, CONSTRUCTOR_MESSAGE)))
                 is TmpL.NormalMethod ->
                     handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, messageAtom(member))))
+                // A static has no instance, so it cannot be a handler. It
+                // becomes a flat top-level name instead.
+                is TmpL.StaticMethod -> declarations.add(
+                    translateFunction(member, nameOverride = staticName(typePrefix, member.name)),
+                )
+                is TmpL.StaticProperty -> mainStatements.add(
+                    Blimp.Assign(
+                        member.pos,
+                        target = Blimp.Id(member.pos, OutName(staticName(typePrefix, member.name), null)),
+                        value = translateExpressionHoisting(member.expression, mainStatements),
+                    ),
+                )
                 is TmpL.Getter ->
                     handlers.add(
                         translateHandler(member, fieldNames, Blimp.Atom(member.pos, member.dotName.dotNameText)),
@@ -698,12 +739,13 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         return when (val subject = expression.subject) {
             // A field of the actor running this handler is in lexical scope.
             is TmpL.This -> Blimp.Id(pos, OutName(propertyName, null))
+            is TmpL.TypeSubject ->
+                Blimp.Id(pos, OutName(staticName(typeSubjectName(subject), propertyName), null))
             is TmpL.Expression -> Blimp.Send(
                 pos,
                 target = translateExpression(subject),
                 message = Blimp.Atom(pos, propertyName),
             )
-            else -> TODO("property subject: $subject")
         }
     }
 
@@ -749,6 +791,20 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     private fun translateSubject(subject: TmpL.Subject): Blimp.Expr = when (subject) {
         is TmpL.Expression -> translateExpression(subject)
         else -> TODO("call subject: $subject")
+    }
+
+    /** Statics are flattened to `Type__member`, since Blimp has one namespace. */
+    private fun staticName(typePrefix: String, member: String): String = "${typePrefix}__$member"
+
+    private fun staticName(typePrefix: String, member: TmpL.Id): String =
+        staticName(typePrefix, nameOf(member)?.let { names.outName(it).outputNameText } ?: "$member")
+
+    private fun staticName(typePrefix: String, member: TmpL.DotName): String =
+        staticName(typePrefix, member.dotNameText)
+
+    private fun typeSubjectName(subject: TmpL.TypeSubject): String = when (subject) {
+        is TmpL.TypeName -> subject.toString()
+        else -> TODO("type subject: $subject")
     }
 
     private fun typeNameOf(typeName: TmpL.TypeName): Blimp.Name =
