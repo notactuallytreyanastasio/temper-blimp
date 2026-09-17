@@ -12,6 +12,30 @@ import lang.temper.type2.Type2
 import lang.temper.value.BuiltinOperatorId
 import lang.temper.value.pureVirtualBuiltinName
 
+/** temper-core shims over Blimp builtins whose shape differs from Temper's. */
+internal const val TEMPER_SLICE = "temper_slice"
+internal const val TEMPER_STRING_END = "temper_string_end"
+internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
+internal const val TEMPER_IDENTITY = "temper_identity"
+
+/** Comparison helpers, since Blimp's < and > are a type error on strings. */
+internal const val TEMPER_CMP = "temper_cmp"
+internal val strCmpHelpers = setOf(
+    "temper_str_cmp", "temper_str_cmp_loop",
+    "temper_str_lt", "temper_str_le", "temper_str_gt", "temper_str_ge",
+)
+internal val cmpHelpers = strCmpHelpers + TEMPER_CMP
+
+/** List operations Blimp lacks, plus the loops they run on. */
+internal val listHelpers = setOf(
+    "temper_filter", "temper_filter_loop", "temper_join", "temper_join_loop", "temper_for_each",
+)
+
+/** The UTF-8 layer, which the code-point string operations all lean on. */
+internal val utf8Helpers = setOf(
+    "temper_string_code_point_at", "temper_string_next", "u8_encode", "u8_decode_at", "u8_seq_len",
+)
+
 /**
  * Support code that becomes Blimp syntax at the call site.
  *
@@ -121,6 +145,42 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             TEMPER_FLOAT_TO_STRING,
             preludeHelpers = setOf(TEMPER_FLOAT_TO_STRING),
         ),
+        // Int
+        BlimpConnectedCall("core.type Int32.min()", "min"),
+        BlimpConnectedCall("core.type Int32.max()", "max"),
+        BlimpConnectedCall("core.type Int32.toInt64()", "to_int"),
+        BlimpConnectedCall("core.type String.toInt32()", "to_int"),
+        // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
+        // on both strings and lists.
+        BlimpConnectedCall("core.type Listed.get isEmpty()", "empty?"),
+        BlimpConnectedCall("core.type Listed.get length()", "length"),
+        BlimpConnectedCall("core.type Listed.get()", "elem"),
+        BlimpConnectedCall("core.type List.get length()", "length"),
+        BlimpConnectedCall("core.type List.get()", "elem"),
+        BlimpConnectedCall("core.type ListBuilder.get length()", "length"),
+        BlimpConnectedCall("core.type Listed.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type List.toList()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        // String. Its indices are byte offsets, which is what Blimp uses too.
+        BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
+        BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        BlimpConnectedCall("core.type String.split()", "split"),
+        BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
+        BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
+        BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
+        BlimpConnectedCall("core.type String.next()", "temper_string_next", utf8Helpers),
+        BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode", utf8Helpers),
+        // Blimp's slice takes a length; Temper's takes an exclusive end.
+        BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        BlimpConnectedCall("core.type Listed.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        // map, reduce and sort are Blimp builtins with the same argument order;
+        // filter, join and forEach are not, so temper-core supplies them.
+        BlimpConnectedCall("core.type Listed.map()", "map"),
+        BlimpConnectedCall("core.type Listed.sorted()", "sort"),
+        BlimpConnectedCall("core.type Listed.reduceFrom()", "reduce"),
+        BlimpConnectedCall("core.type Listed.filter()", "temper_filter", listHelpers),
+        BlimpConnectedCall("core.type Listed.join()", "temper_join", listHelpers),
+        BlimpConnectedCall("core.type Listed.forEach()", "temper_for_each", listHelpers),
+        BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
     ).associateBy { it.connectedKey }
 
 /**
@@ -180,6 +240,25 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** temper-core's runtime type test, and the handler every translated actor carries. */
+internal const val TEMPER_IS_A = "temper_is_a"
+internal const val TYPES_MESSAGE = "__temper_types"
+internal val isATypeHelpers = setOf(TEMPER_IS_A, "temper_list_has")
+
+/** temper-core bit operations, done arithmetically since Blimp has no bitwise operators. */
+internal const val TEMPER_BIT_AND = "temper_bit_and"
+internal const val TEMPER_BIT_OR = "temper_bit_or"
+internal const val TEMPER_BIT_XOR = "temper_bit_xor"
+internal const val TEMPER_BIT_NOT = "temper_bit_not"
+internal const val TEMPER_SHL32 = "temper_shl32"
+internal const val TEMPER_SHR32 = "temper_shr32"
+internal const val TEMPER_USHR32 = "temper_ushr32"
+
+/** Everything a bit operation leans on: the loop, the unsigned view and the wrap. */
+private val bitHelpers = setOf(
+    "temper_bitop", "temper_bitop_loop", "temper_u32", TEMPER_INT32, "temper_pow2",
+)
+
 /** temper-core helpers that raise from anywhere, including a plain `def` body. */
 internal const val TEMPER_BUBBLE = "temper_bubble"
 internal const val TEMPER_PANIC = "temper_panic"
@@ -231,18 +310,34 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.GeFltFlt, BlimpOperator.GreaterEquals),
     infix(BuiltinOperatorId.EqFltFlt, BlimpOperator.Equals),
     infix(BuiltinOperatorId.NeFltFlt, BlimpOperator.NotEquals),
-    infix(BuiltinOperatorId.LtStrStr, BlimpOperator.LessThan),
-    infix(BuiltinOperatorId.LeStrStr, BlimpOperator.LessEquals),
-    infix(BuiltinOperatorId.GtStrStr, BlimpOperator.GreaterThan),
-    infix(BuiltinOperatorId.GeStrStr, BlimpOperator.GreaterEquals),
+    // Blimp's < and > are a type error on strings, so these go through
+    // temper-core, which compares byte by byte.
+    call(BuiltinOperatorId.LtStrStr, "temper_str_lt", strCmpHelpers),
+    call(BuiltinOperatorId.LeStrStr, "temper_str_le", strCmpHelpers),
+    call(BuiltinOperatorId.GtStrStr, "temper_str_gt", strCmpHelpers),
+    call(BuiltinOperatorId.GeStrStr, "temper_str_ge", strCmpHelpers),
     infix(BuiltinOperatorId.EqStrStr, BlimpOperator.Equals),
     infix(BuiltinOperatorId.NeStrStr, BlimpOperator.NotEquals),
     infix(BuiltinOperatorId.EqGeneric, BlimpOperator.Equals),
+    call(BuiltinOperatorId.CmpIntInt, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpFltFlt, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpStrStr, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.CmpGeneric, TEMPER_CMP, cmpHelpers),
+    call(BuiltinOperatorId.ModFltFlt, "temper_fmod", setOf("temper_fmod")),
+    call(BuiltinOperatorId.PowFltFlt, "temper_pow", setOf("temper_pow", "temper_pow_whole", TEMPER_BUBBLE)),
     infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
     // Boolean negation is `!`; `not` is a builtin function, not an operator.
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
     // `++` concatenates strings.
     infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // Blimp has no bitwise operators; temper-core does these arithmetically.
+    call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
+    call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),
+    call(BuiltinOperatorId.BitwiseXor32, TEMPER_BIT_XOR, bitHelpers + TEMPER_BIT_XOR),
+    call(BuiltinOperatorId.BitwiseNegation32, TEMPER_BIT_NOT, setOf(TEMPER_BIT_NOT, TEMPER_INT32)),
+    call(BuiltinOperatorId.BitwiseShl32, TEMPER_SHL32, bitHelpers + TEMPER_SHL32),
+    call(BuiltinOperatorId.BitwiseShr32, TEMPER_SHR32, bitHelpers + TEMPER_SHR32),
+    call(BuiltinOperatorId.BitwiseShrUnsigned32, TEMPER_USHR32, bitHelpers + TEMPER_USHR32),
     // Generic comparisons fall back to Blimp's polymorphic operators.
     infix(BuiltinOperatorId.LtGeneric, BlimpOperator.LessThan),
     infix(BuiltinOperatorId.LeGeneric, BlimpOperator.LessEquals),

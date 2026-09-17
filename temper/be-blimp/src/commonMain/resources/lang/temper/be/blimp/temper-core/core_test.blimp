@@ -76,3 +76,103 @@ actor FailureTests do
     assert_eq(r, :caught)
   end
 end
+
+actor BitTests do
+  test "and" do
+    assert_eq(temper_bit_and(12, 10), 8)
+    assert_eq(temper_bit_and(0, 255), 0)
+    assert_eq(temper_bit_and(0 - 1, 255), 255)
+  end
+  test "or" do
+    assert_eq(temper_bit_or(12, 10), 14)
+    assert_eq(temper_bit_or(0, 0), 0)
+    assert_eq(temper_bit_or(0 - 1, 0), 0 - 1)
+  end
+  test "xor" do
+    assert_eq(temper_bit_xor(12, 10), 6)
+    assert_eq(temper_bit_xor(255, 255), 0)
+    assert_eq(temper_bit_xor(0 - 1, 0 - 1), 0)
+  end
+  test "not" do
+    assert_eq(temper_bit_not(0), 0 - 1)
+    assert_eq(temper_bit_not(12), 0 - 13)
+  end
+  test "shifts" do
+    assert_eq(temper_shl32(1, 4), 16)
+    assert_eq(temper_shl32(1, 31), 0 - 2147483648)
+    assert_eq(temper_shr32(16, 2), 4)
+    assert_eq(temper_shr32(0 - 16, 2), 0 - 4)
+    assert_eq(temper_shr32(0 - 1, 1), 0 - 1)
+    assert_eq(temper_ushr32(0 - 1, 28), 15)
+  end
+end
+
+actor Square do
+  on :__temper_types do reply [:Square, :Shape] end
+end
+
+actor TypeTests do
+  test "an actor answers for itself and its supertypes" do
+    s = spawn Square
+    assert(temper_is_a(s, :Square))
+    assert(temper_is_a(s, :Shape))
+    refute(temper_is_a(s, :Circle))
+  end
+  test "primitives answer from type_of" do
+    assert(temper_is_a("x", :string))
+    refute(temper_is_a(1, :string))
+    assert(temper_is_a(1, :integer))
+    assert(temper_is_a(1.5, :float))
+    assert(temper_is_a(nil, :nil))
+    assert(temper_is_a([1], :list))
+  end
+end
+
+actor ShimTests do
+  test "slice end is exclusive" do
+    assert_eq(temper_slice("hello", 1, 3), "el")
+    assert_eq(temper_slice("hello", 0, 5), "hello")
+    assert_eq(temper_slice("hello", 2, 2), "")
+  end
+  test "string end and hasIndex" do
+    assert_eq(temper_string_end("abc"), 3)
+    assert(temper_string_has_index("abc", 0))
+    assert(temper_string_has_index("abc", 2))
+    refute(temper_string_has_index("abc", 3))
+  end
+end
+
+actor ListTests do
+  test "filter keeps what the predicate accepts" do
+    assert_eq(temper_filter([1, 2, 3], fn(x: Int) do x > 1 end), [2, 3])
+    assert_eq(temper_filter([1, 2, 3], fn(x: Int) do false end), [])
+  end
+  test "join separates, with nothing trailing" do
+    assert_eq(temper_join([1, 2, 3], ",", fn(x: Int) do to_string(x) end), "1,2,3")
+    assert_eq(temper_join([1], ",", fn(x: Int) do to_string(x) end), "1")
+    assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
+  end
+end
+
+actor MathTests do
+  test "cmp is -1, 0 or 1" do
+    assert_eq(temper_cmp(1, 2), 0 - 1)
+    assert_eq(temper_cmp(2, 1), 1)
+    assert_eq(temper_cmp(2, 2), 0)
+    assert_eq(temper_cmp("a", "b"), 0 - 1)
+    assert_eq(temper_cmp("b", "a"), 1)
+    assert_eq(temper_cmp("a", "a"), 0)
+    assert_eq(temper_cmp("a", "ab"), 0 - 1)
+    assert(temper_str_lt("apple", "banana"))
+    refute(temper_str_gt("a", "b"))
+  end
+  test "float remainder truncates toward zero" do
+    assert_eq(temper_fmod(7.0, 2.0), 1.0)
+    assert_eq(temper_fmod(0.0 - 7.0, 2.0), 0.0 - 1.0)
+  end
+  test "pow handles whole exponents both ways" do
+    assert_eq(temper_pow(2.0, 3.0), 8.0)
+    assert_eq(temper_pow(2.0, 0.0), 1.0)
+    assert_eq(temper_pow(2.0, 0.0 - 2.0), 0.25)
+  end
+end

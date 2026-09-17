@@ -46,9 +46,13 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.FunctionsConstructorCallbacks,
         Ft.FunctionsSimpleLocals,
         Ft.ImportsTypes,
+        Ft.RegressionMinimalRepro,
         Ft.SemanticsConstness,
         Ft.SemanticsMutuallyReferencingTypes,
         Ft.SemanticsTypeCheckedLocals,
+        Ft.TypesIntBasics,
+        Ft.TypesListEmpty,
+        Ft.TypesStringIsEmpty,
     )
     onlyPasses(
         cppv(198),

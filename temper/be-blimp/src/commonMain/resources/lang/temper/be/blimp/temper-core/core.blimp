@@ -148,3 +148,242 @@ def temper_panic() -> Any do
     true -> bubble :temper_panic
   end
 end
+
+# ── Bit operations ───────────────────────────────────
+#
+# Blimp has no bitwise operators, so these do it arithmetically over the
+# unsigned 32-bit view and wrap the result back to signed.
+
+# Unsigned 32-bit view, so the bit loops only ever see non-negative numbers.
+def temper_u32(n: Int) -> Int do
+  m = rem(n, 4294967296)
+  case m < 0 do
+    true -> m + 4294967296
+    _ -> m
+  end
+end
+
+# One loop drives all three of and/or/xor; `which` picks the rule.
+def temper_bitop(which: Atom, a: Int, b: Int) -> Int do
+  temper_int32(temper_bitop_loop(which, temper_u32(a), temper_u32(b), 0, 1))
+end
+
+def temper_bitop_loop(which: Atom, a: Int, b: Int, acc: Int, place: Int) -> Int do
+  case a == 0 and b == 0 do
+    true -> acc
+    _ ->
+      x = rem(a, 2)
+      y = rem(b, 2)
+      bit = case which do
+        :and -> x * y
+        :or -> case x + y > 0 do
+          true -> 1
+          _ -> 0
+        end
+        _ -> rem(x + y, 2)
+      end
+      temper_bitop_loop(which, a / 2, b / 2, acc + (bit * place), place * 2)
+  end
+end
+
+def temper_bit_and(a: Int, b: Int) -> Int do temper_bitop(:and, a, b) end
+def temper_bit_or(a: Int, b: Int) -> Int do temper_bitop(:or, a, b) end
+def temper_bit_xor(a: Int, b: Int) -> Int do temper_bitop(:xor, a, b) end
+def temper_bit_not(a: Int) -> Int do temper_int32(0 - a - 1) end
+
+def temper_pow2(n: Int) -> Int do
+  case n <= 0 do
+    true -> 1
+    _ -> 2 * temper_pow2(n - 1)
+  end
+end
+
+def temper_shl32(a: Int, n: Int) -> Int do
+  temper_int32(a * temper_pow2(rem(n, 32)))
+end
+
+# Arithmetic shift right: Blimp's `/` truncates toward zero, so a negative
+# value needs the floor, which is what a shift means.
+def temper_shr32(a: Int, n: Int) -> Int do
+  d = temper_pow2(rem(n, 32))
+  q = a / d
+  case a < 0 and rem(a, d) != 0 do
+    true -> q - 1
+    _ -> q
+  end
+end
+
+def temper_ushr32(a: Int, n: Int) -> Int do
+  temper_int32(temper_u32(a) / temper_pow2(rem(n, 32)))
+end
+
+# ── Runtime type tests ───────────────────────────────
+
+def temper_list_has(items: List, target: Any) -> Bool do
+  case empty?(items) do
+    true -> false
+    _ -> case head(items) == target do
+      true -> true
+      _ -> temper_list_has(tail(items), target)
+    end
+  end
+end
+
+# Temper's `instanceof`. A primitive answers from type_of; an actor answers
+# from the :__temper_types list every translated class carries, which names the
+# class and its supertypes so a subtype test works.
+def temper_is_a(value: Any, tag: Atom) -> Bool do
+  t = type_of(value)
+  case t == :actor_ref do
+    true -> temper_list_has(value <- :__temper_types, tag)
+    _ -> t == tag
+  end
+end
+
+# ── Core API shims ───────────────────────────────────
+
+# Blimp's slice takes a LENGTH, not an end index: slice("hello", 0, 4) is
+# "hell". Temper's second argument is an exclusive end.
+def temper_slice(s: Any, start: Int, stop: Int) -> Any do
+  case stop <= start do
+    true -> ""
+    _ -> slice(s, start, stop - start)
+  end
+end
+
+# Temper's String indices are byte offsets, and `end` is one past the last.
+def temper_string_end(s: String) -> Int do
+  length(s)
+end
+
+def temper_string_has_index(s: String, i: Int) -> Bool do
+  i >= 0 and i < length(s)
+end
+
+# Some Temper conversions are no-ops in Blimp.
+def temper_identity(x: Any) -> Any do
+  x
+end
+
+# ── List operations ──────────────────────────────────
+#
+# Blimp has map, reduce and sort but no filter or join, and its `reduce` takes
+# the initial value, so reduceFrom lines up with it directly.
+
+def temper_filter(items: List, keep: Any) -> List do
+  temper_filter_loop(items, keep, [])
+end
+
+def temper_filter_loop(items: List, keep: Any, acc: List) -> List do
+  case empty?(items) do
+    true -> acc
+    _ ->
+      x = head(items)
+      acc2 = case keep(x) do
+        true -> append(acc, x)
+        _ -> acc
+      end
+      temper_filter_loop(tail(items), keep, acc2)
+  end
+end
+
+def temper_join(items: List, sep: String, show: Any) -> String do
+  case empty?(items) do
+    true -> ""
+    _ -> temper_join_loop(tail(items), sep, show, show(head(items)))
+  end
+end
+
+def temper_join_loop(items: List, sep: String, show: Any, acc: String) -> String do
+  case empty?(items) do
+    true -> acc
+    _ -> temper_join_loop(tail(items), sep, show, concat(acc, concat(sep, show(head(items)))))
+  end
+end
+
+def temper_for_each(items: List, body: Any) -> Any do
+  case empty?(items) do
+    true -> nil
+    _ ->
+      body(head(items))
+      temper_for_each(tail(items), body)
+  end
+end
+
+# ── Comparison and float maths ───────────────────────
+
+# Blimp cannot compare strings with < or >, so strings go byte by byte.
+def temper_str_cmp(a: String, b: String) -> Int do
+  temper_str_cmp_loop(a, b, 0)
+end
+
+def temper_str_cmp_loop(a: String, b: String, i: Int) -> Int do
+  case i >= length(a) do
+    true -> case i >= length(b) do
+      true -> 0
+      _ -> 0 - 1
+    end
+    _ -> case i >= length(b) do
+      true -> 1
+      _ ->
+        x = char_code(a, i)
+        y = char_code(b, i)
+        case x == y do
+          true -> temper_str_cmp_loop(a, b, i + 1)
+          _ -> case x < y do
+            true -> 0 - 1
+            _ -> 1
+          end
+        end
+    end
+  end
+end
+
+# Temper's `<=>` is -1, 0 or 1.
+def temper_cmp(a: Any, b: Any) -> Int do
+  case type_of(a) == :string do
+    true -> temper_str_cmp(a, b)
+    _ -> case a < b do
+      true -> 0 - 1
+      _ -> case a > b do
+        true -> 1
+        _ -> 0
+      end
+    end
+  end
+end
+
+def temper_str_lt(a: String, b: String) -> Bool do temper_str_cmp(a, b) < 0 end
+def temper_str_le(a: String, b: String) -> Bool do temper_str_cmp(a, b) <= 0 end
+def temper_str_gt(a: String, b: String) -> Bool do temper_str_cmp(a, b) > 0 end
+def temper_str_ge(a: String, b: String) -> Bool do temper_str_cmp(a, b) >= 0 end
+
+# Float remainder, truncated toward zero like Temper's.
+def temper_fmod(a: Float, b: Float) -> Float do
+  q = a / b
+  t = case q < 0.0 do
+    true -> 0.0 - floor(0.0 - q)
+    _ -> floor(q)
+  end
+  a - (b * t)
+end
+
+# Exponentiation by squaring. Only whole exponents; anything else bubbles,
+# because Blimp has no general pow to fall back on.
+def temper_pow(base: Float, exponent: Float) -> Float do
+  case exponent - floor(exponent) != 0.0 do
+    true -> temper_bubble()
+    _ -> case exponent < 0.0 do
+      true -> 1.0 / temper_pow_whole(base, 0.0 - exponent)
+      _ -> temper_pow_whole(base, exponent)
+    end
+  end
+end
+
+def temper_pow_whole(base: Float, exponent: Float) -> Float do
+  case exponent <= 0.0 do
+    true -> 1.0
+    _ -> base * temper_pow_whole(base, exponent - 1.0)
+  end
+end
+
