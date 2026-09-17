@@ -562,13 +562,23 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         args = listOf(list.deepCopy(), Blimp.NumberLit(pos, index)),
     )
 
-    private fun TmpL.Statement.containsReturn(): Boolean {
-        var found = false
-        boundaryDescent { node ->
-            if (node is TmpL.ReturnStatement) found = true
-            !found
+    /**
+     * Whether a `return` inside this statement belongs to the enclosing
+     * function. A nested function's returns are its own, so the walk stops
+     * there, the same way [findExit] does.
+     */
+    private fun TmpL.Statement.containsReturn(): Boolean = findReturn()
+
+    private fun TmpL.Tree.findReturn(): Boolean {
+        when (this) {
+            is TmpL.LocalFunctionDeclaration -> return false
+            is TmpL.ReturnStatement -> return true
+            else -> {}
         }
-        return found
+        for (index in 0 until childCount) {
+            if (childOrNull(index)?.findReturn() == true) return true
+        }
+        return false
     }
 
     /** Statements that end a path: the continuation picks up from here. */
