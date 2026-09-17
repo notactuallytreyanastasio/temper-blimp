@@ -1,3 +1,15 @@
+# True when the thunk bubbles. A `try` is a statement, so its value has to be
+# carried out in a list the way translated code does it.
+def temper_bubbles(f: Any) -> Bool do
+  r = try do
+    f()
+    [false]
+  catch do
+    [true]
+  end
+  elem(r, 0)
+end
+
 actor CoreTests do
   test "int32 wraps positive overflow" do
     assert_eq(temper_int32(2147483647 + 1), 0 - 2147483648)
@@ -117,6 +129,29 @@ actor TypeTests do
     assert(temper_is_a(s, :Square))
     assert(temper_is_a(s, :Shape))
     refute(temper_is_a(s, :Circle))
+  end
+  test "radix parsing at the Int64 boundaries" do
+    assert_eq(temper_parse_int64("7FFFFFFFFFFFFFFF", 16), 9223372036854775807)
+    assert_eq(temper_parse_int64("-8000000000000000", 16), 0 - 9223372036854775807 - 1)
+    assert_eq(temper_parse_int64("ff", 16), 255)
+    assert_eq(temper_parse_int64("-101", 2), 0 - 5)
+    assert_eq(temper_parse_int64("0", 10), 0)
+  end
+  test "a value that does not fit in Int64 bubbles" do
+    assert(temper_bubbles(fn() do temper_parse_int64("8000000000000000", 16) end))
+    assert(temper_bubbles(fn() do temper_parse_int64("-8000000000000001", 16) end))
+  end
+  test "text that is not a number bubbles" do
+    assert(temper_bubbles(fn() do temper_parse_int64("", 10) end))
+    assert(temper_bubbles(fn() do temper_parse_int64("-", 10) end))
+    assert(temper_bubbles(fn() do temper_parse_int64("12x", 10) end))
+    assert(temper_bubbles(fn() do temper_parse_int64("9", 8) end))
+  end
+  test "radix parsing at the Int32 boundaries" do
+    assert_eq(temper_parse_int32("7FFFFFFF", 16), 2147483647)
+    assert_eq(temper_parse_int32("-80000000", 16), 0 - 2147483648)
+    assert(temper_bubbles(fn() do temper_parse_int32("80000000", 16) end))
+    assert(temper_bubbles(fn() do temper_parse_int32("-80000001", 16) end))
   end
   test "a string index is an Int that is not negative" do
     assert(temper_is_a(0, :StringIndex))
