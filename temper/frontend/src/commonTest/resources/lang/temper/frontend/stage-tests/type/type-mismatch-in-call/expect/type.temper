@@ -1,0 +1,19 @@
+  let return__5;
+  return__5 = void;
+  let console#3;
+  console#3 = doPure(@stay fn /* return__6 */: Console {
+      return__6 = getConsole();
+  });
+  @fn let i__0;
+  i__0 = (@stay fn i(x__1 /* aka x */: Int32) /* return__7 */{
+      fn__2: do {
+        return__7 = x__1
+      };
+  });
+  orelse#4: {
+## We don't inline the below which has a type error even though its
+## body's semantics would result in "0" if x could be bound.
+    (fn i)("0")
+  } orelse {
+    do_call_log(console#3, "bad")
+  }

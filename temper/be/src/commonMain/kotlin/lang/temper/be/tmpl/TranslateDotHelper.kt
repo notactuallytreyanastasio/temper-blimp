@@ -1,0 +1,552 @@
+package lang.temper.be.tmpl
+
+import lang.temper.common.Either
+import lang.temper.common.subListToEnd
+import lang.temper.log.Position
+import lang.temper.name.ResolvedName
+import lang.temper.type.CallMemberAccessor
+import lang.temper.type.DotHelper
+import lang.temper.type.DotMember
+import lang.temper.type.ExternalCall
+import lang.temper.type.ExternalGet
+import lang.temper.type.ExternalSet
+import lang.temper.type.GetMemberAccessor
+import lang.temper.type.InternalCall
+import lang.temper.type.InternalGet
+import lang.temper.type.InternalMemberAccessor
+import lang.temper.type.InternalSet
+import lang.temper.type.InvalidType
+import lang.temper.type.MemberShape
+import lang.temper.type.MethodKind
+import lang.temper.type.MethodShape
+import lang.temper.type.OperatorMember
+import lang.temper.type.PropertyShape
+import lang.temper.type.SetMemberAccessor
+import lang.temper.type.StaticType
+import lang.temper.type.TypeDefinition
+import lang.temper.type.TypeFormal
+import lang.temper.type.TypeShape
+import lang.temper.type.Visibility
+import lang.temper.type.VisibleMemberShape
+import lang.temper.type.WellKnownTypes
+import lang.temper.type.excludeBubble
+import lang.temper.type2.DefinedNonNullType
+import lang.temper.type2.DefinedType
+import lang.temper.type2.MkType2
+import lang.temper.type2.Nullity
+import lang.temper.type2.Signature2
+import lang.temper.type2.Type2
+import lang.temper.type2.TypeParamRef
+import lang.temper.type2.hackMapOldStyleToNew
+import lang.temper.type2.mapType
+import lang.temper.type2.withNullity
+import lang.temper.value.CallTree
+import lang.temper.value.CallTypeInferences
+import lang.temper.value.Tree
+import lang.temper.value.functionContained
+import lang.temper.value.toLispy
+
+internal object TranslateDotHelper {
+    private fun findMembers(definition: TypeDefinition, fn: DotHelper): Set<MethodShape> =
+        when (definition) {
+            is TypeFormal -> findMembers(
+                buildSet {
+                    fun explodeUpperBounds(t: Type2) {
+                        when (t) {
+                            is DefinedType ->
+                                add(t.withNullity(Nullity.NonNull) as DefinedNonNullType)
+                            is TypeParamRef -> {
+                                for (ub in t.definition.upperBounds) {
+                                    explodeUpperBounds(hackMapOldStyleToNew(ub))
+                                }
+                            }
+                        }
+                    }
+                    explodeUpperBounds(MkType2(definition).get())
+                }.toList(),
+                fn,
+            )
+            is TypeShape -> if (definition == WellKnownTypes.invalidTypeDefinition) {
+                emptySet()
+            } else {
+                fn.accessibleMembers(definition).mapNotNullTo(mutableSetOf()) {
+                    // We'll get both property shapes and method shapes, but for abstract properties
+                    // we need either the getter or the setter.
+                    val method = it as? MethodShape
+                    val appropriate = when (fn.memberAccessor) {
+                        is GetMemberAccessor -> method?.methodKind == MethodKind.Getter
+                        is CallMemberAccessor -> method?.methodKind == MethodKind.Normal
+                        is SetMemberAccessor -> method?.methodKind == MethodKind.Setter
+                    }
+                    if (appropriate) {
+                        method
+                    } else {
+                        null
+                    }
+                }
+            }
+        }
+
+    /** TODO Any way to unify this with [DotHelper] lookup logic? */
+    private fun findMembers(subjectTypes: List<DefinedNonNullType>, fn: DotHelper): Set<MethodShape> {
+        val commonMembers = mutableSetOf<MethodShape>()
+
+        subjectTypes.forEachIndexed { index, memberType ->
+            val members = findMembers(memberType.definition, fn)
+            if (index == 0) {
+                commonMembers.addAll(members)
+            } else {
+                commonMembers.retainAll(members)
+            }
+        }
+        return commonMembers
+    }
+
+    private fun findConnectedMember(members: Set<MethodShape>): Pair<MethodShape, String>? {
+        var result: Pair<MethodShape, String>? = null
+        for (member in members) {
+            val connectedMethodKey = connectedKeyForMethod(member)
+            if (connectedMethodKey != null) {
+                // TODO: if member is overrideable in subjectType, because it is not final
+                // and subjectType is an interface type, then we cannot use this path.
+                if (result != null) {
+                    // Check for sub or super type. This could be inefficient in the form here, but we don't expect to
+                    // go through more than a few matching candidates. Currently, maybe only 2.
+                    if (result.first.enclosingType.isSubOrSame(member.enclosingType)) {
+                        // We already have a more specialized case, so skip this one. This is the common case.
+                        continue
+                    } else if (member.enclosingType.isSubOrSame(result.first.enclosingType)) {
+                        // The new one is more precise, so keep on below with it instead.
+                        // TODO Do we always expect subtypes first? Can we remove this case?
+                    } else {
+                        // Multiple incompatible matches, so no matches.
+                        return null
+                    }
+                }
+                result = member to connectedMethodKey
+            }
+        }
+        return result
+    }
+
+    private data class Argument(
+        val actualCalleeType: Signature2?,
+        val declaredCalleeType: Signature2?,
+        val argIndex: Int,
+        val tree: Tree,
+        val adjustments: SignatureAdjustments?,
+    ) {
+        fun translate(translator: TmpLTranslator) = translator.maybeInjectCastForInput(
+            expr = translator.translateExpression(tree),
+            argIndex = argIndex,
+            actualCalleeType = actualCalleeType,
+            declaredCalleeType = declaredCalleeType,
+            adjustments = adjustments,
+            builtinOperatorId = null,
+        )
+    }
+
+    data class TranslatedDotHelper(
+        val translation: Either<TmpL.Expression, TmpL.Statement>,
+        val actualCalleeType: Signature2?,
+        val declaredCalleeType: Signature2?,
+        val adjustments: SignatureAdjustments?,
+    )
+
+    fun translate(
+        callTree: CallTree,
+        callee: Tree,
+        typeActualsTrees: List<Tree>,
+        translator: TmpLTranslator,
+    ): TranslatedDotHelper {
+        val pos = callTree.pos
+        val calleePos = callee.pos
+        val dotHelper = callee.functionContained as DotHelper
+        val dotMember = dotHelper.member
+        when (dotMember) {
+            is DotMember -> {} // OK
+            is OperatorMember -> return garbageTranslatedHelper(
+                pos,
+                "Operator member $dotMember should have been converted to dot-name form",
+            )
+        }
+
+        val callType = callTree.typeOrInvalid
+        val pool = translator.pool
+
+        val subjectIndexInCallTree = 1 + dotHelper.memberAccessor.firstArgumentIndex
+        val subjectTree = callTree.children[subjectIndexInCallTree]
+        val subjectTypeApproximate = excludeBubble(subjectTree.typeOrInvalid)
+
+        val members: Set<MethodShape> = findMembers(subjectTypeApproximate.definition, dotHelper)
+        val firstMember: MethodShape? = members.firstOrNull()
+        val adjustments = firstMember?.let {
+            translator.metadataFetcher().read(it.name, SignatureAdjustments.KeyFactory)
+                ?.get(it.name as ResolvedName)
+        }
+
+        val subjectTypeDefinition = firstMember?.enclosingType
+            ?: WellKnownTypes.invalidTypeDefinition
+        val subjectTypeInContext = translator.typeContext2
+            .superTypeTreeOf(subjectTypeApproximate)[subjectTypeDefinition]
+            .firstOrNull()
+            ?: WellKnownTypes.invalidType2
+
+        val bindingsFromThis = buildMap {
+            check(subjectTypeInContext is DefinedType)
+            for ((i, formal) in subjectTypeDefinition.formals.withIndex()) {
+                this[formal] = subjectTypeInContext.bindings.getOrNull(i)
+                    ?: WellKnownTypes.invalidType2
+            }
+        }
+
+        val declaredCalleeType: Signature2 = firstMember?.augmentedDescriptor
+            ?: invalidSig
+        val actualCalleeType: Signature2 = declaredCalleeType.mapType(bindingsFromThis)
+
+        fun translatedExpr(e: TmpL.Expression) = TranslatedDotHelper(
+            Either.Left(e),
+            actualCalleeType = actualCalleeType,
+            declaredCalleeType = declaredCalleeType,
+            adjustments = adjustments,
+        )
+        fun translatedStmt(e: TmpL.Statement) = TranslatedDotHelper(
+            Either.Right(e),
+            actualCalleeType = actualCalleeType,
+            declaredCalleeType = declaredCalleeType,
+            adjustments = adjustments,
+        )
+
+        val mergedArgumentList: List<Argument> = callTree.children.subListToEnd(subjectIndexInCallTree)
+            .mapIndexed { argIndex, argTree ->
+                Argument(
+                    actualCalleeType = actualCalleeType,
+                    declaredCalleeType = declaredCalleeType,
+                    argIndex = argIndex,
+                    tree = argTree,
+                    adjustments = adjustments,
+                )
+            }
+        val subject = mergedArgumentList[0]
+        val otherArgs = mergedArgumentList.subListToEnd(1)
+
+        val typeActualsPos = subjectTree.pos.rightEdge
+        val typeActuals = run {
+            val actualTypeList = mutableListOf<TmpL.AType>()
+            subjectTypeInContext.bindings.mapTo(actualTypeList) {
+                translator.translateType(typeActualsPos, it).aType
+            }
+            val actualBindings = mutableMapOf<TypeFormal, Type2>()
+            actualBindings.putAll(bindingsFromThis)
+
+            val callBindings = callTree.typeInferences?.bindings2 ?: emptyMap()
+            val unaugmentedDescriptor = firstMember?.descriptor
+            // Use the unaugmented descriptor to find any bindings specified on the method
+            // instead of the class/interface.
+            if (unaugmentedDescriptor != null) {
+                for (formal in unaugmentedDescriptor.typeFormals) {
+                    if (formal !in actualBindings) {
+                        val binding = hackMapOldStyleToNew(
+                            callBindings[formal] as? StaticType ?: InvalidType,
+                        )
+                        actualBindings[formal] = binding
+                        actualTypeList.add(translator.translateType(typeActualsPos, binding).aType)
+                    }
+                }
+            }
+
+            TmpL.ImplicitCallTypeActuals(
+                typeActualsPos,
+                actualTypeList.toList(),
+                actualBindings.toMap(),
+            )
+        }
+
+        val connectedMemberInfo = findConnectedMember(members)
+        if (connectedMemberInfo != null) {
+            run connected@{
+                val (connectedMethod, connectedKeyString) = connectedMemberInfo
+                val connectedReference = translator.supportNetwork
+                    .translateConnectedReference(calleePos, connectedKeyString, subject.tree.document.context.genre)
+                    ?: return@connected
+                val parameters = mergedArgumentList.map { arg ->
+                    TypedArg<TmpL.Tree>(
+                        arg.translate(translator),
+                        arg.tree.typeOrInvalid,
+                    )
+                }
+
+                if (connectedReference is InlineTmpLSupportCode) {
+                    return@translate translatedExpr(
+                        connectedReference.inlineToTree(
+                            calleePos,
+                            parameters,
+                            declaredCalleeType.returnType2,
+                            translator,
+                        ),
+                    )
+                }
+                val name = pool.fillIfAbsent(
+                    pos = calleePos,
+                    supportCode = connectedReference,
+                    desc = declaredCalleeType,
+                    metadata = emptyMap(),
+                )
+                val callable = TmpL.FnReference(
+                    TmpL.Id(calleePos, name),
+                    declaredCalleeType.copy(hasThisFormal = false),
+                )
+
+                return@translate when (connectedMethod.methodKind to dotHelper.memberAccessor) {
+                    MethodKind.Normal to ExternalCall,
+                    MethodKind.Normal to InternalCall,
+                    MethodKind.Getter to ExternalGet,
+                    MethodKind.Getter to InternalGet,
+                    MethodKind.Setter to ExternalSet,
+                    MethodKind.Setter to InternalSet,
+                    -> translatedExpr(
+                        translator.maybeInline(
+                            TmpL.CallExpression(
+                                pos = pos,
+                                fn = callable,
+                                parameters = parameters.map { it.expr as TmpL.Actual },
+                                typeActuals = typeActuals,
+                            ),
+                        ),
+                    )
+
+                    else -> TODO("${connectedMethod.methodKind}, ${dotHelper.memberAccessor}")
+                }
+            }
+        }
+        val typeIsConnected = firstMember != null && firstMember.enclosingType.let { typeShape ->
+            val connectedKey = typeShape.connectedKey
+            if (connectedKey == null) {
+                false
+            } else {
+                val staticType = MkType2(typeShape)
+                    .actuals(typeShape.formals.map { MkType2(it).get() })
+                    .get()
+                null != translator.supportNetwork.translatedConnectedType(
+                    typeShape.pos, connectedKey, translator.genre, staticType,
+                )
+            }
+        }
+        val isPulledOutMember = firstMember is VisibleMemberShape && shouldPullOutMember(
+            firstMember,
+            memberIsConnected = connectedMemberInfo != null,
+            typeIsConnected = typeIsConnected,
+            isConstructor = false, // Not accessed via dotHelper
+        )
+
+        // Handle disconnected members: ones whose type is connected, but it
+        // is not, so is pulled out to a regular function.
+        if (isPulledOutMember) {
+            @Suppress("USELESS_IS_CHECK")
+            check(firstMember is VisibleMemberShape)
+            val sig = declaredCalleeType.copy(hasThisFormal = false)
+            return translatedExpr(
+                TmpL.CallExpression(
+                    pos = pos,
+                    fn = TmpL.FnReference(
+                        TmpL.Id(pos.leftEdge, firstMember.name as ResolvedName, null),
+                        sig,
+                    ),
+                    typeActuals = translator.translateCallTypeActuals(
+                        pos = pos.leftEdge,
+                        typeActualTrees = typeActualsTrees,
+                        callInferences = callTree.typeInferences,
+                        sig = sig,
+                    ),
+                    parameters = mergedArgumentList.map { it.translate(translator) },
+                ),
+            )
+        }
+
+        fun propertyId(): TmpL.PropertyId {
+            val propShape = firstMember?.let { propertyShapeFor(it) }
+            val visibility = when {
+                // If a setter, for example, is private, refer to it internally.
+                firstMember?.visibility == Visibility.Private -> Visibility.Private
+                // Otherwise, use the visibility of the property.
+                else -> propShape?.visibility
+            }
+            return if (
+                dotHelper.memberAccessor is InternalMemberAccessor && propShape != null &&
+                visibility == Visibility.Private && translator.supportNetwork.splitComputedProperties
+            ) {
+                TmpL.InternalPropertyId(TmpL.Id(pos.rightEdge, propShape.name as ResolvedName))
+            } else {
+                TmpL.ExternalPropertyId(
+                    TmpL.DotName(pos.rightEdge, dotMember.dotName.text),
+                )
+            }
+        }
+
+        var translation: TmpL.Expression? = null
+        when (dotHelper.memberAccessor) {
+            is GetMemberAccessor -> if (otherArgs.isEmpty()) {
+                translation = TmpL.GetAbstractProperty(
+                    pos = pos,
+                    subject = subject.translate(translator) as TmpL.Expression,
+                    property = propertyId(),
+                    type = callType,
+                )
+            }
+            is SetMemberAccessor -> if (otherArgs.size == 1) {
+                val newValue = otherArgs.first()
+                return translatedStmt(
+                    TmpL.SetAbstractProperty(
+                        pos = pos,
+                        left = TmpL.PropertyLValue(
+                            pos = subject.tree.pos,
+                            subject = subject.translate(translator) as TmpL.Expression,
+                            property = propertyId(),
+                        ),
+                        right = newValue.translate(translator) as TmpL.Expression,
+                    ),
+                )
+            }
+            is CallMemberAccessor -> {
+                val method = firstMember
+                    ?: return garbageTranslatedHelper(
+                        pos,
+                        "No method matching ${dotHelper.member} in $subjectTypeDefinition",
+                    )
+                translation = translateCall(
+                    pos = pos,
+                    calleePos = calleePos,
+                    subject = subject,
+                    dotHelper = dotHelper,
+                    sig = declaredCalleeType,
+                    method = method,
+                    typeActuals = typeActuals,
+                    typeActualsTrees = typeActualsTrees,
+                    callTypeInferences = callTree.typeInferences,
+                    args = otherArgs,
+                    translator = translator,
+                )
+            }
+        }
+        return translatedExpr(
+            translation
+                ?: translator.untranslatableExpr(pos, callTree.toLispy()),
+        )
+    }
+
+    private fun translateCall(
+        pos: Position,
+        calleePos: Position,
+        subject: Argument,
+        dotHelper: DotHelper,
+        method: MethodShape,
+        sig: Signature2,
+        typeActuals: TmpL.ImplicitCallTypeActuals,
+        typeActualsTrees: List<Tree>,
+        callTypeInferences: CallTypeInferences?,
+        args: List<Argument>,
+        translator: TmpLTranslator,
+    ): TmpL.Expression {
+        val dotMember = dotHelper.member
+        when (dotMember) {
+            is DotMember -> {} // OK
+            is OperatorMember -> return TmpL.GarbageExpression(
+                pos,
+                TmpL.Diagnostic(
+                    pos,
+                    "Operator member $dotMember should have been converted to dot-name form",
+                ),
+            )
+        }
+        val allTypeActuals = if (typeActualsTrees.isEmpty()) {
+            typeActuals
+        } else {
+            val actualsFromTrees = translator.translateCallTypeActuals(
+                pos = calleePos.rightEdge,
+                typeActualTrees = typeActualsTrees,
+                callInferences = callTypeInferences,
+                sig = sig,
+            )
+            val freeTypeActuals = typeActuals.types.toMutableList()
+            freeTypeActuals.addAll(actualsFromTrees.types)
+            typeActuals.types = listOf()
+            when (actualsFromTrees) {
+                is TmpL.ExplicitCallTypeActuals -> actualsFromTrees.types = listOf()
+                is TmpL.ImplicitCallTypeActuals -> actualsFromTrees.types = listOf()
+            }
+
+            TmpL.ImplicitCallTypeActuals(
+                actualsFromTrees.pos,
+                freeTypeActuals.toList(),
+                typeActuals.bindings + actualsFromTrees.bindings,
+            )
+        }
+
+        val dotName = TmpL.DotName(calleePos, dotMember.dotName.text)
+        val translation: TmpL.Expression = translator.maybeInline(
+            TmpL.CallExpression(
+                pos = pos,
+                fn = TmpL.MethodReference(
+                    calleePos,
+                    subject.translate(translator) as TmpL.Expression,
+                    dotName,
+                    sig,
+                    method,
+                ),
+                typeActuals = allTypeActuals,
+                parameters = args.map { argument ->
+                    argument.translate(translator)
+                },
+            ),
+        )
+
+        return translation
+    }
+}
+
+internal fun connectedKeyForMember(member: MemberShape): String? = when (member) {
+    is MethodShape -> connectedKeyForMethod(member)
+    is PropertyShape -> when {
+        member.hasSetter || member.getter != null -> null // any hint of accessors means no connection
+        else -> member.connectedKey
+    }
+    is VisibleMemberShape -> member.connectedKey
+    else -> null
+}
+
+private fun connectedKeyForMethod(methodShape: MethodShape): String? {
+    val connectedMethodKey = methodShape.connectedKey
+    if (connectedMethodKey != null) {
+        return connectedMethodKey
+    }
+    // Look on a property definition for a getter or setters member.
+    return when (methodShape.methodKind) {
+        MethodKind.Normal -> null
+        MethodKind.Getter -> propertyShapeFor(methodShape)?.let { propertyShape ->
+            when {
+                propertyShape.hasSetter -> null
+                else -> propertyShape.connectedKey // no reliable `hasGetter`
+            }
+        }
+        MethodKind.Setter -> propertyShapeFor(methodShape)?.let { propertyShape ->
+            when {
+                propertyShape.hasSetter && propertyShape.getter == null -> propertyShape.connectedKey
+                else -> null
+            }
+        }
+        MethodKind.Constructor -> null
+    }
+}
+
+private fun propertyShapeFor(methodShape: MethodShape): PropertyShape? =
+    methodShape.enclosingType.properties.firstOrNull { it.symbol == methodShape.symbol }
+
+private fun garbageTranslatedHelper(pos: Position, message: String) =
+    TranslateDotHelper.TranslatedDotHelper(
+        Either.Left(
+            garbageExpr(pos, message),
+        ),
+        null,
+        null,
+        null,
+    )

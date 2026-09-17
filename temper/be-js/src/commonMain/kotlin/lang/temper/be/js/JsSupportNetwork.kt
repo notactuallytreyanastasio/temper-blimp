@@ -1,0 +1,2193 @@
+package lang.temper.be.js
+
+import lang.temper.be.TargetLanguageTypeName
+import lang.temper.be.tmpl.BubbleBranchStrategy
+import lang.temper.be.tmpl.ComputedJumpStrategy
+import lang.temper.be.tmpl.CoroutineStrategy
+import lang.temper.be.tmpl.FunctionTypeStrategy
+import lang.temper.be.tmpl.GetStaticSupport
+import lang.temper.be.tmpl.InlineSupportCode
+import lang.temper.be.tmpl.NamedSupportCode
+import lang.temper.be.tmpl.OptionalSupportCodeKind
+import lang.temper.be.tmpl.OtherSupportCodeRequirement
+import lang.temper.be.tmpl.RepresentationOfVoid
+import lang.temper.be.tmpl.SeparatelyCompiledSupportCode
+import lang.temper.be.tmpl.SupportCode
+import lang.temper.be.tmpl.SupportCodeRequirement
+import lang.temper.be.tmpl.SupportNetwork
+import lang.temper.be.tmpl.TmpL
+import lang.temper.be.tmpl.TranslationAssistant
+import lang.temper.be.tmpl.TypedArg
+import lang.temper.be.tmpl.aType
+import lang.temper.be.tmpl.toTmpL
+import lang.temper.builtin.BuiltinFuns
+import lang.temper.builtin.GetStaticOp
+import lang.temper.builtin.RuntimeTypeOperation
+import lang.temper.common.AtomicCounter
+import lang.temper.common.OpenOrClosed
+import lang.temper.common.asciiTitleCase
+import lang.temper.common.asciiUnTitleCase
+import lang.temper.common.subListToEnd
+import lang.temper.format.CodeFormatter
+import lang.temper.format.OutToks
+import lang.temper.format.OutputToken
+import lang.temper.format.OutputTokenType
+import lang.temper.format.TokenSink
+import lang.temper.frontend.json.jsonAdapterDotName
+import lang.temper.frontend.staging.getSharedStdModules
+import lang.temper.lexer.Genre
+import lang.temper.log.Position
+import lang.temper.log.filePath
+import lang.temper.log.last
+import lang.temper.log.spanningPosition
+import lang.temper.log.unknownPos
+import lang.temper.name.DashedIdentifier
+import lang.temper.name.ModuleLocation
+import lang.temper.name.ModuleName
+import lang.temper.name.NamingContext
+import lang.temper.name.ParsedName
+import lang.temper.name.ResolvedNameMaker
+import lang.temper.name.Symbol
+import lang.temper.name.name
+import lang.temper.type.MethodKind
+import lang.temper.type.MethodShape
+import lang.temper.type.TypeFormal
+import lang.temper.type.TypeShape
+import lang.temper.type.Variance
+import lang.temper.type.Visibility
+import lang.temper.type.WellKnownTypes
+import lang.temper.type2.DefinedNonNullType
+import lang.temper.type2.DefinedType
+import lang.temper.type2.MkType2
+import lang.temper.type2.Signature2
+import lang.temper.type2.Type2
+import lang.temper.value.BuiltinOperatorId
+import lang.temper.value.NamedBuiltinFun
+import lang.temper.value.TType
+import lang.temper.value.jsonSymbol
+import lang.temper.value.thisParsedName
+
+internal object JsSupportNetwork : SupportNetwork {
+    override val backendDescription = "JS backend"
+
+    override fun adjustTypeMembers(
+        typeShape: TypeShape,
+        members: List<TmpL.MemberOrGarbage>,
+        translationAssistant: TranslationAssistant,
+    ): List<TmpL.MemberOrGarbage> {
+        var adjustedMembers = members
+
+        // If there's a zero-argument jsonAdapter, then we can auto-generate a toJSON method.
+        val jsonAdapterMethod = members.firstOrNull {
+            it is TmpL.StaticMethod && it.dotName.dotNameText == jsonAdapterDotName.dotName.text &&
+                !it.mayYield && it.typeParameters.ot.typeParameters.isEmpty() &&
+                it.parameters.parameters.isEmpty() && it.parameters.restParameter == null
+        }
+        val hasToJson = members.any {
+            it is TmpL.InstanceMember &&
+                it is TmpL.DotAccessible &&
+                it.dotName.dotNameText == JAVASCRIPT_TOJSON_SPECIAL_NAME
+        }
+        if (jsonAdapterMethod is TmpL.StaticMethod && !hasToJson && jsonSymbol in typeShape.metadata.keys) {
+            val p = jsonAdapterMethod.pos.rightEdge
+
+            val nameMaker = translationAssistant.nameMaker
+            val type = MkType2(typeShape).get()
+            val methodName = nameMaker.unusedTemporaryName(JAVASCRIPT_TOJSON_SPECIAL_NAME)
+            val thisName = nameMaker.unusedSourceName(thisParsedName)
+            val visibility = Visibility.Public
+            val jsonAdapterSig = Signature2( // Fn(): JsonAdapter<C>
+                MkType2((marshalToJsonObjectSig.requiredInputTypes[0] as DefinedType).definition)
+                    .actuals(listOf(type))
+                    .get(),
+                false,
+                listOf(),
+            )
+            val methodShape = MethodShape(
+                enclosingType = typeShape,
+                name = methodName,
+                symbol = Symbol(JAVASCRIPT_TOJSON_SPECIAL_NAME),
+                stay = null,
+                visibility = visibility,
+                methodKind = MethodKind.Normal,
+                openness = OpenOrClosed.Closed,
+            )
+
+            adjustedMembers = buildList {
+                addAll(adjustedMembers)
+                add(
+                    TmpL.NormalMethod(
+                        p,
+                        metadata = emptyList(),
+                        dotName = TmpL.DotName(p, JAVASCRIPT_TOJSON_SPECIAL_NAME),
+                        name = TmpL.Id(p, methodName),
+                        typeParameters = TmpL.ATypeParameters(
+                            TmpL.TypeParameters(p, emptyList()),
+                        ),
+                        parameters = TmpL.Parameters(
+                            p,
+                            TmpL.Id(p, thisName),
+                            listOf(
+                                TmpL.Formal(
+                                    p,
+                                    emptyList(),
+                                    TmpL.Id(p, thisName),
+                                    translationAssistant.translateType(p, type).aType,
+                                    type,
+                                ),
+                            ),
+                            null,
+                        ),
+                        returnType = TmpL.NominalType(
+                            pos = p,
+                            typeName = TmpL.TemperTypeName(p, WellKnownTypes.anyValueTypeDefinition),
+                            params = emptyList(),
+                        ).aType,
+                        body = TmpL.BlockStatement(
+                            p,
+                            listOf(
+                                // `return marshalToJsonObject(C.jsonAdapter(), this)`
+                                TmpL.ReturnStatement(
+                                    p,
+                                    TmpL.CallExpression(
+                                        pos = p,
+                                        fn = translationAssistant.supportCodeReference(
+                                            p,
+                                            coreMarshalToJsonObject,
+                                            marshalToJsonObjectSig,
+                                        ),
+                                        parameters = listOf(
+                                            TmpL.CallExpression(
+                                                p,
+                                                TmpL.MethodReference(
+                                                    pos = p,
+                                                    subject = TmpL.TemperTypeName(p, typeShape),
+                                                    methodName = TmpL.DotName(p, jsonAdapterMethod.dotName.dotNameText),
+                                                    type = jsonAdapterSig,
+                                                    method = methodShape,
+                                                ),
+                                                parameters = emptyList(),
+                                            ),
+                                            TmpL.This(p, TmpL.Id(p, thisName), type),
+                                        ),
+                                        typeActuals = TmpL.ImplicitCallTypeActuals(
+                                            p,
+                                            listOf(translationAssistant.translateType(p, type).aType),
+                                            mapOf(marshalToJsonObjectSig.typeFormals[0] to type),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        visibility = TmpL.VisibilityModifier(p, visibility.toTmpL()),
+                        overridden = emptyList(),
+                        mayYield = false,
+                        memberShape = methodShape,
+                    ),
+                )
+            }
+        }
+
+        return adjustedMembers
+    }
+
+    override fun getSupportCode(
+        pos: Position,
+        builtin: NamedBuiltinFun,
+        genre: Genre,
+    ): SupportCode? {
+        val builtinOperatorId = builtin.builtinOperatorId
+        return when {
+            builtin == BuiltinFuns.listifyFn && genre == Genre.Documentation ->
+                docsListifyInliner
+            builtin == BuiltinFuns.print && genre == Genre.Documentation ->
+                docsPrintInliner
+            builtin == BuiltinFuns.strCatFn && genre == Genre.Documentation ->
+                catInliner
+            builtin == BuiltinFuns.pureVirtualFn ->
+                InlinedJs(
+                    DashedIdentifier.temperCoreLibraryIdentifier,
+                    JsIdentifierName("nothing"),
+                    needsThisEquivalent = false,
+                    builtinOperatorId = builtinOperatorId,
+                ) { factoryPos, _, _, _ ->
+                    Js.NullLiteral(factoryPos) // TODO: should this throw
+                }
+            builtin is GetStaticOp -> GetStaticSupport
+            builtin == BuiltinFuns.isFn -> TODO("IS")
+            builtinOperatorId == null -> null
+            else -> builtinOperatorIdToSupportCode.getValue(builtinOperatorId)
+        }
+    }
+
+    override fun optionalSupportCode(
+        optionalSupportCodeKind: OptionalSupportCodeKind,
+    ): Pair<SupportCode, Signature2>? = when (optionalSupportCodeKind) {
+        // TODO(mikesamuel, enum-translation): define something based on
+        // gist.github.com/mikesamuel/2084a7810977fa49cddf73dce2e11a4a
+        OptionalSupportCodeKind.EnumTypeSupport -> null
+        OptionalSupportCodeKind.InterfaceTypeSupport ->
+            typeSupportCode to
+                Signature2(WellKnownTypes.anyValueType2, false, listOf())
+    }
+
+    override fun translateConnectedReference(
+        pos: Position,
+        connectedKey: String,
+        genre: Genre,
+    ): SupportCode? {
+        val factory: Inliner? = when (connectedKey) {
+            "core.type Boolean.toString()" -> toStringIdiomExpander
+            "core.type Int32.toFloat64()" -> identityIdiomExpander // All ints are also floats.
+            "core.type Int32.toString()" -> toStringIdiomExpander
+            "core.type Int32.toInt64()" -> bigintExpander
+            "core.type Int64.toString()" -> toStringIdiomExpander
+            "core.type List.get isEmpty()" -> listIsEmptyIdiomExpander
+            "core.type List.forEach()" -> listForEachIdiomExpander
+            "core.type List.toList()" -> identityIdiomExpander
+            "core.type List.toListBuilder()" -> listToListBuilderIdiomExpander
+            "core.type Listed.get isEmpty()" -> listIsEmptyIdiomExpander
+            "core.type ListBuilder.constructor()" -> listBuilderConstructorIdiomExpander
+            "core.type ListBuilder.toListBuilder()" -> listToListBuilderIdiomExpander
+            "core.type SafeGenerator.nextSafe()" -> nextIdiomExpander
+            "core.type String.get isEmpty()" -> stringIsEmptyIdiomExpander
+            "core.type String.toString()" -> identityIdiomExpander
+            "std/temporal.type Date.constructor()" -> { p, args, strict, translator ->
+                newDateIdiomExpander(p, args, strict = strict, genre = genre, translator = translator)
+            }
+            "std/temporal.type Date.year" -> propertyReadToMethodCall("getUTCFullYear")
+            "std/temporal.type Date.month" -> dateGetMonthExpander // Need to add one to index
+            "std/temporal.type Date.day" -> propertyReadToMethodCall("getUTCDate") // getUTCDay is weekday
+            "std/temporal.type Date.get dayOfWeek()" -> dateGetDayOfWeekExpander // JS has Sunday as 0, not 7
+            "std/temporal.type Date.toString()" -> dateToIsoStringExpander
+            "std/temporal.type Date.fromIsoString()" -> { p, args, strict, _ ->
+                dateFromIsoStringExpander(p, args, strict = strict, genre = genre)
+            }
+            "std/testing.type Test.bail()" -> bailExpander
+            "core.ignore()" -> ignoreIdiomExpander
+            "core.getConsole()" -> getConsoleExpander
+            // Float64 constants
+            "core.type Float64.e" -> mathProperty("E")
+            "core.type Float64.pi" -> mathProperty("PI")
+            // Float64 math
+            "core.type Float64.abs()" -> mathCall("abs")
+            "core.type Float64.acos()" -> mathCall("acos")
+            "core.type Float64.asin()" -> mathCall("asin")
+            "core.type Float64.atan()" -> mathCall("atan")
+            "core.type Float64.atan2()" -> mathCall("atan2", 2)
+            "core.type Float64.ceil()" -> mathCall("ceil")
+            "core.type Float64.cos()" -> mathCall("cos")
+            "core.type Float64.cosh()" -> mathCall("cosh")
+            "core.type Float64.exp()" -> mathCall("exp")
+            "core.type Float64.expm1()" -> mathCall("expm1")
+            "core.type Float64.floor()" -> mathCall("floor")
+            "core.type Float64.log()" -> mathCall("log")
+            "core.type Float64.log10()" -> mathCall("log10")
+            "core.type Float64.log1p()" -> mathCall("log1p")
+            "core.type Float64.max()" -> mathCall("max", 2)
+            "core.type Float64.min()" -> mathCall("min", 2)
+            "core.type Float64.round()" -> mathCall("round")
+            "core.type Float64.sign()" -> mathCall("sign")
+            "core.type Float64.sin()" -> mathCall("sin")
+            "core.type Float64.sinh()" -> mathCall("sinh")
+            "core.type Float64.sqrt()" -> mathCall("sqrt")
+            "core.type Float64.tan()" -> mathCall("tan")
+            "core.type Float64.tanh()" -> mathCall("tanh")
+            "core.type Int32.max()" -> mathCall("max", 2)
+            "core.type Int32.min()" -> mathCall("min", 2)
+            // Mapped things
+            "core.type Mapped.get length()" -> mappedSizeExpander
+            "core.type Mapped.has()" -> mappedHasExpander
+            "core.type Mapped.keys()" -> mappedKeysExpander
+            "core.type Mapped.values()" -> mappedValuesExpander
+            // String and StringIndex things
+            "core.type String.begin" -> stringBeginExpander
+            "core.type String.get end()" -> lengthIdiomExpander
+            "core.type String.hasIndex()" -> stringHasIndexExpander
+            "core.type String.slice()" -> stringSliceExpander
+            "core.type StringIndexOption.compareTo()" -> stringIndexOptionCompareToExpander
+            "core.type StringIndexOption.compareTo()::eq" -> stringIndexOptionCompareToExpanderEq
+            "core.type StringIndexOption.compareTo()::ge" -> stringIndexOptionCompareToExpanderGe
+            "core.type StringIndexOption.compareTo()::gt" -> stringIndexOptionCompareToExpanderGt
+            "core.type StringIndexOption.compareTo()::le" -> stringIndexOptionCompareToExpanderLe
+            "core.type StringIndexOption.compareTo()::lt" -> stringIndexOptionCompareToExpanderLt
+            "core.type StringIndexOption.compareTo()::ne" -> stringIndexOptionCompareToExpanderNe
+            "core.type StringIndex.none" -> stringIndexNoneExpander
+            "core.type StringBuilder.constructor()" -> stringBuilderConstructorExpander
+            "core.type StringBuilder.append()" -> stringBuilderAppendExpander
+            "core.type StringBuilder.appendBetween()" -> stringBuilderAppendBetweenExpander
+            "core.type StringBuilder.clear()" -> stringBuilderClearExpander
+            "core.type StringBuilder.get end()" -> stringBuilderEndExpander
+            "core.type StringBuilder.toString()" -> stringBuilderToStringExpander
+            // Ignore others
+            else -> null
+        }
+        val stableName = if (factory != null || connectedKey in supportedAutoConnecteds) {
+            connectedKeyToExportedName(connectedKey)
+        } else {
+            supportedMappedConnecteds[connectedKey] ?: return null
+        }
+        return if (factory == null) {
+            JsUnInlinedExternalFunctionReference(
+                source = DashedIdentifier.temperCoreLibraryIdentifier,
+                stableName = stableName,
+            )
+        } else {
+            InlinedJs(
+                source = DashedIdentifier.temperCoreLibraryIdentifier,
+                stableName = stableName,
+                needsThisEquivalent = true,
+                factory = factory,
+            )
+        }
+    }
+
+    override fun translatedConnectedType(
+        pos: Position,
+        connectedKey: String,
+        genre: Genre,
+        temperType: Type2,
+    ): Pair<TargetLanguageTypeName, List<Type2>>? {
+        val bindings = temperType.bindings
+        return when (connectedKey) {
+            // TODO: Use JS Temporal.PlainDate long term: https://tc39.es/proposal-temporal/docs/plaindate.html
+            "std/temporal.type Date" -> JsGlobalReference(ParsedName("Date")) to bindings
+            "core.type Promise" -> JsGlobalReference(ParsedName("Promise")) to bindings
+            "core.type PromiseBuilder" -> JsExternalTypeReference(
+                source = DashedIdentifier.temperCoreLibraryIdentifier,
+                stableName = JsIdentifierName("PromiseBuilder"),
+            ) to bindings
+            // It might be better if the type were `[string]`, a length:1 array.
+            // For StringBuilder, we construct a [""] and then add to element 0.
+            // This is the fastest per jsperf.app/join-concat/2
+            "core.type StringBuilder" -> JsGlobalReference(ParsedName("Array")) to
+                listOf(WellKnownTypes.stringType2)
+            "core.type StringIndexOption", "core.type StringIndex", "core.type NoStringIndex",
+            -> JsGlobalReference(ParsedName("number")) to bindings
+            else -> null
+        }
+    }
+
+    override fun translateRuntimeTypeOperation(
+        pos: Position,
+        rto: RuntimeTypeOperation,
+        sourceType: TmpL.NominalType,
+        targetType: TmpL.NominalType,
+    ): SupportCode? {
+        if (rto.asLike) {
+            when (targetType.typeName.sourceDefinition) {
+                WellKnownTypes.noStringIndexTypeDefinition -> return requireNoStringIndex
+                WellKnownTypes.stringIndexTypeDefinition -> return requireStringIndex
+                else -> {}
+            }
+        }
+        return super.translateRuntimeTypeOperation(pos, rto, sourceType, targetType)
+    }
+
+    override val bubbleStrategy = BubbleBranchStrategy.Exceptions
+    override val coroutineStrategy = CoroutineStrategy.TranslateToGenerator
+    override val functionTypeStrategy = FunctionTypeStrategy.ToFunctionType
+    override val computedJumpStrategy = ComputedJumpStrategy.IsDefaultBreakScope
+
+    override fun representationOfVoid(genre: Genre): RepresentationOfVoid =
+        RepresentationOfVoid.ReifyVoid
+
+    /** A private setter can be `set #x(newValue)` while the getter can be `get x()`. */
+    override val splitComputedProperties: Boolean get() = true
+}
+
+private val supportedAutoConnecteds = setOf(
+    "core.type Float64.near()",
+    "core.type Float64.toInt32()",
+    "core.type Float64.toInt32Unsafe()",
+    "core.type Float64.toInt64()",
+    "core.type Float64.toInt64Unsafe()",
+    "core.type Float64.toString()",
+    "core.type Int64.max()",
+    "core.type Int64.min()",
+    "core.type Int64.toFloat64()",
+    "core.type Int64.toFloat64Unsafe()",
+    "core.type Int64.toInt32()",
+    "core.type Int64.toInt32Unsafe()",
+    "core.type Listed.filter()",
+    "core.type Listed.get()",
+    "core.type Listed.getOr()",
+    "core.type Listed.join()",
+    "core.type Listed.map()",
+    "core.type Listed.reduceFrom()",
+    "core.type Listed.slice()",
+    "core.type Listed.sorted()",
+    "core.type Listed.toList()",
+    "core.type ListBuilder.add()",
+    "core.type ListBuilder.addAll()",
+    "core.type ListBuilder.toList()",
+    "core.type ListBuilder.clear()",
+    "core.type ListBuilder.removeLast()",
+    "core.type ListBuilder.splice()",
+    "core.type ListBuilder.reverse()",
+    "core.type ListBuilder.set()",
+    "core.type Map.constructor()",
+    "core.type MapBuilder.constructor()",
+    "core.type MapBuilder.remove()",
+    "core.type MapBuilder.set()",
+    "core.type Pair.constructor()",
+    "core.type Mapped.get length()",
+    "core.type Mapped.get()",
+    "core.type Mapped.getOr()",
+    "core.type Mapped.has()",
+    "core.type Mapped.keys()",
+    "core.type Mapped.values()",
+    "core.type Mapped.toMap()",
+    "core.type Mapped.toMapBuilder()",
+    "core.type Mapped.toList()",
+    "core.type Mapped.toListWith()",
+    "core.type Mapped.toListBuilder()",
+    "core.type Mapped.toListBuilderWith()",
+    "core.type Mapped.forEach()",
+    "core.type DenseBitVector.constructor()",
+    "core.type DenseBitVector.get()",
+    "core.type DenseBitVector.set()",
+    "core.type Deque.constructor()",
+    "core.type Deque.add()",
+    "core.type Deque.get isEmpty()",
+    "core.type Deque.removeFirst()",
+    "core.type PromiseBuilder",
+    "std/regex.type RegexFormatter.regexCompileFormatted()",
+    "std/regex.type Regex.compiledFind()",
+    "std/regex.type Regex.compiledFound()",
+    "std/regex.type Regex.compiledReplace()",
+    "std/regex.type Regex.compiledSplit()",
+    "std/regex.type RegexFormatter.adjustCodeSet()",
+    "std/regex.type RegexFormatter.pushCodeTo()",
+    "core.type String.countBetween()",
+    "core.type String.fromCodePoint()",
+    "core.type String.fromCodePoints()",
+    "core.type String.forEach()",
+    "core.type String.get()",
+    "core.type String.hasAtLeast()",
+    "core.type String.next()",
+    "core.type String.prev()",
+    "core.type String.step()",
+    "core.type String.split()",
+    "core.type String.toFloat64()",
+    "core.type String.toInt32()",
+    "core.type String.toInt64()",
+    "core.type StringBuilder.appendCodePoint()",
+    // std/net
+    "std/net.sendRequest()",
+    "std/net.type NetResponse",
+    "std/net.type NetResponse.get status()",
+    "std/net.type NetResponse.get contentType()",
+    "std/net.type NetResponse.get bodyContent()",
+)
+
+private val supportedMappedConnecteds = mapOf(
+    "std/temporal.type Date.today()" to "dateToday",
+    "std/temporal.type Date.yearsBetween()" to "dateYearsBetween",
+    "core.type List.get()" to "listedGet",
+    "core.empty()" to "empty",
+).mapValues { JsIdentifierName(it.value) }
+
+/** A reference to JavaScript from a separately compiled JavaScript library. */
+sealed interface JsExternalReference : SeparatelyCompiledSupportCode, NamedSupportCode {
+    val stableName: JsIdentifierName
+    override val stableKey: ParsedName get() = ParsedName(stableName.text)
+
+    override val baseName: ParsedName get() = stableKey
+
+    override fun renderTo(tokenSink: TokenSink) {
+        tokenSink.emit(OutputToken(stableName.text, OutputTokenType.Word))
+    }
+}
+
+/** A reference to an `export const stableName = ...` from another JS library. */
+internal sealed interface JsExternalFunctionReference : JsExternalReference
+
+internal typealias Inliner =
+    (pos: Position, arguments: List<Js.Tree>, strict: Boolean, translator: JsTranslator?) -> Js.Tree
+
+internal data class InlinedJs(
+    override val source: DashedIdentifier,
+    override val stableName: JsIdentifierName,
+    override val needsThisEquivalent: Boolean,
+    override val builtinOperatorId: BuiltinOperatorId? = null,
+    override val requires: List<SupportCodeRequirement> = emptyList(),
+    val factory: Inliner,
+) : InlineSupportCode<Js.Tree, JsTranslator>, JsExternalFunctionReference {
+    override fun renderTo(tokenSink: TokenSink) {
+        val strict = false // Not giving enough children
+        CodeFormatter(tokenSink).format(
+            factory(unknownPos, emptyList(), strict, null),
+            skipOuterCurlies = true,
+        )
+    }
+
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Js.Tree>>,
+        returnType: Type2,
+        translator: JsTranslator,
+    ): Js.Tree {
+        val strict = true // Complain if not enough children
+        return factory(pos, arguments.map { it.expr }, strict, translator)
+    }
+
+    override fun equals(other: Any?): Boolean =
+        // Override since we cannot compare the factory function.
+        other is InlinedJs &&
+            this.stableName == other.stableName &&
+            this.source == other.source &&
+            this.builtinOperatorId == other.builtinOperatorId
+
+    override fun hashCode(): Int {
+        var hc = stableName.hashCode()
+        hc = 31 * hc + source.hashCode()
+        hc = 31 * hc + (builtinOperatorId?.ordinal ?: 0)
+        return hc
+    }
+}
+
+/** A reference to an `export const val = ...` from another JS library. */
+internal data class JsExternalValueReference(
+    override val source: DashedIdentifier,
+    override val stableName: JsIdentifierName,
+    override val builtinOperatorId: BuiltinOperatorId? = null,
+) : JsExternalReference
+
+sealed interface JsTargetLanguageTypeName : TargetLanguageTypeName
+
+/** A reference to an `export class TypeName = ...` from another JS library. */
+internal data class JsExternalTypeReference(
+    override val source: DashedIdentifier,
+    override val stableName: JsIdentifierName,
+) : JsExternalReference, JsTargetLanguageTypeName
+
+/** A reference to `globalThis.`[baseName] */
+data class JsGlobalReference(
+    override val baseName: ParsedName,
+) : NamedSupportCode, JsTargetLanguageTypeName {
+    override fun renderTo(tokenSink: TokenSink) {
+        tokenSink.word(globalThisName.text)
+        tokenSink.emit(OutToks.dot)
+        tokenSink.name(baseName, inOperatorPosition = false)
+    }
+
+    fun asIdentifier(pos: Position) =
+        Js.Identifier(pos, JsIdentifierName(baseName.nameText), null)
+}
+
+data class JsPropertyReference(
+    val obj: NamedSupportCode,
+    val propertyName: JsIdentifierName,
+) : NamedSupportCode {
+    override fun renderTo(tokenSink: TokenSink) {
+        obj.renderTo(tokenSink)
+        tokenSink.emit(OutToks.dot)
+        tokenSink.emit(OutputToken(propertyName.text, OutputTokenType.Name))
+    }
+
+    override val baseName: ParsedName get() = ParsedName(propertyName.text)
+}
+
+/** A reference to an `export const val = ...` from another JS library. */
+internal data class JsUnInlinedExternalFunctionReference(
+    override val source: DashedIdentifier,
+    override val stableName: JsIdentifierName,
+    override val builtinOperatorId: BuiltinOperatorId? = null,
+) : JsExternalFunctionReference
+
+private val toStringIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, _: Boolean, _ ->
+        Js.CallExpression(
+            pos,
+            Js.MemberExpression(
+                pos,
+                arguments.getExprSafe(0, pos.leftEdge),
+                Js.Identifier(pos, JsIdentifierName("toString"), null),
+            ),
+            arguments.drop(1).map { it as Js.Expression },
+        )
+    }
+
+private val identityIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        if (arguments.size == 1 || (arguments.isNotEmpty() && !strict)) {
+            arguments[0]
+        } else {
+            garbageExpression(pos, "Wrong arguments for identity idiom expander")
+        }
+    }
+
+/* [x, y] -> x.has(y) */
+private val mappedHasExpander = { pos: Position, arguments: List<Js.Tree>, _: Boolean, _: JsTranslator? ->
+    if (arguments.size != 2) {
+        garbageExpression(pos, "Wrong number of arguments to core.type Mapped.has()")
+    } else {
+        val obj = arguments[0] as Js.Expression
+        val key = arguments[1] as Js.Expression
+        Js.CallExpression(
+            pos = pos,
+            callee = Js.MemberExpression(
+                pos = pos,
+                obj = obj,
+                property = Js.Identifier(pos, JsIdentifierName("has"), null),
+                computed = false,
+            ),
+            arguments = listOf(key),
+        )
+    }
+}
+
+/* [x] -> Object.freeze(Array.prototype.slice.call(x.keys())) */
+private val mappedKeysExpander = { pos: Position, arguments: List<Js.Tree>, _: Boolean, _: JsTranslator? ->
+    if (arguments.size != 1) {
+        garbageExpression(pos, "Wrong number of arguments to core.type Mapped.keys()")
+    } else {
+        val obj = arguments[0] as Js.Expression
+        Js.CallExpression(
+            pos = pos,
+            callee = Js.MemberExpression(
+                pos = pos,
+                obj = Js.Identifier(pos, JsIdentifierName("Object"), null),
+                property = Js.Identifier(pos, JsIdentifierName("freeze"), null),
+            ),
+            arguments = listOf(
+                Js.CallExpression(
+                    pos = pos,
+                    callee = Js.MemberExpression(
+                        pos = pos,
+                        obj = Js.Identifier(pos, JsIdentifierName("Array"), null),
+                        property = Js.Identifier(pos, JsIdentifierName("from"), null),
+                    ),
+                    arguments = listOf(
+                        Js.CallExpression(
+                            pos = pos,
+                            callee = Js.MemberExpression(
+                                pos = pos,
+                                obj = obj,
+                                property = Js.Identifier(pos, JsIdentifierName("keys"), null),
+                            ),
+                            arguments = listOf(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+}
+
+/* [x] -> Object.freeze(Array.prototype.slice.call(x.keys())) */
+private val mappedValuesExpander = { pos: Position, arguments: List<Js.Tree>, _: Boolean, _: JsTranslator? ->
+    if (arguments.size != 1) {
+        garbageExpression(pos, "Wrong number of arguments to core.type Mapped.values()")
+    } else {
+        val obj = arguments[0] as Js.Expression
+        Js.CallExpression(
+            pos = pos,
+            callee = Js.MemberExpression(
+                pos = pos,
+                obj = Js.Identifier(pos, JsIdentifierName("Object"), null),
+                property = Js.Identifier(pos, JsIdentifierName("freeze"), null),
+            ),
+            arguments = listOf(
+                Js.CallExpression(
+                    pos = pos,
+                    callee = Js.MemberExpression(
+                        pos = pos,
+                        obj = Js.Identifier(pos, JsIdentifierName("Array"), null),
+                        property = Js.Identifier(pos, JsIdentifierName("from"), null),
+                    ),
+                    arguments = listOf(
+                        Js.CallExpression(
+                            pos = pos,
+                            callee = Js.MemberExpression(
+                                pos = pos,
+                                obj = obj,
+                                property = Js.Identifier(pos, JsIdentifierName("values"), null),
+                            ),
+                            arguments = listOf(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+}
+
+private val mappedSizeExpander = { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+    val obj = arguments.getOrNull(0) as? Js.Expression
+    if (strict && (arguments.size != 1 || obj == null)) {
+        garbageExpression(pos, "Wrong arguments for length idiom expander")
+    } else {
+        Js.MemberExpression(
+            pos = pos,
+            obj = obj ?: Js.Identifier(pos, JsIdentifierName("x"), null),
+            property = Js.Identifier(pos, JsIdentifierName("size"), null),
+            computed = false,
+            optional = false,
+        )
+    }
+}
+
+/** Given `x` constructs `x.length`. */
+private val lengthIdiomExpander = { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+    val obj = arguments.getOrNull(0) as? Js.Expression
+    if (strict && (arguments.size != 1 || obj == null)) {
+        garbageExpression(pos, "Wrong arguments for length idiom expander")
+    } else {
+        Js.MemberExpression(
+            pos = pos,
+            obj = obj ?: Js.Identifier(pos, JsIdentifierName("x"), null),
+            property = Js.Identifier(pos.rightEdge, JsIdentifierName("length"), null),
+            computed = false,
+            optional = false,
+        )
+    }
+}
+
+/** Given `x` constructs `x.length`. */
+private val stringBuilderEndExpander = { pos: Position, arguments: List<Js.Tree>, strict: Boolean, t: JsTranslator? ->
+    val obj = arguments.getOrNull(0) as? Js.Expression
+    if (strict && (arguments.size != 1 || obj == null)) {
+        garbageExpression(pos, "Wrong arguments for length idiom expander")
+    } else {
+        lengthIdiomExpander(
+            pos,
+            listOf(
+                Js.MemberExpression(
+                    pos = pos,
+                    obj = obj ?: Js.Identifier(pos, JsIdentifierName("x"), null),
+                    property = Js.NumericLiteral(pos.rightEdge, 0),
+                    computed = true,
+                    optional = false,
+                ),
+            ),
+            strict,
+            t,
+        )
+    }
+}
+
+private fun newDateIdiomExpander(
+    pos: Position,
+    arguments: List<Js.Tree>,
+    strict: Boolean,
+    genre: Genre,
+    translator: JsTranslator?,
+): Js.Expression {
+    val year = arguments.getOrNull(0) as? Js.Expression
+    val month = arguments.getOrNull(1) as? Js.Expression
+    val day = arguments.getOrNull(2) as? Js.Expression
+
+    return if (
+        strict &&
+        (arguments.size != DATE_CONSTRUCTOR_ARITY || year == null || month == null || day == null)
+    ) {
+        garbageExpression(pos, "new Date() requires 3 expressions")
+    } else {
+        val left = pos.leftEdge
+        val dateConstructor = Js.Identifier(left, JsIdentifierName("Date"), null)
+
+        // There are several forms of this expression.
+        // For documentation
+        //     new globalThis.Date(globalThis.Date.UTC(...))
+        // For library code
+        //     new            Date(Date.UTC(...))
+        // unless the year might trigger JavaScript's rule where years in [0..99] have 1900 added
+        //     temperCore.dateConstructor(...)
+        var useNew = genre == Genre.Documentation || !strict || translator == null
+        if (!useNew && year is Js.NumericLiteral) {
+            val yearInt = year.value
+            if (yearInt is Long || yearInt is Int) {
+                useNew = yearInt.toLong() !in jsProblematicYearRange
+            }
+        }
+
+        if (useNew) {
+            val globalDate: Js.SimpleRef = when (genre) {
+                Genre.Library -> dateConstructor.globalizeThis()
+                Genre.Documentation -> dateConstructor
+            }
+
+            Js.NewExpression(
+                pos = pos,
+                callee = globalDate,
+                arguments = listOf(
+                    Js.CallExpression(
+                        pos = pos,
+                        callee = Js.MemberExpression(
+                            pos = left,
+                            obj = globalDate.deepCopy(),
+                            property = Js.Identifier(left, JsIdentifierName("UTC"), null),
+                        ),
+                        arguments = listOf(
+                            // Year
+                            year ?: Js.NumericLiteral(left, DEFAULT_FULL_YEAR),
+
+                            // Month
+                            // CAVEAT:
+                            // developer.mozilla.org/en-US/docs/Web/JavaScript/
+                            // Reference/Global_Objects/Date/UTC#monthIndex
+                            // > Integer value representing the month,
+                            // > beginning with 0 for January to 11 for December
+                            month?.let { monthExpr ->
+                                val afterMonth = monthExpr.pos.rightEdge
+                                Js.InfixExpression(
+                                    monthExpr.pos,
+                                    monthExpr,
+                                    Js.Operator(afterMonth, "-"),
+                                    // TODO: For Genre.Documentation comment why we're subtracting 1
+                                    Js.NumericLiteral(afterMonth, 1),
+                                )
+                            } ?: Js.NumericLiteral(left, 0),
+
+                            // Day of month
+                            day ?: Js.NumericLiteral(left, 1),
+                        ),
+                    ),
+                ),
+            )
+        } else {
+            val callee = JsUnInlinedExternalFunctionReference(
+                source = DashedIdentifier.temperCoreLibraryIdentifier,
+                stableName = connectedKeyToExportedName("std/temporal.type Date.constructor()"),
+            )
+            val calleeName = translator!!.requireExternalReference(callee)
+            Js.CallExpression(
+                pos = pos,
+                callee = Js.Identifier(left, calleeName, null),
+                arguments = listOf(
+                    year ?: Js.NumericLiteral(left, DEFAULT_FULL_YEAR),
+                    month ?: Js.NumericLiteral(left, 1),
+                    day ?: Js.NumericLiteral(left, 1),
+                ),
+            )
+        }
+    }
+}
+
+private fun mathAccess(
+    name: String,
+    arity: Int,
+    build: (Position, List<Js.Expression>, Js.Identifier) -> Js.Tree,
+): Inliner {
+    return { pos, args, strict, t ->
+        if (strict && args.size != arity) {
+            garbageExpression(pos, "need $arity argument(s) for use of $name")
+        } else {
+            // Copies the style of mathDotTrunc.
+            val idName = t?.requirePropertyReference(
+                OtherSupportCodeRequirement(
+                    JsPropertyReference(
+                        JsGlobalReference(ParsedName("Math")),
+                        JsIdentifierName(name),
+                    ),
+                    Signature2(
+                        WellKnownTypes.intType2,
+                        false,
+                        listOf(WellKnownTypes.float64Type2),
+                    ),
+                ).required as JsPropertyReference,
+            )
+                ?: JsIdentifierName(name)
+            @Suppress("UNCHECKED_CAST")
+            build(pos, args as List<Js.Expression>, Js.Identifier(pos.rightEdge, idName, null))
+        }
+    }
+}
+
+/**
+ * `type` function from interface.js
+ * Handles interface types and multiple inheritance using multiple arguments
+ */
+internal val typeSupportCode = JsUnInlinedExternalFunctionReference(
+    source = DashedIdentifier.temperCoreLibraryIdentifier,
+    stableName = JsIdentifierName("type"),
+)
+
+/** `str.hasIndex(idx)` -> `str.length > idx` */
+private val stringHasIndexExpander =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+        val str = arguments.getOrNull(0) as? Js.Expression
+        val idx = arguments.getOrNull(1) as? Js.Expression
+        if (strict && (arguments.size != 2 || str == null || idx == null)) {
+            garbageExpression(pos, "Wrong arguments for core.type String.hasIndex()")
+        } else {
+            // We put the length first so that we don't affect order of operations
+            val strPos = str?.pos ?: pos.leftEdge
+            Js.InfixExpression(
+                pos,
+                Js.MemberExpression(
+                    strPos,
+                    str ?: Js.Identifier(strPos, JsIdentifierName("str"), null),
+                    Js.Identifier(strPos.rightEdge, JsIdentifierName("length"), null),
+                ),
+                Js.Operator(strPos.rightEdge, ">"),
+                idx ?: Js.Identifier(pos.rightEdge, JsIdentifierName("idx"), null),
+            )
+        }
+    }
+
+/** `String.begin` -> `0` */
+private val stringBeginExpander = { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+    if (strict && arguments.isNotEmpty()) {
+        garbageExpression(pos, "Wrong arguments for core.type String.begin")
+    } else {
+        Js.NumericLiteral(pos, 0)
+    }
+}
+
+private val requireStringIndex = JsUnInlinedExternalFunctionReference(
+    DashedIdentifier.temperCoreLibraryIdentifier,
+    JsIdentifierName("requireStringIndex"),
+)
+private val requireNoStringIndex = JsUnInlinedExternalFunctionReference(
+    DashedIdentifier.temperCoreLibraryIdentifier,
+    JsIdentifierName("requireNoStringIndex"),
+)
+
+private val coreMarshalToJsonObject = JsUnInlinedExternalFunctionReference(
+    DashedIdentifier.temperCoreLibraryIdentifier,
+    JsIdentifierName("marshalToJsonObject"),
+)
+private data object JsBackendNamingContext : NamingContext() {
+    override val loc: ModuleLocation = ModuleName(filePath("-be", "js"), 2, isPreface = false)
+    val counter = AtomicCounter()
+}
+private val marshalToJsonObjectSig by lazy {
+    val stdJson = getSharedStdModules().first { "json" in (it.loc as ModuleName).sourceFile.last().baseName }
+    val jsonObjectExport = stdJson.exports!!.first { it.name.baseName.nameText == "JsonObject" }
+    val jsonAdapterExport = stdJson.exports!!.first { it.name.baseName.nameText == "JsonAdapter" }
+    val nameMaker = ResolvedNameMaker(JsBackendNamingContext, Genre.Library)
+    val t = TypeFormal(
+        Position(JsBackendNamingContext.loc, 0, 0),
+        nameMaker.unusedSourceName(ParsedName("T")),
+        null,
+        Variance.Invariant,
+        JsBackendNamingContext.counter,
+    )
+    val tt = MkType2(t).get()
+    // <T>(JsonAdapter<T>, T) -> JsonObject
+    Signature2(
+        returnType2 = TType.unpack(jsonObjectExport.valueFromStaging!!).type2,
+        hasThisFormal = false,
+        requiredInputTypes = listOf(
+            MkType2(
+                (TType.unpack(jsonAdapterExport.valueFromStaging!!).type2 as DefinedNonNullType)
+                    .definition,
+            )
+                .actuals(listOf(tt))
+                .get(),
+            tt,
+        ),
+        typeFormals = listOf(t),
+    )
+}
+
+private const val SLICE_ARITY = 3 // str, begin, end
+
+/** `str.slice(begin, end) -> `str.slice(begin, end)` */
+private val stringSliceExpander =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+        val str = arguments.getOrNull(0) as? Js.Expression
+        val begin = arguments.getOrNull(1) as? Js.Expression
+        val end = arguments.getOrNull(2) as? Js.Expression
+        if (strict && (arguments.size != SLICE_ARITY || str == null || begin == null || end == null)) {
+            garbageExpression(pos, "Wrong arguments for core.type String.slice()")
+        } else {
+            val methodPos = str?.pos ?: pos
+            Js.CallExpression(
+                pos,
+                Js.MemberExpression(
+                    pos = methodPos,
+                    obj = str ?: Js.Identifier(methodPos, JsIdentifierName("str"), null),
+                    property = Js.Identifier(methodPos.rightEdge, JsIdentifierName("substring"), null),
+                    computed = false,
+                    optional = false,
+                ),
+                listOf(
+                    begin ?: Js.Identifier(pos.rightEdge, JsIdentifierName("begin"), null),
+                    end ?: Js.Identifier(pos.rightEdge, JsIdentifierName("end"), null),
+                ),
+            )
+        }
+    }
+
+private fun stringIndexOptionCompareToHandler(infixOperatorTokenText: String): Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+        val a = arguments.getOrNull(0) as? Js.Expression
+        val b = arguments.getOrNull(1) as? Js.Expression
+        if (strict && (arguments.size != 2 || a == null || b == null)) {
+            garbageExpression(pos, "Wrong arguments for core.type StringIndex.compareTo()")
+        } else {
+            val aPos = a?.pos ?: pos.leftEdge
+            val bPos = b?.pos ?: pos.rightEdge
+            Js.InfixExpression(
+                pos,
+                a ?: Js.Identifier(aPos, JsIdentifierName("a"), null),
+                Js.Operator(aPos.rightEdge, infixOperatorTokenText),
+                b ?: Js.Identifier(bPos, JsIdentifierName("b"), null),
+            )
+        }
+    }
+
+/** `stringIndex.compareTo(other) -> `a - b` */
+private val stringIndexOptionCompareToExpander =
+    stringIndexOptionCompareToHandler("-")
+private val stringIndexOptionCompareToExpanderEq =
+    stringIndexOptionCompareToHandler("===")
+private val stringIndexOptionCompareToExpanderGe =
+    stringIndexOptionCompareToHandler(">=")
+private val stringIndexOptionCompareToExpanderGt =
+    stringIndexOptionCompareToHandler(">")
+private val stringIndexOptionCompareToExpanderLe =
+    stringIndexOptionCompareToHandler("<=")
+private val stringIndexOptionCompareToExpanderLt =
+    stringIndexOptionCompareToHandler("<")
+private val stringIndexOptionCompareToExpanderNe =
+    stringIndexOptionCompareToHandler("!==")
+
+/** `StringIndex.none` -> `-1` */
+private val stringIndexNoneExpander = { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _: JsTranslator? ->
+    if (strict && arguments.isNotEmpty()) {
+        garbageExpression(pos, "Wrong arguments for core.type StringIndex.none")
+    } else {
+        Js.NumericLiteral(pos, -1)
+    }
+}
+
+/** new StringBuilder() -> [""] */
+private val stringBuilderConstructorExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, _ ->
+        if (strict && args.isNotEmpty()) {
+            garbageExpression(pos, "need 0 arguments for core.type StringBuilder.constructor()")
+        } else {
+            Js.ArrayExpression(pos, listOf(Js.StringLiteral(pos, "")))
+        }
+    }
+
+/** this.append(str) -> this[0] += str */
+private val stringBuilderAppendExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, _ ->
+        val stringBuilder = args.getOrNull(0) as? Js.Expression
+        val substring = args.getOrNull(1) as? Js.Expression
+        if (strict && (args.size != 2 || stringBuilder == null || substring == null)) {
+            garbageExpression(pos, "need 2 arguments for core.type StringBuilder.append()")
+        } else {
+            val sbPos = stringBuilder?.pos ?: pos.leftEdge
+            val ssPos = substring?.pos ?: pos.rightEdge
+            voidExpr(
+                Js.InfixExpression(
+                    pos,
+                    Js.MemberExpression(
+                        sbPos,
+                        stringBuilder ?: Js.Identifier(sbPos, JsIdentifierName("stringBuilder"), null),
+                        Js.NumericLiteral(sbPos.rightEdge, 0),
+                        computed = true,
+                    ),
+                    Js.Operator(ssPos.leftEdge, "+="),
+                    substring ?: Js.Identifier(ssPos, JsIdentifierName("substring"), null),
+                ),
+            )
+        }
+    }
+
+/** this.append(str, begin, end) -> this[0] += str.slice(begin, end) */
+private val stringBuilderAppendBetweenExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, t ->
+        val stringBuilder = args.getOrNull(0) as? Js.Expression
+        val substring = args.getOrNull(1) as? Js.Expression
+        val begin = args.getOrNull(2) as? Js.Expression
+
+        @Suppress("MagicNumber") // argument number
+        val end = args.getOrNull(3) as? Js.Expression
+        @Suppress("MagicNumber") // arity
+        if (
+            strict &&
+            (args.size != 4 || stringBuilder == null || substring == null || begin == null || end == null)
+        ) {
+            garbageExpression(pos, "wrong arguments for core.type StringBuilder.appendBetween()")
+        } else {
+            val substringPos = listOfNotNull(substring, begin, end)
+                .spanningPosition(substring?.pos ?: pos)
+            stringBuilderAppendExpander(
+                pos,
+                listOf(
+                    stringBuilder ?: Js.Identifier(pos.leftEdge, JsIdentifierName("stringBuilder"), null),
+                    stringSliceExpander(
+                        substringPos,
+                        listOf(
+                            substring ?: Js.Identifier(pos.rightEdge, JsIdentifierName("substring"), null),
+                            begin ?: Js.Identifier(pos.rightEdge, JsIdentifierName("begin"), null),
+                            end ?: Js.Identifier(pos.rightEdge, JsIdentifierName("end"), null),
+                        ),
+                        strict,
+                        t,
+                    ),
+                ),
+                strict,
+                t,
+            )
+        }
+    }
+
+/** this.clear() -> void (this[0] = "") */
+private val stringBuilderClearExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, _ ->
+        val stringBuilder = args.getOrNull(0) as? Js.Expression
+        if (strict && (args.size != 1 || stringBuilder == null)) {
+            garbageExpression(pos, "need 1 argument for core.type StringBuilder.clear()")
+        } else {
+            val sbPos = stringBuilder?.pos ?: pos.leftEdge
+            val rPos = pos.rightEdge
+            voidExpr(
+                Js.InfixExpression(
+                    pos,
+                    Js.MemberExpression(
+                        sbPos,
+                        stringBuilder ?: Js.Identifier(sbPos, JsIdentifierName("stringBuilder"), null),
+                        Js.NumericLiteral(sbPos.rightEdge, 0),
+                        computed = true,
+                    ),
+                    Js.Operator(rPos, "="),
+                    Js.StringLiteral(rPos, ""),
+                ),
+            )
+        }
+    }
+
+internal fun voidExpr(e: Js.Expression) = Js.UnaryExpression(
+    e.pos,
+    Js.Operator(e.pos.leftEdge, "void"),
+    e,
+)
+
+/** this.toString() -> this[0] */
+private val stringBuilderToStringExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, _ ->
+        if (strict && args.size != 1) {
+            garbageExpression(pos, "need 1 argument for core.type StringBuilder.toString()()")
+        } else {
+            val stringBuilder = args.getExprSafe(0, pos.leftEdge)
+            Js.MemberExpression(
+                stringBuilder.pos,
+                stringBuilder,
+                Js.NumericLiteral(stringBuilder.pos.rightEdge, 0),
+                computed = true,
+            )
+        }
+    }
+
+/** BigInt(n) */
+private val bigintExpander: Inliner =
+    { pos: Position, args: List<Js.Tree>, strict: Boolean, _ ->
+        if (strict && args.size != 1) {
+            garbageExpression(pos, "need 1 argument for core.type StringBuilder.toString()()")
+        } else {
+            Js.CallExpression(
+                pos,
+                JsGlobalReference(ParsedName("BigInt")).asIdentifier(pos),
+                args.map { it as Js.Actual },
+            )
+        }
+    }
+
+private fun mathCall(name: String, arity: Int = 1) = mathAccess(name, arity) { pos, args, id ->
+    Js.CallExpression(pos = pos, callee = id, arguments = args)
+}
+
+private fun mathProperty(name: String) = mathAccess(name, 0) { _, _, id -> id }
+
+private fun propertyReadToMethodCall(methodName: String) = propertyReadToMethodCall(JsIdentifierName(methodName))
+
+private fun propertyReadToMethodCall(
+    methodName: JsIdentifierName,
+): Inliner {
+    return { pos, args, strict, _ ->
+        val thisReference = args.getOrNull(0) as? Js.Expression
+        if (strict && (args.size != 1 || thisReference == null)) {
+            garbageExpression(pos, "need one `this` argument for read of .$methodName()")
+        } else {
+            Js.CallExpression(
+                pos = pos,
+                callee = Js.MemberExpression(
+                    pos = pos,
+                    obj = thisReference ?: Js.NullLiteral(pos),
+                    property = Js.Identifier(pos.rightEdge, methodName, null),
+                ),
+                arguments = emptyList(),
+            )
+        }
+    }
+}
+
+private val dateGetMonthExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val date = arguments.getOrNull(0) as? Js.Expression
+
+        if (strict && (arguments.size != 1 || date == null)) {
+            garbageExpression(pos, "date.getMonth() requires 1 expression")
+        } else {
+            val right = pos.rightEdge
+            Js.InfixExpression(
+                pos = pos,
+                left = Js.CallExpression(
+                    pos = pos,
+                    callee = Js.MemberExpression(
+                        pos = pos,
+                        obj = date ?: Js.NullLiteral(pos),
+                        property = Js.Identifier(right, JsIdentifierName("getUTCMonth"), null),
+                    ),
+                    arguments = emptyList(),
+                ),
+                operator = Js.Operator(right, "+"),
+                right = Js.NumericLiteral(right, 1),
+            )
+        }
+    }
+
+private const val ISO_WEEKDAY_NUM_SUNDAY = 7
+private val dateGetDayOfWeekExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        propertyReadToMethodCall("getUTCDay")
+        val date = arguments.getOrNull(0) as? Js.Expression
+
+        if (strict && (arguments.size != 1 || date == null)) {
+            garbageExpression(pos, "date.get dayOfWeek() requires 1 expression")
+        } else {
+            val right = pos.rightEdge
+            // d.getUTCDay() || 7.
+            // getUTCDay returns 0 for Sunday, which is falsey, so to turn it into an
+            // ISO Weekday, we just or it with 7.
+            Js.LogicalExpression(
+                pos = pos,
+                left = Js.CallExpression(
+                    pos = pos,
+                    callee = Js.MemberExpression(
+                        pos = pos,
+                        obj = date ?: Js.NullLiteral(pos),
+                        property = Js.Identifier(right, JsIdentifierName("getUTCDay"), null),
+                    ),
+                    arguments = emptyList(),
+                ),
+                operator = Js.Operator(right, "||"),
+                right = Js.NumericLiteral(right, ISO_WEEKDAY_NUM_SUNDAY),
+            )
+        }
+    }
+
+private val dateToIsoStringExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val date = arguments.getOrNull(0) as? Js.Expression
+
+        if (strict && (arguments.size != 1 || date == null)) {
+            garbageExpression(pos, "date.toString() requires 1 expression")
+        } else {
+            val right = pos.rightEdge
+            // date.toISOString() is idiomatic but includes the time portion, so do
+            // date.toISOString().split('T')[0]
+            // TODO: maybe
+            Js.MemberExpression(
+                pos = pos,
+                obj = Js.CallExpression( // .split
+                    pos = pos,
+                    Js.MemberExpression(
+                        pos = pos,
+                        obj = Js.CallExpression( // .toISOString()
+                            pos = pos,
+                            callee = Js.MemberExpression(
+                                pos = pos,
+                                obj = date ?: Js.NullLiteral(pos),
+                                property = Js.Identifier(right, JsIdentifierName("toISOString"), null),
+                            ),
+                            arguments = emptyList(),
+                        ),
+                        property = Js.Identifier(right, JsIdentifierName("split"), null),
+                    ),
+                    arguments = listOf(
+                        Js.StringLiteral(right, "T"),
+                    ),
+                ),
+                property = Js.NumericLiteral(right, 0),
+                computed = true,
+            )
+        }
+    }
+
+private fun dateFromIsoStringExpander(
+    pos: Position,
+    arguments: List<Js.Tree>,
+    strict: Boolean,
+    genre: Genre,
+): Js.Expression {
+    val isoStr = arguments.getOrNull(0) as? Js.Expression
+
+    return if (strict && (arguments.size != 1 || isoStr == null)) {
+        garbageExpression(pos, "Date.fromIsoString() requires 1 expression")
+    } else {
+        val left = pos.leftEdge
+        val dateConstructor = Js.Identifier(left, JsIdentifierName("Date"), null)
+        val globalDate: Js.SimpleRef = when (genre) {
+            Genre.Library -> dateConstructor.globalizeThis()
+            Genre.Documentation -> dateConstructor
+        }
+
+        // new Date(Date.parse(x))
+        Js.NewExpression(
+            pos = pos,
+            globalDate.deepCopy(),
+            listOf(
+                Js.CallExpression(
+                    pos = pos,
+                    Js.MemberExpression(
+                        pos = pos,
+                        obj = globalDate,
+                        property = Js.Identifier(left, JsIdentifierName("parse"), null),
+                    ),
+                    listOf(isoStr ?: Js.NullLiteral(pos)),
+                ),
+            ),
+        )
+    }
+}
+
+private val listToListBuilderIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val obj = arguments.getOrNull(0) as? Js.Expression
+        if (strict && (arguments.size != 1 || obj == null)) {
+            garbageExpression(pos, "Wrong arguments for toListBuilder idiom expander")
+        } else {
+            Js.CallExpression(
+                pos,
+                Js.MemberExpression(
+                    pos,
+                    obj = obj ?: Js.Identifier(pos, JsIdentifierName("x"), null),
+                    property = Js.Identifier(pos, JsIdentifierName("slice"), null),
+                ),
+                emptyList(),
+            )
+        }
+    }
+
+private val listBuilderConstructorIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        if (strict && arguments.isNotEmpty()) {
+            garbageExpression(pos, "Wrong arguments for ListBuilder idiom expander")
+        } else {
+            Js.ArrayExpression(pos, emptyList())
+        }
+    }
+
+/** Given `x` constructs `x.next()`. */
+private val nextIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val argument = arguments.getOrNull(0) as? Js.Expression
+        if (strict && (arguments.size != 1 || argument == null)) {
+            garbageExpression(pos, "core.type SafeGenerator.nextSafe() needs one argument")
+        } else {
+            Js.CallExpression(
+                pos = pos,
+                callee = Js.MemberExpression(
+                    pos = pos,
+                    obj = argument ?: Js.NullLiteral(pos),
+                    property = Js.Identifier(pos.rightEdge, JsIdentifierName("next"), null),
+                ),
+                arguments = emptyList(),
+            )
+        }
+    }
+
+/** Given `x` constructs `!x`. */
+private val stringIsEmptyIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val argument = arguments.getOrNull(0) as? Js.Expression
+        if (strict && (arguments.size != 1 || argument == null)) {
+            garbageExpression(pos, "core.type String.get isEmpty() needs one argument")
+        } else {
+            Js.UnaryExpression(
+                pos,
+                Js.Operator(pos.leftEdge, "!"),
+                argument ?: Js.Identifier(pos, JsIdentifierName("x"), null),
+            )
+        }
+    }
+
+/** Given `x` constructs `!x.length`. */
+private val listIsEmptyIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, translator ->
+        Js.UnaryExpression(
+            pos,
+            Js.Operator(pos.leftEdge, "!"),
+            lengthIdiomExpander(pos, arguments, strict, translator),
+        )
+    }
+
+/** Given `x` and `f` constructs `x.forEach((e) => f(e))`. */
+private val listForEachIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        val series = arguments.getOrNull(0) as? Js.Expression
+        val body = arguments.getOrNull(1) as? Js.Expression
+        // Note: The function passed to forEach gets (element, index).
+        // We do not mask out that extra argument, but if `f` were varargs or took extra,
+        // optional arguments, we might need to.
+
+        // TODO: Can we use type information to detect extra/optional arguments which
+        // might require replacing `body` with `(x) => body(x)`?
+        if (strict && (arguments.size != 2 || series == null || body == null)) {
+            garbageExpression(pos, "Wrong arguments for forEach idiom expander")
+        } else {
+            Js.CallExpression(
+                pos = pos,
+                callee = Js.MemberExpression(
+                    pos = pos,
+                    obj = series ?: Js.Identifier(pos.leftEdge, JsIdentifierName("x"), null),
+                    property = Js.Identifier(
+                        series?.pos?.rightEdge ?: pos.leftEdge,
+                        JsIdentifierName("forEach"),
+                        null,
+                    ),
+                    computed = false,
+                    optional = false,
+                ),
+                arguments = listOf(body ?: Js.Identifier(pos.rightEdge, JsIdentifierName("f"), null)),
+            )
+        }
+    }
+
+private val assertStrict = JsUnInlinedExternalFunctionReference(
+    source = DashedIdentifier("assert"),
+    // Among other things, conveniently doesn't need default import.
+    // Also, this existed since before `node` supported `import` imports, so should be fine to use.
+    // See for example: https://nodejs.org/docs/latest-v15.x/api/assert.html#assert_strict_assertion_mode
+    stableName = JsIdentifierName("strict"),
+)
+
+private val bailExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, translator: JsTranslator? ->
+        val test = arguments.getOrNull(0) as? Js.Expression
+        @Suppress("MagicNumber") // Yeah, so we expect arity 3.
+        if (translator == null) {
+            garbageExpression(pos, "No translator")
+        } else if (strict && (arguments.size != 1 || test == null)) {
+            garbageExpression(pos, "Wrong arguments for bail")
+        } else {
+            Js.CallExpression(
+                pos,
+                callee = Js.MemberExpression(
+                    pos,
+                    Js.Identifier(pos, translator.requireExternalReference(assertStrict), null),
+                    Js.Identifier(pos, JsIdentifierName("fail"), null),
+                ),
+                arguments = when (test) {
+                    null -> emptyList()
+                    else -> listOf(
+                        Js.CallExpression(
+                            pos,
+                            Js.MemberExpression(
+                                pos,
+                                test,
+                                Js.Identifier(pos, JsIdentifierName("messagesCombined"), null),
+                            ),
+                            emptyList(),
+                        ),
+                    )
+                },
+            )
+        }
+    }
+
+private val getConsoleExpander: Inliner =
+    { pos: Position, _: List<Js.Tree>, _: Boolean, translator: JsTranslator? ->
+        // Call it a function because that's what we can do here.
+        val consoleRef = JsUnInlinedExternalFunctionReference(
+            source = DashedIdentifier.temperCoreLibraryIdentifier,
+            stableName = JsIdentifierName("globalConsole"),
+        )
+        // Use a fallback name because we apparently need that for simple tmpl tree to string?
+        val consoleName = translator?.requireExternalReference(consoleRef) ?: JsIdentifierName("console")
+        // But just use it as a value. TODO Some logging framework for JS.
+        Js.Identifier(pos, consoleName, null)
+    }
+
+private val ignoreIdiomExpander: Inliner =
+    { pos: Position, arguments: List<Js.Tree>, strict: Boolean, _ ->
+        if (strict && arguments.size != 1) {
+            garbageExpression(pos, "Wrong arguments for ignore idiom expander")
+        } else {
+            val voidValue = Js.UnaryExpression(pos, Js.Operator(pos, "void"), Js.NumericLiteral(pos, 0))
+            when (val arg = arguments.getOrNull(0)) {
+                // Usually we've reduced things to just identifiers, where we can just ignore them here.
+                // We could replace them with nothing if we know we're unused.
+                // Maybe can do that after Temper handles void more.
+                // Meanwhile, minifiers I tried could discard these entirely when unused inside functions.
+                // And at least some can't discard calls to empty functions, so this is still useful.
+                is Js.Identifier, null -> voidValue
+                // If it's more than an identifier, keep it around.
+                // Minifiers I tried could discard the `void 0` if unused.
+                is Js.Expression -> Js.SequenceExpression(pos, listOf(arg, voidValue))
+                else -> garbageExpression(pos, "Expected one expression argument")
+            }
+        }
+    }
+
+/**
+ * For the given connected method key, the corresponding name exported from
+ * `runtime-support/index.js`.
+ */
+internal fun connectedKeyToExportedName(connectedKey: String) = JsIdentifierName(
+    // Logic here keeps things somewhat matching pre-qname expectations. TODO Update expectations?
+    connectedKey
+        // Split segments and qualifiers, including `::` pseudos.
+        .split(".", "::", " ")
+        // Skip the module part of the qname and also type qualifiers.
+        .subListToEnd(1)
+        .filter { it != "type" }
+        // Make what's left camelCase.
+        .mapIndexed { i, segment ->
+            when (i) {
+                0 -> segment.asciiUnTitleCase()
+                else -> segment.asciiTitleCase()
+            }.trimEnd('(', ')') // Exclude parens.
+        }.joinToString(""),
+)
+
+private fun runtimeLibraryBackedSupportCode(
+    builtinOperatorId: BuiltinOperatorId,
+    source: DashedIdentifier = DashedIdentifier.temperCoreLibraryIdentifier,
+    needsThisEquivalent: Boolean = false,
+    inline: (Position, List<Js.Tree>) -> Js.Expression?,
+): Pair<BuiltinOperatorId, InlinedJs> = runtimeLibraryBackedSupportCode(
+    builtinOperatorId = builtinOperatorId,
+    source = source,
+    requires = emptyList(),
+    needsThisEquivalent = needsThisEquivalent,
+    inline = { pos, argTrees, _ ->
+        inline(pos, argTrees)
+    },
+)
+
+private fun runtimeLibraryBackedSupportCode(
+    builtinOperatorId: BuiltinOperatorId,
+    source: DashedIdentifier = DashedIdentifier.temperCoreLibraryIdentifier,
+    requires: List<SupportCodeRequirement>,
+    needsThisEquivalent: Boolean = false,
+    inline: (Position, List<Js.Tree>, JsTranslator?) -> Js.Expression?,
+): Pair<BuiltinOperatorId, InlinedJs> {
+    val externalName = builtinOperatorId.name.asciiUnTitleCase() // PlusIntInt -> plusIntInt
+    return builtinOperatorId to InlinedJs(
+        source = source,
+        stableName = JsIdentifierName(externalName),
+        needsThisEquivalent = needsThisEquivalent,
+        builtinOperatorId = builtinOperatorId,
+        requires = requires,
+    ) { pos: Position, operands: List<Js.Tree>, _, t ->
+        inline(pos, operands, t)
+            ?: garbageExpression(pos, "Cannot inline ${builtinOperatorId.name}")
+    }
+}
+
+private fun runtimeLibraryReference(id: BuiltinOperatorId, name: String? = null) =
+    id to JsUnInlinedExternalFunctionReference(
+        source = DashedIdentifier.temperCoreLibraryIdentifier,
+        stableName = JsIdentifierName(name ?: id.name.asciiUnTitleCase()),
+        builtinOperatorId = id,
+    )
+
+private fun arity1(operands: List<Js.Tree>): List<Js.Expression>? {
+    if (operands.size == 1) {
+        val (a) = operands
+        if (a is Js.Expression) { return listOf(a) }
+    }
+    return null
+}
+
+private fun arity2(operands: List<Js.Tree>): List<Js.Expression>? {
+    if (operands.size == 2) {
+        val (a, b) = operands
+        if (a is Js.Expression && b is Js.Expression) { return listOf(a, b) }
+    }
+    return null
+}
+
+/** `globalThis.Math.imul` */
+private val mathDotIMul = OtherSupportCodeRequirement(
+    JsPropertyReference(
+        JsGlobalReference(ParsedName("Math")),
+        JsIdentifierName("imul"),
+    ),
+    Signature2(
+        WellKnownTypes.intType2,
+        false,
+        listOf(WellKnownTypes.intType2, WellKnownTypes.intType2),
+    ),
+)
+
+private val coreCmpGeneric = JsUnInlinedExternalFunctionReference(
+    source = DashedIdentifier.temperCoreLibraryIdentifier,
+    stableName = JsIdentifierName("cmpGeneric"),
+    builtinOperatorId = BuiltinOperatorId.CmpGeneric,
+)
+
+private val coreCmpFloat = JsUnInlinedExternalFunctionReference(
+    source = DashedIdentifier.temperCoreLibraryIdentifier,
+    stableName = JsIdentifierName("cmpFloat"),
+    builtinOperatorId = BuiltinOperatorId.CmpGeneric,
+)
+
+private val coreCmpString = JsUnInlinedExternalFunctionReference(
+    source = DashedIdentifier.temperCoreLibraryIdentifier,
+    stableName = JsIdentifierName("cmpString"),
+    builtinOperatorId = BuiltinOperatorId.CmpGeneric,
+)
+
+private fun cmpFromCoreCmp(
+    supportCode: JsExternalReference,
+): (Position, JsTranslator?, Js.Expression, Js.Expression) -> Js.Expression = { pos, translator, left, right ->
+    Js.CallExpression(
+        pos,
+        Js.Identifier(
+            pos,
+            translator?.requireExternalReference(supportCode)
+                ?: JsIdentifierName(JsIdentifierGrammar.massageJsIdentifier(supportCode.baseName.nameText)),
+            null,
+        ),
+        listOf(left, right),
+    )
+}
+
+private fun cmpToOperator(
+    id: BuiltinOperatorId,
+    operatorTokenText: String,
+    generateCmp: (pos: Position, translator: JsTranslator?, left: Js.Expression, right: Js.Expression) -> Js.Expression,
+): Pair<BuiltinOperatorId, InlinedJs> {
+    return runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, translator ->
+        Js.BinaryExpression(
+            pos,
+            generateCmp(pos, translator, args.getExprSafe(0, pos.leftEdge), args.getExprSafe(1, pos.rightEdge)),
+            Js.Operator(pos, operatorTokenText),
+            Js.NumericLiteral(pos, 0),
+        )
+    }
+}
+
+private val builtinOperatorIdToSupportCode = BuiltinOperatorId.entries.mapNotNull { id ->
+    when (id) {
+        BuiltinOperatorId.BooleanNegation -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity1(args)?.let { (a) ->
+                Js.UnaryExpression(pos, Js.Operator(pos.leftEdge, "!"), a)
+            }
+        }
+
+        BuiltinOperatorId.BitwiseNegation32,
+        BuiltinOperatorId.BitwiseNegation64,
+        -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity1(args)?.let { (a) ->
+                Js.UnaryExpression(pos, Js.Operator(pos.leftEdge, "~"), a)
+            }
+        }
+
+        BuiltinOperatorId.BitwiseAnd32,
+        BuiltinOperatorId.BitwiseAnd64,
+        -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(pos, a, Js.Operator(pos.leftEdge, "&"), b)
+            }
+        }
+
+        BuiltinOperatorId.BitwiseOr32,
+        BuiltinOperatorId.BitwiseOr64,
+        -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(pos, a, Js.Operator(pos.leftEdge, "|"), b)
+            }
+        }
+
+        BuiltinOperatorId.BitwiseXor32,
+        BuiltinOperatorId.BitwiseXor64,
+        -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(pos, a, Js.Operator(pos.leftEdge, "^"), b)
+            }
+        }
+
+        BuiltinOperatorId.BitwiseShl32 -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(pos, a, Js.Operator(pos.leftEdge, "<<"), b)
+            }
+        }
+        BuiltinOperatorId.BitwiseShl64 -> runtimeLibraryReference(id) // BigInt << needs careful {under,over}flow
+
+        BuiltinOperatorId.BitwiseShr32 -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(pos, a, Js.Operator(pos.leftEdge, ">>"), b)
+            }
+        }
+        // BigInt >> does not mask shift amount
+        BuiltinOperatorId.BitwiseShr64 -> runtimeLibraryReference(id)
+
+        // number >>> performs ToUint32 internally, but Temper says `x >>> 0` is signed identity
+        BuiltinOperatorId.BitwiseShrUnsigned32 -> runtimeLibraryReference(id)
+        // BigInt does not support >>>
+        BuiltinOperatorId.BitwiseShrUnsigned64 -> runtimeLibraryReference(id)
+
+        BuiltinOperatorId.IsNull -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity1(args)?.let { (a) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(pos.rightEdge, "=="),
+                    Js.NullLiteral(pos.rightEdge),
+                )
+            }
+        }
+
+        BuiltinOperatorId.NotNull -> null
+
+        BuiltinOperatorId.DivFltFlt -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(pos.leftEdge, "/"),
+                    b,
+                )
+            }
+        }
+
+        BuiltinOperatorId.ModFltFlt -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(pos.leftEdge, "%"),
+                    b,
+                )
+            }
+        }
+
+        BuiltinOperatorId.DivIntInt -> runtimeLibraryReference(id) // Error handling
+        BuiltinOperatorId.DivIntIntSafe -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(b.pos.leftEdge, "/"),
+                    b,
+                ).toInt32()
+            }
+        }
+
+        BuiltinOperatorId.ModIntInt -> runtimeLibraryReference(id) // Error handling
+        BuiltinOperatorId.ModIntIntSafe ->
+            // Delegate to ModIntInt.  TODO: check whether we can use `%` and `|`
+            id to runtimeLibraryReference(BuiltinOperatorId.ModIntInt).second
+
+        BuiltinOperatorId.DivIntInt64, BuiltinOperatorId.DivIntInt64Safe -> runtimeLibraryBackedSupportCode(
+            id,
+            requires = listOf(),
+        ) { pos, args, translator ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(b.pos.leftEdge, "/"),
+                    b,
+                ).toInt64(translator!!)
+            }
+        }
+
+        BuiltinOperatorId.ModIntInt64, BuiltinOperatorId.ModIntInt64Safe -> runtimeLibraryBackedSupportCode(
+            id,
+            requires = listOf(),
+        ) { pos, args, translator ->
+            arity2(args)?.let { (a, b) ->
+                Js.InfixExpression(
+                    pos,
+                    a,
+                    Js.Operator(b.pos.leftEdge, "%"),
+                    b,
+                ).toInt64(translator!!)
+            }
+        }
+
+        BuiltinOperatorId.MinusFlt, BuiltinOperatorId.MinusInt, BuiltinOperatorId.MinusInt64 ->
+            runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, translator ->
+                arity1(args)?.let { (e) ->
+                    Js.UnaryExpression(
+                        pos,
+                        Js.Operator(pos.leftEdge, "-"),
+                        e,
+                    ).toOutType(id, translator!!)
+                }
+            }
+
+        BuiltinOperatorId.MinusFltFlt, BuiltinOperatorId.MinusIntInt, BuiltinOperatorId.MinusIntInt64 ->
+            runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, translator ->
+                arity2(args)?.let { (a, b) ->
+                    Js.InfixExpression(
+                        pos,
+                        a,
+                        Js.Operator(pos.leftEdge, "-"),
+                        b,
+                    ).toOutType(id, translator!!)
+                }
+            }
+
+        BuiltinOperatorId.PlusFltFlt, BuiltinOperatorId.PlusIntInt, BuiltinOperatorId.PlusIntInt64 ->
+            runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, translator ->
+                arity2(args)?.let { (a, b) ->
+                    Js.InfixExpression(
+                        pos,
+                        a,
+                        Js.Operator(pos.leftEdge, "+"),
+                        b,
+                    ).toOutType(id, translator!!)
+                }
+            }
+
+        BuiltinOperatorId.PowFltFlt ->
+            runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, _ ->
+                arity2(args)?.let { (a, b) ->
+                    Js.InfixExpression(
+                        pos,
+                        a,
+                        Js.Operator(pos.leftEdge, "**"),
+                        b,
+                    )
+                }
+            }
+
+        BuiltinOperatorId.TimesFltFlt, BuiltinOperatorId.TimesIntInt64 ->
+            runtimeLibraryBackedSupportCode(id, requires = listOf()) { pos, args, translator ->
+                arity2(args)?.let { (a, b) ->
+                    Js.InfixExpression(
+                        pos,
+                        a,
+                        Js.Operator(pos.leftEdge, "*"),
+                        b,
+                    ).toOutType(id, translator!!)
+                }
+            }
+
+        BuiltinOperatorId.TimesIntInt -> runtimeLibraryBackedSupportCode(
+            id,
+            requires = listOf(mathDotIMul),
+        ) { pos, args, t ->
+            arity2(args)?.let { (a, b) ->
+                val truncName = t?.requirePropertyReference(mathDotIMul.required as JsPropertyReference)
+                    ?: JsIdentifierName("imul") // for doc mode?
+                // `Math.imul(a, b)` but where imul is a pooled name
+                Js.CallExpression(
+                    pos,
+                    Js.Identifier(pos.leftEdge, truncName, null),
+                    listOf(a, b),
+                )
+            }
+        }
+
+        BuiltinOperatorId.StrCat -> runtimeLibraryBackedSupportCode(id) strCat@{ pos, args ->
+            val expressions = args.map { it as Js.Expression }
+            val firstExpr = expressions.firstOrNull() ?: return@strCat Js.StringLiteral(pos, "")
+            val firstExprAsString = when (firstExpr) {
+                is Js.StringLiteral -> firstExpr
+                else -> Js.CallExpression(
+                    pos,
+                    Js.Identifier(pos, JsIdentifierName("String"), null),
+                    listOf(firstExpr),
+                )
+            }
+            expressions.drop(1).fold(firstExprAsString) { last, elem ->
+                Js.BinaryExpression(
+                    pos,
+                    last,
+                    Js.Operator(pos, "+"),
+                    elem,
+                )
+            }
+        }
+
+        BuiltinOperatorId.Listify -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            Js.CallExpression(
+                pos,
+                Js.MemberExpression(
+                    pos,
+                    Js.Identifier(pos, JsIdentifierName("Object"), null),
+                    Js.Identifier(pos, JsIdentifierName("freeze"), null),
+                ),
+                listOf(
+                    Js.ArrayExpression(
+                        pos,
+                        args.map { it as Js.Expression },
+                    ),
+                ),
+            )
+        }
+
+        BuiltinOperatorId.EqIntInt -> makeIntCmp(id, "===")
+        BuiltinOperatorId.NeIntInt -> makeIntCmp(id, "!==")
+        BuiltinOperatorId.LtIntInt -> makeIntCmp(id, "<")
+        BuiltinOperatorId.GtIntInt -> makeIntCmp(id, ">")
+        BuiltinOperatorId.LeIntInt -> makeIntCmp(id, "<=")
+        BuiltinOperatorId.GeIntInt -> makeIntCmp(id, ">=")
+        BuiltinOperatorId.CmpIntInt -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (lhs, rhs) ->
+                Js.BinaryExpression(pos, lhs, Js.Operator(pos, "-"), rhs)
+            }
+        }
+
+        BuiltinOperatorId.EqFltFlt -> cmpToOperator(id, "===", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.NeFltFlt -> cmpToOperator(id, "!==", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.LtFltFlt -> cmpToOperator(id, "<", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.GtFltFlt -> cmpToOperator(id, ">", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.LeFltFlt -> cmpToOperator(id, "<=", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.GeFltFlt -> cmpToOperator(id, ">=", cmpFromCoreCmp(coreCmpFloat))
+        BuiltinOperatorId.CmpFltFlt -> id to coreCmpFloat
+
+        BuiltinOperatorId.EqStrStr -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (lhs, rhs) ->
+                Js.BinaryExpression(
+                    pos,
+                    lhs,
+                    Js.Operator(pos, "==="),
+                    rhs,
+                )
+            }
+        }
+        BuiltinOperatorId.NeStrStr -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (lhs, rhs) ->
+                Js.BinaryExpression(
+                    pos,
+                    lhs,
+                    Js.Operator(pos, "!=="),
+                    rhs,
+                )
+            }
+        }
+        BuiltinOperatorId.LtStrStr -> cmpToOperator(id, "<", cmpFromCoreCmp(coreCmpString))
+        BuiltinOperatorId.GtStrStr -> cmpToOperator(id, ">", cmpFromCoreCmp(coreCmpString))
+        BuiltinOperatorId.LeStrStr -> cmpToOperator(id, "<=", cmpFromCoreCmp(coreCmpString))
+        BuiltinOperatorId.GeStrStr -> cmpToOperator(id, ">=", cmpFromCoreCmp(coreCmpString))
+        BuiltinOperatorId.CmpStrStr -> id to coreCmpString
+
+        BuiltinOperatorId.EqGeneric -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (lhs, rhs) ->
+                Js.CallExpression(
+                    pos,
+                    Js.MemberExpression(
+                        pos,
+                        Js.Identifier(pos, JsIdentifierName("Object"), null),
+                        Js.Identifier(pos, JsIdentifierName("is"), null),
+                    ),
+                    listOf(lhs, rhs),
+                )
+            }
+        }
+        BuiltinOperatorId.NeGeneric -> runtimeLibraryBackedSupportCode(id) { pos, args ->
+            arity2(args)?.let { (lhs, rhs) ->
+                Js.UnaryExpression(
+                    pos,
+                    Js.Operator(pos, "!"),
+                    Js.CallExpression(
+                        pos,
+                        Js.MemberExpression(
+                            pos,
+                            Js.Identifier(pos, JsIdentifierName("Object"), null),
+                            Js.Identifier(pos, JsIdentifierName("is"), null),
+                        ),
+                        listOf(lhs, rhs),
+                    ),
+                )
+            }
+        }
+        BuiltinOperatorId.LtGeneric -> cmpToOperator(id, "<", cmpFromCoreCmp(coreCmpGeneric))
+        BuiltinOperatorId.GtGeneric -> cmpToOperator(id, ">", cmpFromCoreCmp(coreCmpGeneric))
+        BuiltinOperatorId.LeGeneric -> cmpToOperator(id, "<=", cmpFromCoreCmp(coreCmpGeneric))
+        BuiltinOperatorId.GeGeneric -> cmpToOperator(id, ">=", cmpFromCoreCmp(coreCmpGeneric))
+        BuiltinOperatorId.CmpGeneric -> id to coreCmpGeneric
+
+        BuiltinOperatorId.Bubble,
+        BuiltinOperatorId.Panic,
+        BuiltinOperatorId.Print,
+        -> runtimeLibraryReference(id)
+
+        BuiltinOperatorId.Async -> runtimeLibraryReference(id, "runAsync")
+
+        // should not be used with CoroutineStrategy.TranslateToGenerator
+        BuiltinOperatorId.AdaptGeneratorFn,
+        BuiltinOperatorId.SafeAdaptGeneratorFn,
+        -> null
+
+        // should not be used with BubbleBranchStrategy.Exceptions
+        BuiltinOperatorId.IsOkResult,
+        BuiltinOperatorId.PackOkResult,
+        BuiltinOperatorId.RepackErrResult,
+        BuiltinOperatorId.UnpackOkResult,
+        -> null
+    }
+}.toMap()
+
+private fun Js.Expression.toInt32() = run {
+    Js.InfixExpression(
+        pos,
+        this,
+        Js.Operator(pos, "|"),
+        Js.NumericLiteral(pos, 0),
+    )
+}
+
+private val clampInt64 = JsUnInlinedExternalFunctionReference(
+    DashedIdentifier.temperCoreLibraryIdentifier,
+    JsIdentifierName("clampInt64"),
+)
+
+private fun Js.Expression.toInt64(translator: JsTranslator) = run {
+    val calleeName = translator.requireExternalReference(clampInt64)
+    val callee = Js.Identifier(pos, calleeName, null)
+    Js.CallExpression(pos, callee, listOf(this))
+}
+
+private fun Js.Expression.toOutType(id: BuiltinOperatorId, translator: JsTranslator) = run {
+    // Some ops don't reach here, but just grab all int-producing. Should be a fast switch.
+    when (id) {
+        BuiltinOperatorId.DivIntInt,
+        BuiltinOperatorId.DivIntIntSafe,
+        BuiltinOperatorId.MinusInt,
+        BuiltinOperatorId.MinusIntInt,
+        BuiltinOperatorId.ModIntInt,
+        BuiltinOperatorId.ModIntIntSafe,
+        BuiltinOperatorId.PlusIntInt,
+        BuiltinOperatorId.TimesIntInt,
+        -> toInt32()
+        BuiltinOperatorId.DivIntInt64,
+        BuiltinOperatorId.DivIntInt64Safe,
+        BuiltinOperatorId.MinusInt64,
+        BuiltinOperatorId.MinusIntInt64,
+        BuiltinOperatorId.ModIntInt64,
+        BuiltinOperatorId.ModIntInt64Safe,
+        BuiltinOperatorId.PlusIntInt64,
+        BuiltinOperatorId.TimesIntInt64,
+        -> toInt64(translator)
+        else -> this
+    }
+}
+
+private val docsListifyInliner =
+    runtimeLibraryBackedSupportCode(BuiltinOperatorId.Listify) inline@{ pos, args ->
+        val argExprs = mutableListOf<Js.Expression>()
+        for (arg in args) {
+            val argExpr = arg as? Js.Expression ?: return@inline null
+            argExprs.add(argExpr)
+        }
+        Js.ArrayExpression(pos, argExprs.toList())
+    }.second
+
+private val docsPrintInliner =
+    runtimeLibraryBackedSupportCode(BuiltinOperatorId.Print) inline@{ pos, args ->
+        val argExprs = mutableListOf<Js.Expression>()
+        for (arg in args) {
+            val argExpr = arg as? Js.Expression ?: return@inline null
+            argExprs.add(argExpr)
+        }
+        val calleePos = pos.leftEdge
+        Js.CallExpression(
+            pos,
+            callee = Js.MemberExpression(
+                calleePos,
+                Js.MemberExpression(
+                    calleePos,
+                    // TODO: provide enough information on bare names to allow skipping
+                    // globalThis when doing so would lead to no name collision.
+                    // TODO This path is skipped on new Temper `console.log`, but for docgen, do we want globalThis?
+                    Js.Identifier(calleePos, globalThisName, null),
+                    Js.Identifier(calleePos, JsIdentifierName("console"), null),
+                ),
+                Js.Identifier(calleePos, JsIdentifierName("log"), null),
+            ),
+            arguments = argExprs,
+        )
+    }.second
+
+// 🐈  🐈 -> 🐈🐈🐈
+//   🐈
+private val catInliner =
+    runtimeLibraryBackedSupportCode(BuiltinOperatorId.StrCat) inline@{ pos, args ->
+        val argExprs = mutableListOf<Js.Expression>()
+        for (arg in args) {
+            val argExpr = arg as? Js.Expression ?: return@inline null
+            argExprs.add(argExpr)
+        }
+
+        val quasis = mutableListOf<Js.TemplateElement>()
+        val holes = mutableListOf<Js.Expression>()
+
+        var partialTemplateElement: Pair<Position, String>? = null
+        fun addTemplateElement(pos: Position) {
+            if (partialTemplateElement == null) {
+                partialTemplateElement = pos to ""
+            }
+            val (templateElementPos, templateElementText) =
+                partialTemplateElement ?: (pos to "")
+            partialTemplateElement = null
+            quasis.add(
+                Js.TemplateElement(
+                    templateElementPos,
+                    JsTemplateHelpers.untaggedTemplateText(templateElementText),
+                ),
+            )
+        }
+        for (arg in argExprs) {
+            if (arg is Js.StringLiteral) {
+                partialTemplateElement = when (val before = partialTemplateElement) {
+                    null -> arg.pos to arg.value
+                    else -> {
+                        val (posBefore, textBefore) = before
+                        listOf(posBefore, arg.pos).spanningPosition(posBefore) to
+                            "$textBefore${arg.value}"
+                    }
+                }
+            } else {
+                // Every template element, except the last (below) pairs with a hole.
+                addTemplateElement(arg.pos.leftEdge)
+                holes.add(arg)
+            }
+        }
+        addTemplateElement(pos.rightEdge)
+        Js.TemplateExpression(pos, quasis.toList(), holes.toList())
+    }.second
+
+/** Js.Identifier("foo").globalizeThis -> `globalThis.foo` */
+internal fun Js.Identifier.globalizeThis(pos: Position = this.pos) = Js.MemberExpression(
+    pos = pos,
+    obj = Js.Identifier(this.pos.leftEdge, globalThisName, null),
+    property = this,
+    computed = false,
+)
+
+/** developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/Date#year */
+@Suppress("MagicNumber") // yes, JS date constructor rules are dodgy magic
+private val jsProblematicYearRange = 0L..99L
+private const val DEFAULT_FULL_YEAR = 1900
+private const val DATE_CONSTRUCTOR_ARITY = 3 // year, month, day
+
+private fun makeIntCmp(
+    id: BuiltinOperatorId,
+    operatorTokenText: String,
+) = runtimeLibraryBackedSupportCode(id) { pos, args ->
+    Js.BinaryExpression(
+        pos,
+        args.getExprSafe(0, pos.leftEdge),
+        Js.Operator(pos, operatorTokenText),
+        args.getExprSafe(1, pos.rightEdge),
+    )
+}
+
+/** Substitutes missing args like _0 so that support code references can render nicely inside TmpL trees */
+private fun List<Js.Tree>.getExprSafe(i: Int, fallbackPos: Position): Js.Expression =
+    if (i in indices) {
+        this[i] as Js.Expression
+    } else {
+        Js.Identifier(fallbackPos, JsIdentifierName("_$i"), null)
+    }
+
+/** JSON.stringify assigns special significance to this method name */
+private const val JAVASCRIPT_TOJSON_SPECIAL_NAME = "toJSON"

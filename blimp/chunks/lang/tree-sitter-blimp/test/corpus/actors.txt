@@ -1,0 +1,330 @@
+================
+Empty actor
+================
+
+actor Counter do
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))))
+
+================
+Actor with untyped state
+================
+
+actor Counter do
+  state count: 0
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (integer))))))
+
+================
+Actor with multiple untyped state fields
+================
+
+actor Account do
+  state balance: 0, name: "unknown"
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (integer))
+        (typed_field
+          (identifier)
+          (string))))))
+
+================
+Actor with typed state
+================
+
+actor Counter do
+  state count: Int :: 0
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier))
+          (integer))))))
+
+================
+Actor with typed list state
+================
+
+actor Cart do
+  state items: [Item] :: []
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (type_name
+              (upper_identifier)))
+          (list))))))
+
+================
+Actor with typed state no default
+================
+
+actor A do
+  state name: String
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier)))))))
+
+================
+Actor with message handler
+================
+
+actor Counter do
+  on :increment do
+    become count: count + 1
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (become_statement
+        (key_value_list
+          (key_value_pair
+            (identifier)
+            (binary_expression
+              (identifier)
+              (integer)))))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with typed parameter
+================
+
+actor Cart do
+  on :add(item: Item) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with untyped parameter (legacy)
+================
+
+actor Cart do
+  on :add(item) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with multiple typed parameters
+================
+
+actor Chat do
+  on :send(user: String, text: String) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier)))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with return type
+================
+
+actor A do
+  on :get -> Int do
+    reply 42
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (return_type
+        (type_name
+          (upper_identifier)))
+      (reply_statement
+        (integer)))))
+
+================
+Handler with typed params and return type
+================
+
+actor Checkout do
+  on :charge(payment: Payment) -> Receipt do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (return_type
+        (type_name
+          (upper_identifier)))
+      (reply_statement
+        (atom)))))
+
+================
+Actor with dot-notation name
+================
+
+actor Shop.Checkout do
+  state total: Int :: 0
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier)
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier))
+          (integer))))))
+
+================
+Actor with triple dot-notation name
+================
+
+actor Shop.Checkout.Tax do
+  on :calculate do
+    reply 0
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier)
+      (upper_identifier)
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (reply_statement
+        (integer)))))

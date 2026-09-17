@@ -1,0 +1,6 @@
+let return__1;
+if (c) {
+  return__1 = f()
+} else {
+  return__1 = g()
+};

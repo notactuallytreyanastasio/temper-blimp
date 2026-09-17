@@ -1,0 +1,21 @@
+do {
+  // Is thrice still a word?
+  let runItThrice(factory: fn (): SafeGenerator<Empty>): Void {
+    let generator: SafeGenerator<Empty> = factory();
+    generator.nextSafe();
+    console.log("Ran once");
+    generator.nextSafe();
+    console.log("Ran twice");
+    generator.nextSafe();
+    console.log("Ran thrice");
+    generator.close();
+  }
+
+  runItThrice { (): GeneratorResult<Empty> extends GeneratorFn =>
+    while (true) {
+      console.log("Pausing");
+      yield;
+      console.log("Resuming");
+    }
+  }
+}

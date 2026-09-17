@@ -1,0 +1,11 @@
+@fn let f__2 ⦂(fn (List<String>, List<String>): String), @fn `test//`.g ⦂(fn (String): String);
+f__2 = (@stay fn f(literals__3 /* aka literals */: List<String>, values__4 /* aka values */: List<String>) /* return__0 */: String {
+    fn__5: do {
+      return__0 = do_call_get(literals__3, 0)
+    };
+});
+`test//`.g = (@stay fn g(there__6 /* aka there */: String) /* return__1 */: String {
+    fn__7: do {
+      return__1 = (fn f)(list ⋖ String ⋗("hi", ""), list ⋖ String ⋗(there__6))
+    };
+})

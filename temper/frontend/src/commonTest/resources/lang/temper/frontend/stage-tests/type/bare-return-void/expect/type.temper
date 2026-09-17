@@ -1,0 +1,14 @@
+let console#4;
+console#4 = doPure(@stay fn /* return__5 */: Console {
+    return__5 = getConsole();
+});
+@fn let f__1;
+f__1 = (@stay fn f(returnEarly__2 /* aka returnEarly */: Boolean) /* return__0 */: Void {
+    fn__3: do {
+      return__0 = void;
+      if (returnEarly__2) {
+        break fn__3;
+      };
+      do_call_log(console#4, "Did not return early")
+    }
+});

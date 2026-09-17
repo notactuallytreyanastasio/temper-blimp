@@ -1,0 +1,6 @@
+outer__0: do {
+  body#3: do {}
+};
+do_call_log(doPure(@stay fn /* return__2 */: Console {
+      return__2 = getConsole();
+  }), "yes")

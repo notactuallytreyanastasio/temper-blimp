@@ -1,0 +1,18 @@
+# A simple counter actor in Blimp
+actor Counter do
+  state count: Int :: 0
+
+  on :increment -> Atom do
+    become count: count + 1
+    reply :ok
+  end
+
+  on :decrement -> Atom do
+    become count: count - 1
+    reply :ok
+  end
+
+  on :get -> Int do
+    reply count
+  end
+end

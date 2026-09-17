@@ -1,0 +1,57 @@
+# Bank account with typed state, guards, message sends, and bubble strategies
+actor Bank do
+  state name: String :: "First National"
+end
+
+actor Bank.Account do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state ledger: [Transaction] :: []
+  state frozen: Bool :: false
+
+  on :deposit(amount: Int) when amount > 0 do
+    entry = %{type: :deposit, amount: amount, balance: balance + amount}
+    become balance: balance + amount,
+           ledger: [entry | ledger]
+    reply balance + amount
+  end
+
+  on :deposit(amount: Int) when amount <= 0 do
+    reply :error
+  end
+
+  on :withdraw(amount: Int) when amount > 0 do
+    situation balance - amount do
+      remaining when remaining >= 0 ->
+        entry = %{type: :withdrawal, amount: amount, balance: remaining}
+        become balance: remaining,
+               ledger: [entry | ledger]
+        reply remaining
+      _ # Hole: handle insufficient funds,
+        # consider overdraft protection or bubble
+    end
+  end
+
+  on :transfer(target: Actor, amount: Int)
+      when amount > 0
+      bubbles(CascadeBubble) do
+    become balance: balance - amount
+    target <- :deposit(amount) orelse bubble
+    entry = %{type: :transfer, to: target, amount: amount}
+    become ledger: [entry | ledger]
+    reply :ok
+  end
+
+  on :balance -> Int do
+    reply balance
+  end
+
+  on :statement -> [Any] do
+    reply ledger
+  end
+
+  on :freeze -> Atom do
+    become frozen: true
+    reply :frozen
+  end
+end

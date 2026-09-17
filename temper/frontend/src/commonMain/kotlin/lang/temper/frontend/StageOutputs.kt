@@ -1,0 +1,16 @@
+package lang.temper.frontend
+
+import lang.temper.env.Export
+import lang.temper.type.TypeShape
+import lang.temper.value.BlockTree
+import lang.temper.value.PartialResult
+import lang.temper.value.StayLeaf
+
+/** Outputs from a stage. */
+data class StageOutputs(
+    val root: BlockTree,
+    val result: PartialResult,
+    val exports: List<Export>,
+    val declaredTypeShapes: List<TypeShape>,
+    val topLevelMetadataStay: StayLeaf?,
+)

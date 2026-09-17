@@ -1,0 +1,195 @@
+[
+    "Block",
+    [
+        [
+            "Call",
+            [
+                [
+                    "RightName",
+                    "ignore"
+                ],
+                [
+                    "Fun",
+                    [
+                        [
+                            "Value",
+                            "\\returnDecl: Symbol"
+                        ],
+                        [
+                            "Decl",
+                            [
+                                [
+                                    "LeftName",
+                                    "return__1"
+                                ],
+                                [
+                                    "Value",
+                                    "\\ssa: Symbol"
+                                ],
+                                [
+                                    "Value",
+                                    "void: Void"
+                                ]
+                            ]
+                        ],
+                        [
+                            "Block",
+                            [
+                                [
+                                    "Call",
+                                    [
+                                        [
+                                            "Value",
+                                            "nym`=`: Function"
+                                        ],
+                                        [
+                                            "LeftName",
+                                            "return__1"
+                                        ],
+                                        [
+                                            "Call",
+                                            [
+                                                [
+                                                    "Value",
+                                                    "adaptGeneratorFnSafe: Function"
+                                                ],
+                                                [
+                                                    "Fun",
+                                                    [
+                                                        [
+                                                            "Value",
+                                                            "\\returnDecl: Symbol"
+                                                        ],
+                                                        [
+                                                            "Decl",
+                                                            [
+                                                                [
+                                                                    "LeftName",
+                                                                    "return__0"
+                                                                ],
+                                                                [
+                                                                    "Value",
+                                                                    "\\type: Symbol"
+                                                                ],
+                                                                [
+                                                                    "Value",
+                                                                    "GeneratorResult\u003cEmpty\u003e: Type"
+                                                                ],
+                                                                [
+                                                                    "Value",
+                                                                    "\\ssa: Symbol"
+                                                                ],
+                                                                [
+                                                                    "Value",
+                                                                    "void: Void"
+                                                                ]
+                                                            ]
+                                                        ],
+                                                        [
+                                                            "Value",
+                                                            "\\super: Symbol"
+                                                        ],
+                                                        [
+                                                            "Value",
+                                                            "GeneratorFn: Type"
+                                                        ],
+                                                        [
+                                                            "Value",
+                                                            "\\wrappedGeneratorFn: Symbol"
+                                                        ],
+                                                        [
+                                                            "Value",
+                                                            "void: Void"
+                                                        ],
+                                                        [
+                                                            "Block",
+                                                            [
+                                                                [
+                                                                    "while",
+                                                                    [
+                                                                        "Value",
+                                                                        "true: Boolean"
+                                                                    ],
+                                                                    [
+                                                                        [
+                                                                            "stmt-block",
+                                                                            [
+                                                                                [
+                                                                                    "Call",
+                                                                                    [
+                                                                                        [
+                                                                                            "Value",
+                                                                                            "cat: Function"
+                                                                                        ],
+                                                                                        [
+                                                                                            "Call",
+                                                                                            [
+                                                                                                [
+                                                                                                    "Value",
+                                                                                                    "str: Function"
+                                                                                                ],
+                                                                                                [
+                                                                                                    "Value",
+                                                                                                    "123: Int32"
+                                                                                                ]
+                                                                                            ]
+                                                                                        ]
+                                                                                    ]
+                                                                                ],
+                                                                                [
+                                                                                    "Call",
+                                                                                    [
+                                                                                        [
+                                                                                            "Value",
+                                                                                            "yield: Function"
+                                                                                        ]
+                                                                                    ]
+                                                                                ]
+                                                                            ]
+                                                                        ],
+                                                                        [
+                                                                            "stmt-block",
+                                                                            []
+                                                                        ]
+                                                                    ]
+                                                                ]
+                                                            ],
+                                                            "StructuredFlow"
+                                                        ]
+                                                    ]
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ],
+                                {
+                                    "type": "Value",
+                                    "loc": "test/test.temper",
+                                    "left": 108,
+                                    "right": 108,
+                                    "content": {
+                                        "stateVector": null,
+                                        "typeTag": "Void",
+                                        "abbrev": "void: Void"
+                                    },
+                                    "typeInferences": {
+                                        "type": {
+                                            "type": "SourceName",
+                                            "module": "core",
+                                            "uid": 68,
+                                            "nameHint": "Void",
+                                            "abbrev": "Void__68"
+                                        },
+                                        "explanation": []
+                                    }
+                                }
+                            ],
+                            "StructuredFlow"
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ],
+    "StructuredFlow"
+]

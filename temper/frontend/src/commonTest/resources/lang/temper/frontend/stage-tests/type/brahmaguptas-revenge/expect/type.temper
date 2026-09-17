@@ -1,0 +1,6 @@
+var return__1;
+orelse#0: {
+  return__1 = 0 / 0
+} orelse {
+  return__1 = 0
+}

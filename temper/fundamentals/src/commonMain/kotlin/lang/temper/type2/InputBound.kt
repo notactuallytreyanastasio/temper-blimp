@@ -1,0 +1,154 @@
+package lang.temper.type2
+
+import lang.temper.format.OutToks
+import lang.temper.format.TokenSerializable
+import lang.temper.format.TokenSink
+import lang.temper.format.joinParens
+import lang.temper.log.Position
+import lang.temper.log.Positioned
+import lang.temper.name.ParsedName
+import lang.temper.name.name
+import lang.temper.type.InvalidType
+import lang.temper.type.MkType
+import lang.temper.type.WellKnownTypes
+import lang.temper.value.ReifiedType
+import lang.temper.value.TEdge
+import lang.temper.value.Value
+import lang.temper.value.ValueLeaf
+
+sealed interface InputBound : Positioned, TokenSerializable {
+    fun solvedType(typeSolver: TypeSolver): PositionedType
+
+    data class Pretyped(
+        val type: PositionedType,
+    ) : InputBound, OutputBound, Positioned by type {
+        override fun renderTo(tokenSink: TokenSink) {
+            type.renderTo(tokenSink)
+        }
+
+        override fun solvedType(typeSolver: TypeSolver) = type
+    }
+
+    data class UntypedCallInput(
+        override val pos: Position,
+        val passVar: TypeVar,
+    ) : InputBound {
+        override fun renderTo(tokenSink: TokenSink) {
+            passVar.renderTo(tokenSink)
+        }
+
+        override fun solvedType(typeSolver: TypeSolver) =
+            MkType2.from(
+                when (val solution = typeSolver[passVar]) {
+                    is Type2 -> solution
+                    is Unsolvable? -> WellKnownTypes.invalidType2
+                },
+            ).position(pos).get() as PositionedType
+    }
+
+    /**
+     * Reifies a reified type value that bounds a type variable as `List` in `expr as List` or `expr is List`.
+     * There, `List` is incomplete because it needs some type parameter.  For example, if *expr* resolved to
+     * a `Listed<String>`, then the Typer should conclude that the type bindings for the function calls include
+     * the type actual *List<String>*.  To simplify translation later on, the IR should change to include the
+     * completed, reified type in the IR.
+     */
+    data class IncompleteReification(
+        override val pos: Position,
+        val reifiedType: ReifiedType,
+        val typeArgumentIndex: Int,
+        /** Pre-allocated variable for the full type */
+        val typeVar: TypeVar,
+        /** Edge to replace with a complete reification. */
+        val reificationEdge: TEdge?,
+        /** Which value actual is described by the type. */
+        val describedValueArgumentIndex: Int?,
+    ) : InputBound, OutputBound {
+        override fun renderTo(tokenSink: TokenSink) {
+            reifiedType.renderTo(tokenSink)
+            tokenSink.word("reifies")
+            tokenSink.emit(OutToks.leftAngle)
+            tokenSink.name(ParsedName("T$typeArgumentIndex"), inOperatorPosition = false)
+            tokenSink.emit(OutToks.rightAngle)
+        }
+
+        override fun solvedType(typeSolver: TypeSolver) =
+            MkType2(WellKnownTypes.typeTypeDefinition).position(pos).get()
+                as PositionedType
+    }
+
+    data class ValueInput(
+        val valueLeaf: ValueLeaf,
+        /** The type variable that should resolve to [value]'s type in context */
+        val typeVar: TypeVar,
+    ) : InputBound, Positioned by valueLeaf {
+        val value: Value<*> get() = valueLeaf.content
+        var valueSolvedType: Type2? = null
+
+        override fun renderTo(tokenSink: TokenSink) {
+            value.renderTo(tokenSink)
+        }
+
+        override fun solvedType(typeSolver: TypeSolver) = MkType2.from(
+            when (val solution = typeSolver[typeVar]) {
+                is Type2 -> solution
+                is Unsolvable? -> WellKnownTypes.invalidType2
+            },
+        ).position(pos).get() as PositionedType
+    }
+
+    data class LambdaBound(
+        override val pos: Position,
+        val inputTypes: List<Type2?>,
+        val returnType: Type2?,
+    ) : InputBound {
+        var inputBounds: List<TypeBoundary>? = null
+        var returnBound: TypeBoundary? = null
+
+        override fun solvedType(typeSolver: TypeSolver): PositionedType {
+            val fnT = MkType.fn(
+                listOf(),
+                (inputBounds ?: emptyList()).map { b ->
+                    (typeSolver[b] as? Type2)?.let { hackMapNewStyleToOld(it) }
+                        ?: InvalidType
+                },
+                null,
+                returnBound?.let { typeBoundary ->
+                    (typeSolver[typeBoundary] as? Type2)?.let { hackMapNewStyleToOld(it) }
+                } ?: InvalidType,
+            )
+            return MkType2.from(hackMapOldStyleToNew(fnT))
+                .position(pos).get() as PositionedType
+        }
+
+        override fun renderTo(tokenSink: TokenSink) {
+            tokenSink.emit(OutToks.leftCurly)
+            inputTypes.map { it ?: OutToks.underScore }.joinParens(tokenSink)
+            tokenSink.emit(OutToks.colon)
+            (returnBound ?: OutToks.underScore).renderTo(tokenSink)
+            tokenSink.emit(OutToks.rightCurly)
+        }
+    }
+
+    data class Typeless(
+        override val pos: Position,
+    ) : InputBound {
+        override fun renderTo(tokenSink: TokenSink) {
+            tokenSink.word("typeless")
+        }
+
+        override fun solvedType(typeSolver: TypeSolver): PositionedType =
+            MkType2.Companion(WellKnownTypes.invalidTypeDefinition).position(pos).get() as PositionedType
+    }
+}
+
+/**
+ * Some input bounds are also output bounds.
+ *
+ * For example, in `new Foo()` and `x as Foo`, `Foo` gives tight bounds on
+ * the passing component of the output type because of the nature of the
+ * operation.
+ *
+ * For generic types, `new Pair(x, y)`, the bound might not be complete.
+ */
+sealed interface OutputBound : Positioned, TokenSerializable

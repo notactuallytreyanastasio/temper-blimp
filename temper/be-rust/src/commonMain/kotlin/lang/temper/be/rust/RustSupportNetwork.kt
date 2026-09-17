@@ -1,0 +1,1298 @@
+package lang.temper.be.rust
+
+import lang.temper.be.TargetLanguageTypeName
+import lang.temper.be.tmpl.BubbleBranchStrategy
+import lang.temper.be.tmpl.ComputedJumpStrategy
+import lang.temper.be.tmpl.CoroutineStrategy
+import lang.temper.be.tmpl.FunctionTypeStrategy
+import lang.temper.be.tmpl.InlineSupportCode
+import lang.temper.be.tmpl.NamedSupportCode
+import lang.temper.be.tmpl.OptionalSupportCodeKind
+import lang.temper.be.tmpl.RepresentationOfVoid
+import lang.temper.be.tmpl.SupportCode
+import lang.temper.be.tmpl.SupportNetwork
+import lang.temper.be.tmpl.TmpL
+import lang.temper.be.tmpl.TypedArg
+import lang.temper.be.tmpl.typeOrInvalid
+import lang.temper.builtin.RuntimeTypeOperation
+import lang.temper.common.subListToEnd
+import lang.temper.format.TokenSink
+import lang.temper.frontend.coroutine.CoroHelperSpecials.ConvertedCoroutineAwakeUponFn
+import lang.temper.frontend.coroutine.CoroHelperSpecials.GetPromiseResultSyncFn
+import lang.temper.lexer.Genre
+import lang.temper.log.Position
+import lang.temper.name.OutName
+import lang.temper.name.ParsedName
+import lang.temper.name.name
+import lang.temper.type.WellKnownTypes
+import lang.temper.type2.DefinedType
+import lang.temper.type2.Signature2
+import lang.temper.type2.Type2
+import lang.temper.type2.withType
+import lang.temper.value.BuiltinOperatorId
+import lang.temper.value.NamedBuiltinFun
+import lang.temper.value.PureVirtual
+import lang.temper.value.pureVirtualBuiltinName
+
+object RustSupportNetwork : SupportNetwork {
+    override val backendDescription = "Rust Backend"
+
+    override val bubbleStrategy = BubbleBranchStrategy.Results
+    override val coroutineStrategy = CoroutineStrategy.TranslateToRegularFunction
+    override val functionTypeStrategy = FunctionTypeStrategy.ToFunctionType
+    override val computedJumpStrategy = ComputedJumpStrategy.Use
+
+    override fun representationOfVoid(genre: Genre) = RepresentationOfVoid.ReifyVoid
+    override val simplifyOrTypes: Boolean = true
+
+    override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? {
+        return runCatching { supportCodeByOperatorId(builtin.builtinOperatorId) }.getOrElse {
+            // Useful for placing a breakpoint.
+            null
+        } ?: builtinFunSupportCode[builtin.name] ?: run {
+            // Also useful.
+            null
+        }
+    }
+
+    override fun optionalSupportCode(
+        optionalSupportCodeKind: OptionalSupportCodeKind,
+    ): Pair<SupportCode, Signature2>? = null
+
+    override fun translateConnectedReference(pos: Position, connectedKey: String, genre: Genre): SupportCode? {
+        return connectedReferences[connectedKey] ?: run {
+            // Useful for placing a breakpoint.
+            null
+        }
+    }
+
+    override fun translatedConnectedType(
+        pos: Position,
+        connectedKey: String,
+        genre: Genre,
+        temperType: Type2,
+    ): Pair<TargetLanguageTypeName, List<Type2>>? {
+        // TODO Type arg translation?
+        return connectedTypes[connectedKey]?.let { it to temperType.bindings }
+    }
+
+    override fun translateRuntimeTypeOperation(
+        pos: Position,
+        rto: RuntimeTypeOperation,
+        sourceType: TmpL.NominalType,
+        targetType: TmpL.NominalType,
+    ): SupportCode? {
+        return when (rto) {
+            RuntimeTypeOperation.Is -> when (sourceType.typeName.sourceDefinition) {
+                WellKnownTypes.stringIndexOptionTypeDefinition -> when (targetType.typeName.sourceDefinition) {
+                    WellKnownTypes.noStringIndexTypeDefinition -> isNull
+                    WellKnownTypes.stringIndexTypeDefinition -> isNonNull
+                    else -> null
+                }
+
+                else -> null
+            }
+
+            else -> null
+        }
+    }
+}
+
+private fun supportCodeByOperatorId(builtinOperatorId: BuiltinOperatorId?): SupportCode? {
+    return when (builtinOperatorId) {
+        BuiltinOperatorId.BooleanNegation -> booleanNegation
+        BuiltinOperatorId.BitwiseAnd32, BuiltinOperatorId.BitwiseAnd64 -> bitwiseAnd
+        BuiltinOperatorId.BitwiseOr32, BuiltinOperatorId.BitwiseOr64 -> bitwiseOr
+        BuiltinOperatorId.BitwiseXor32, BuiltinOperatorId.BitwiseXor64 -> bitwiseXor
+        BuiltinOperatorId.BitwiseShl32 -> bitwiseShl32
+        BuiltinOperatorId.BitwiseShl64 -> bitwiseShl64
+        BuiltinOperatorId.BitwiseShr32 -> bitwiseShr32
+        BuiltinOperatorId.BitwiseShr64 -> bitwiseShr64
+        BuiltinOperatorId.BitwiseShrUnsigned32 -> bitwiseUShr32
+        BuiltinOperatorId.BitwiseShrUnsigned64 -> bitwiseUShr64
+        BuiltinOperatorId.BitwiseNegation32, BuiltinOperatorId.BitwiseNegation64 -> bitwiseNegation
+        BuiltinOperatorId.IsNull -> isNull
+        BuiltinOperatorId.NotNull -> null
+        BuiltinOperatorId.DivFltFlt -> divFltFlt
+        BuiltinOperatorId.DivIntInt -> DivIntInt
+        BuiltinOperatorId.DivIntInt64 -> DivIntInt64
+        BuiltinOperatorId.DivIntIntSafe, BuiltinOperatorId.DivIntInt64Safe -> divIntIntSafe
+        BuiltinOperatorId.ModFltFlt -> modFltFlt
+        BuiltinOperatorId.ModIntInt -> ModIntInt
+        BuiltinOperatorId.ModIntInt64 -> ModIntInt64
+        BuiltinOperatorId.ModIntIntSafe, BuiltinOperatorId.ModIntInt64Safe -> modIntIntSafe
+        BuiltinOperatorId.MinusFlt -> minusFlt
+        BuiltinOperatorId.MinusFltFlt -> minusFltFlt
+        BuiltinOperatorId.MinusInt, BuiltinOperatorId.MinusInt64 -> minusInt
+        BuiltinOperatorId.MinusIntInt, BuiltinOperatorId.MinusIntInt64 -> minusIntInt
+        BuiltinOperatorId.PlusFltFlt -> plusFltFlt
+        BuiltinOperatorId.PlusIntInt, BuiltinOperatorId.PlusIntInt64 -> plusIntInt
+        BuiltinOperatorId.TimesIntInt, BuiltinOperatorId.TimesIntInt64 -> timesIntInt
+        BuiltinOperatorId.TimesFltFlt -> timesFltFlt
+        BuiltinOperatorId.PowFltFlt -> powFltFlt
+        BuiltinOperatorId.LtFltFlt -> ltFltFlt
+        BuiltinOperatorId.LtIntInt -> ltIntInt
+        BuiltinOperatorId.LtStrStr -> ltStrStr
+        BuiltinOperatorId.LtGeneric -> ltGeneric
+        BuiltinOperatorId.LeFltFlt -> leFltFlt
+        BuiltinOperatorId.LeIntInt -> leIntInt
+        BuiltinOperatorId.LeStrStr -> leStrStr
+        BuiltinOperatorId.LeGeneric -> leGeneric
+        BuiltinOperatorId.GtFltFlt -> gtFltFlt
+        BuiltinOperatorId.GtIntInt -> gtIntInt
+        BuiltinOperatorId.GtStrStr -> gtStrStr
+        BuiltinOperatorId.GtGeneric -> gtGeneric
+        BuiltinOperatorId.GeFltFlt -> geFltFlt
+        BuiltinOperatorId.GeIntInt -> geIntInt
+        BuiltinOperatorId.GeStrStr -> geStrStr
+        BuiltinOperatorId.GeGeneric -> geGeneric
+        BuiltinOperatorId.EqFltFlt -> eqFltFlt
+        BuiltinOperatorId.EqIntInt -> eqIntInt
+        BuiltinOperatorId.EqStrStr -> eqStrStr
+        BuiltinOperatorId.EqGeneric -> eqGeneric
+        BuiltinOperatorId.NeFltFlt -> neFltFlt
+        BuiltinOperatorId.NeIntInt -> neIntInt
+        BuiltinOperatorId.NeStrStr -> neStrStr
+        BuiltinOperatorId.NeGeneric -> neGeneric
+        BuiltinOperatorId.CmpFltFlt -> cmpFltFlt
+        BuiltinOperatorId.CmpIntInt -> CmpIntInt
+        BuiltinOperatorId.CmpStrStr -> CmpStrStrOrdering
+        BuiltinOperatorId.CmpGeneric -> CmpGeneric
+        BuiltinOperatorId.Bubble -> bubble
+        BuiltinOperatorId.Panic -> panic
+        BuiltinOperatorId.Print -> print
+        BuiltinOperatorId.StrCat -> StrCat
+        BuiltinOperatorId.Listify -> Listify
+        BuiltinOperatorId.Async -> async
+        // Should not be used with CoroutineStrategy.TranslateToGenerator, but we don't use that for now.
+        BuiltinOperatorId.AdaptGeneratorFn -> adaptGeneratorFn
+        BuiltinOperatorId.SafeAdaptGeneratorFn -> adaptGeneratorFnSafe
+
+        // Required since using results for failure recovery
+        BuiltinOperatorId.IsOkResult -> isOkResult
+        BuiltinOperatorId.PackOkResult -> packOkResult
+        BuiltinOperatorId.RepackErrResult -> RepackErrResult
+        BuiltinOperatorId.UnpackOkResult -> unpackOkResult
+
+        null -> null
+    }
+}
+
+private val builtinFunSupportCode = mapOf(
+    PureVirtual.name to PureVirtualBuiltin,
+    ConvertedCoroutineAwakeUponFn.name to AwakeUponSupportCode,
+    GetPromiseResultSyncFn.name to GetPromiseResultSyncSupportCode,
+)
+
+open class RustSupportCode(
+    val connectedNames: List<String>,
+    override val builtinOperatorId: BuiltinOperatorId? = null,
+) : NamedSupportCode {
+    override val baseName = ParsedName(connectedNames.first())
+    override fun renderTo(tokenSink: TokenSink) = tokenSink.name(baseName, inOperatorPosition = false)
+
+    final override fun hashCode(): Int = baseName.hashCode()
+    final override fun toString(): String = "RustSupportCode($baseName)"
+    final override fun equals(other: Any?): Boolean =
+        this === other || (other is RustSupportCode && baseName == other.baseName)
+}
+
+abstract class RustInlineSupportCode(
+    connectedNames: List<String>,
+    builtinOperatorId: BuiltinOperatorId? = null,
+    val hasGeneric: Boolean = false,
+    override val needsThisEquivalent: Boolean = false,
+    val cloneEvenIfFirst: Boolean = false,
+    val avoidTypeWrapping: Boolean = false,
+    val wrapClosures: Boolean = false,
+) : RustSupportCode(connectedNames, builtinOperatorId), InlineSupportCode<Rust.Tree, RustTranslator> {
+    constructor(
+        baseName: String,
+        builtinOperatorId: BuiltinOperatorId? = null,
+        cloneEvenIfFirst: Boolean = false,
+        hasGeneric: Boolean = false,
+        avoidTypeWrapping: Boolean = false,
+        wrapClosures: Boolean = false,
+    ) : this(
+        listOf(baseName),
+        builtinOperatorId,
+        avoidTypeWrapping = avoidTypeWrapping,
+        cloneEvenIfFirst = cloneEvenIfFirst,
+        hasGeneric = hasGeneric,
+        wrapClosures = wrapClosures,
+    )
+
+    open fun argType(returnType: Type2): Type2? = null
+
+    open fun translateArg(actual: TmpL.Actual, wantedType: Type2? = null, translator: RustTranslator): Rust.Expr? =
+        null
+}
+
+internal object AwakeUponSupportCode : RustInlineSupportCode(ConvertedCoroutineAwakeUponFn.name) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        error("Specially handled in translator")
+    }
+}
+
+internal object GetPromiseResultSyncSupportCode : RustInlineSupportCode(GetPromiseResultSyncFn.name) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        error("Specially handled in translator")
+    }
+}
+
+private abstract class Cast(baseName: String) : RustInlineSupportCode(baseName) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = (arguments[0].expr as Rust.Expr).infix(RustOperator.As, buildType(pos))
+
+    abstract fun buildType(pos: Position): Rust.Expr
+}
+
+private abstract class Constant(baseName: String) : RustInlineSupportCode(baseName = baseName) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = value(pos)
+
+    abstract fun value(pos: Position): Rust.Expr
+}
+
+private class Float64Compare(
+    baseName: String,
+    builtinOperatorId: BuiltinOperatorId? = null,
+    val operator: RustOperator,
+) : RustInlineSupportCode(baseName, builtinOperatorId, cloneEvenIfFirst = true) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        val cmpFn = when (operator) {
+            RustOperator.Equals, RustOperator.NotEquals -> "cmp_option"
+            else -> "cmp"
+        }
+        return Rust.Call(
+            pos,
+            callee = "temper_core".toKeyId(pos.leftEdge).extendWith(listOf("float64", cmpFn)),
+            args = arguments.map { it.expr as Rust.Expr },
+        ).infix(operator, Rust.NumberLiteral(pos, 0L))
+    }
+}
+
+internal open class FunctionCall(
+    connectedNames: List<String>,
+    val functionName: String,
+    val avoidDeref: Boolean = false,
+    builtinOperatorId: BuiltinOperatorId? = null,
+    cloneEvenIfFirst: Boolean = false,
+    /** Non-null means the indicated param has a special-tailored fn borrow type. */
+    val fnIndex: Int? = null,
+    hasGeneric: Boolean = false,
+    wrapClosures: Boolean = false,
+    // TODO Extras copied from c# but not currently in use.
+    val extraArgs: (Position) -> List<Rust.Expr> = { emptyList() },
+) : RustInlineSupportCode(
+    connectedNames,
+    builtinOperatorId,
+    cloneEvenIfFirst = cloneEvenIfFirst,
+    hasGeneric = hasGeneric,
+    wrapClosures = wrapClosures,
+) {
+    constructor(
+        baseName: String,
+        functionName: String,
+        builtinOperatorId: BuiltinOperatorId? = null,
+        avoidDeref: Boolean = false,
+        cloneEvenIfFirst: Boolean = false,
+        fnIndex: Int? = null,
+        hasGeneric: Boolean = false,
+        wrapClosures: Boolean = false,
+        extraArgs: (Position) -> List<Rust.Expr> = { emptyList() },
+    ) : this(
+        connectedNames = listOf(baseName),
+        functionName = functionName,
+        avoidDeref = avoidDeref,
+        builtinOperatorId = builtinOperatorId,
+        cloneEvenIfFirst = cloneEvenIfFirst,
+        fnIndex = fnIndex,
+        hasGeneric = hasGeneric,
+        wrapClosures = wrapClosures,
+        extraArgs = extraArgs,
+    )
+
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        return Rust.Call(
+            pos = pos,
+            callee = functionName.toId(pos),
+            args = buildList args@{
+                arguments.isEmpty() && return@args
+                // Pass first arg as semi-self ref.
+                val selfArg = arguments[0]
+                val self = (selfArg.expr as Rust.Expr).let { self ->
+                    // Except first deref interfaces, because we take non-wrapped in connected methods for efficiency.
+                    // We don't do this in user code because we have less promises about how they intend to use it.
+                    // TODO If we do add borrows to Temper, we could generalize better.
+                    when {
+                        !avoidDeref && selfArg.type.described().isInterface() -> self.deref()
+                        else -> self
+                    }
+                }.let { self ->
+                    when {
+                        selfArg.type.isCopy() -> self
+                        cloneEvenIfFirst -> self.wrapClone()
+                        else -> self.ref()
+                    }
+                }
+                add(self)
+                // Other args.
+                val otherArgs = arguments.subListToEnd(1)
+                // TODO If we could see raw param types, we could infer this.
+                val fnPosIndex = when {
+                    fnIndex == null -> otherArgs.size // which matches no args
+                    fnIndex < 0 -> otherArgs.size + fnIndex
+                    else -> fnIndex
+                }
+                for ((argIndex, arg) in otherArgs.withIndex()) {
+                    addArg(arg, translator, specializeFn = argIndex == fnPosIndex)
+                }
+                addAll(extraArgs(pos.rightEdge))
+            },
+        )
+    }
+}
+
+private fun MutableList<Rust.Expr>.addArg(
+    arg: TypedArg<Rust.Tree>,
+    translator: RustTranslator,
+    specializeFn: Boolean,
+) {
+    val expr = arg.expr as Rust.Expr
+    // Our connected methods expect non-boxed functions, unlike Temper-built user code.
+    // We can do this because we know they're safe for that, but because of it, we need refs.
+    add(
+        when {
+            specializeFn -> withType(
+                arg.type,
+                fn = { _, _, _ ->
+                    // Except we wrap closures, so first we need to unwrap them.
+                    when {
+                        translator.isClosure(expr) -> expr.deref()
+                        else -> expr
+                    }.ref()
+                },
+                fallback = { expr },
+            )
+            else -> expr
+        },
+    )
+}
+
+private open class Infix(
+    baseName: String,
+    builtinOperatorId: BuiltinOperatorId,
+    private val operator: RustOperator,
+    avoidTypeWrapping: Boolean = false,
+) : RustInlineSupportCode(baseName, builtinOperatorId, cloneEvenIfFirst = true, avoidTypeWrapping = avoidTypeWrapping) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return Rust.Operation(
+            pos,
+            left = arguments[0].expr as Rust.Expr,
+            operator = Rust.Operator(pos, operator),
+            right = arguments[1].expr as Rust.Expr,
+        )
+    }
+}
+
+private open class MethodCall(
+    connectedNames: List<String>,
+    val memberName: String,
+    builtinOperatorId: BuiltinOperatorId? = null,
+    cloneEvenIfFirst: Boolean = false,
+    // TODO Extras copied from c# but not currently in use.
+    val extraArgs: (Position) -> List<Rust.Expr> = { emptyList() },
+    hasGeneric: Boolean = false,
+    val mapArg: (Rust.Expr) -> Rust.Expr = { it },
+) : RustInlineSupportCode(
+    connectedNames, builtinOperatorId, cloneEvenIfFirst = cloneEvenIfFirst, hasGeneric = hasGeneric,
+) {
+    constructor(
+        baseName: String,
+        memberName: String,
+        builtinOperatorId: BuiltinOperatorId? = null,
+        cloneEvenIfFirst: Boolean = false,
+        extraArgs: (Position) -> List<Rust.Expr> = { emptyList() },
+        hasGeneric: Boolean = false,
+        mapArg: (Rust.Expr) -> Rust.Expr = { it },
+    ) : this(
+        cloneEvenIfFirst = cloneEvenIfFirst,
+        connectedNames = listOf(baseName),
+        memberName = memberName,
+        builtinOperatorId = builtinOperatorId,
+        extraArgs = extraArgs,
+        hasGeneric = hasGeneric,
+        mapArg = mapArg,
+    )
+
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        val self = arguments[0].expr.let { self ->
+            when (self) {
+                is Rust.NumberLiteral -> when (self.value) {
+                    // Have to be explicit about types, but `-0x8000_0000_i32` fails, so use cast.
+                    // TODO Alternatively, don't use method call syntax below?
+                    is Int -> self.infix(RustOperator.As, "i32".toId(pos))
+                    is Long -> self.infix(RustOperator.As, "i64".toId(pos))
+                    else -> self
+                }
+                else -> self
+            }
+        }
+        return (self as Rust.Expr).methodCall(
+            memberName,
+            buildList {
+                arguments.subListToEnd(1).forEach { add(mapArg(it.expr as Rust.Expr)) }
+                addAll(extraArgs(pos.rightEdge))
+            },
+        )
+    }
+}
+
+private class Prefix(
+    baseName: String,
+    builtinOperatorId: BuiltinOperatorId,
+    private val operator: RustOperator,
+) : RustInlineSupportCode(baseName, builtinOperatorId) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return Rust.Operation(
+            pos,
+            left = null,
+            operator = Rust.Operator(pos, operator),
+            right = arguments[0].expr as Rust.Expr,
+        )
+    }
+}
+
+private val adaptGeneratorFn =
+    FunctionCall("AdaptGeneratorFn", "temper_core::Generator::from_fn", cloneEvenIfFirst = true, hasGeneric = true)
+private val adaptGeneratorFnSafe = FunctionCall(
+    "SafeAdaptGeneratorFn",
+    "temper_core::SafeGenerator::from_fn",
+    cloneEvenIfFirst = true,
+    hasGeneric = true,
+)
+private val async = FunctionCall("Async", "crate::run_async", cloneEvenIfFirst = true, wrapClosures = true)
+
+private class CmpStrStr(
+    baseName: String,
+    builtinOperatorId: BuiltinOperatorId,
+    operator: RustOperator,
+) : Infix(baseName, builtinOperatorId, operator) {
+    override fun translateArg(actual: TmpL.Actual, wantedType: Type2?, translator: RustTranslator): Rust.Expr? {
+        // Our options are making a separate helper function, or heap-allocating literals when present, or customizing
+        // `&str` access here. The latter seems doable and more efficient than needless heap allocation.
+        // Anyway, string literals are handled elsewhere.
+        // And presume any raw value is a string. Anything else is a frontend error, so we don't need to accommodate.
+        actual is TmpL.ValueReference && return null
+        // Anything else is presumably a wrapped string (when no frontend errors), so get the string out.
+        // And propagate `wantedType` because it might be nullable.
+        val expr = (actual as? TmpL.Expression) ?: return null
+        val outExpr = translator.translateExpression(expr, avoidClone = true).methodCall("as_str")
+        return outExpr.maybeWrap(given = expr.passType, wanted = wantedType, translator = translator)
+    }
+}
+
+internal object ConsoleLog : RustInlineSupportCode("core.type Console.log()") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        val value = (arguments[1].expr as Rust.Expr).stripArc()
+        // Prettify the common case of printing string cats.
+        val values = when (value) {
+            is Rust.Call -> when ((value.callee as? Rust.Id)?.outName?.outputNameText) {
+                FORMAT_MACRO_NAME -> value.args.map { it.deepCopy() }
+                else -> null
+            }
+
+            else -> null
+        } ?: listOf(Rust.StringLiteral(pos, "{}"), value)
+        // We have one or more values to print at this point.
+        val callee = Rust.Id(pos, OutName("println!", null))
+        return Rust.Call(pos, callee = callee, args = values)
+    }
+}
+
+private object GetConsole : RustInlineSupportCode("core.getConsole()") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return Rust.StringLiteral(pos, "TODO get console")
+    }
+}
+
+private val bitwiseAnd = Infix("BitwiseAnd", BuiltinOperatorId.BitwiseAnd32, RustOperator.And)
+private val bitwiseOr = Infix("BitwiseOr", BuiltinOperatorId.BitwiseOr32, RustOperator.Or)
+private val bitwiseXor = Infix("BitwiseXor", BuiltinOperatorId.BitwiseXor32, RustOperator.Xor)
+private class BitwiseShift(
+    private val wrappingMethodName: String,
+    bitSize: Int,
+    private val mask: Int,
+    operatorId: BuiltinOperatorId,
+) : RustInlineSupportCode(
+    "BitwiseShl$bitSize",
+    operatorId,
+) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        // Calls https://doc.rust-lang.org/stable/std/primitive.i32.html#method.wrapping_shl
+        // after masking and casting the shift amount to unsigned
+        val (a, b) = arguments
+        val aExpr = a.expr as Rust.Expr
+        val bExpr = b.expr as Rust.Expr
+        val bPos = bExpr.pos
+        val bRPos = bPos.rightEdge
+        return aExpr.methodCall(
+            key = wrappingMethodName,
+            args = listOf(
+                Rust.Operation(
+                    bPos,
+                    Rust.Operation(
+                        bPos,
+                        bExpr,
+                        Rust.Operator(bRPos, RustOperator.And),
+                        Rust.NumberLiteral(bRPos, mask.toLong()),
+                    ),
+                    Rust.Operator(bRPos, RustOperator.As),
+                    Rust.Id(bRPos, OutName("u32", null)),
+                ),
+            ),
+            pos = pos,
+        )
+    }
+}
+private val bitwiseShl32 = BitwiseShift("wrapping_shl", BIT_SIZE_I32, SHIFT_MASK_I32, BuiltinOperatorId.BitwiseShl32)
+private val bitwiseShl64 = BitwiseShift("wrapping_shl", BIT_SIZE_I64, SHIFT_MASK_I64, BuiltinOperatorId.BitwiseShl64)
+private val bitwiseShr32 = BitwiseShift("wrapping_shr", BIT_SIZE_I32, SHIFT_MASK_I32, BuiltinOperatorId.BitwiseShl32)
+private val bitwiseShr64 = BitwiseShift("wrapping_shr", BIT_SIZE_I64, SHIFT_MASK_I64, BuiltinOperatorId.BitwiseShl64)
+private class BitwiseUShr(
+    private val bitSize: Int,
+    private val shiftMask: Int,
+    operatorId: BuiltinOperatorId,
+) : RustInlineSupportCode(
+    "BitwiseUShr$bitSize",
+    operatorId,
+) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        val (a, b) = arguments
+        val aExpr = a.expr as Rust.Expr
+        val aPos = aExpr.pos
+        val aRPos = aPos.rightEdge
+        val bExpr = b.expr as Rust.Expr
+        val bPos = bExpr.pos
+        val bRPos = bExpr.pos.rightEdge
+        return Rust.Operation(
+            pos,
+            Rust.Operation(
+                aPos,
+                aExpr,
+                Rust.Operator(aRPos, RustOperator.As),
+                Rust.Id(aRPos, OutName("u$bitSize", null)),
+            ).methodCall(
+                "wrapping_shr",
+                listOf(
+                    Rust.Operation(
+                        bPos,
+                        Rust.Operation(
+                            bPos,
+                            bExpr,
+                            Rust.Operator(bRPos, RustOperator.And),
+                            Rust.NumberLiteral(bRPos, shiftMask.toLong()),
+                        ),
+                        Rust.Operator(bRPos, RustOperator.As),
+                        Rust.Id(bRPos, OutName("u32", null)),
+                    ),
+                ),
+                pos = pos,
+            ),
+            Rust.Operator(pos.rightEdge, RustOperator.As),
+            Rust.Id(pos.rightEdge, OutName("i$bitSize", null)),
+        )
+    }
+}
+internal const val BIT_SIZE_I32 = 32
+internal const val BIT_SIZE_I64 = 64
+internal const val SHIFT_MASK_I32 = 0x1F
+internal const val SHIFT_MASK_I64 = 0x3F
+private val bitwiseUShr32 = BitwiseUShr(BIT_SIZE_I32, SHIFT_MASK_I32, BuiltinOperatorId.BitwiseShr32)
+private val bitwiseUShr64 = BitwiseUShr(BIT_SIZE_I64, SHIFT_MASK_I64, BuiltinOperatorId.BitwiseShr64)
+private val bitwiseNegation = Prefix("BitwiseNegation", BuiltinOperatorId.BitwiseNegation32, RustOperator.BitComplement)
+private val booleanNegation =
+    Prefix("BooleanNegation", BuiltinOperatorId.BooleanNegation, RustOperator.BoolComplement)
+
+/** Probably need to customize for floats and strings in the future. */
+private object CmpGeneric : MethodCall(
+    listOf("CmpGeneric", "core.type StringIndexOption.compareTo()"),
+    "cmp",
+    cloneEvenIfFirst = true, // Hack around for this being typed to type awareness. Effectively treat as operator here.
+    mapArg = { it.ref() },
+) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        // Cast result as i32 for temper Int type expectations.
+        return super.inlineToTree(pos, arguments, returnType, translator).infix(RustOperator.As, "i32".toId(pos))
+    }
+}
+
+private val cmpFltFlt = FunctionCall("CmpFltFlt", "temper_core::float64::cmp", BuiltinOperatorId.CmpFltFlt)
+
+private object CmpIntInt : RustInlineSupportCode("CmpIntInt", BuiltinOperatorId.CmpIntInt, cloneEvenIfFirst = true) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        // (a).cmp(&b) as i32
+        val left = arguments[0].expr as Rust.Expr
+        val right = (arguments[1].expr as Rust.Expr).ref()
+        return left.methodCall("cmp", listOf(right)).infix(RustOperator.As, "i32".toId(pos))
+    }
+}
+
+private object CmpStrStrOrdering :
+    RustInlineSupportCode("CmpStrStr", BuiltinOperatorId.CmpStrStr, cloneEvenIfFirst = true) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        val left = (arguments[0].expr as Rust.Expr).methodCall("as_str")
+        val right = (arguments[1].expr as Rust.Expr).methodCall("as_str")
+        return left.methodCall("cmp", listOf(right.ref())).infix(RustOperator.As, "i32".toId(pos))
+    }
+}
+
+private val bubble = FunctionCall("Bubble", "panic!", BuiltinOperatorId.Bubble)
+
+private object PrintCode : RustInlineSupportCode("Print", BuiltinOperatorId.Print) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Expr {
+        // Print takes a single string argument and outputs it.
+        val arg = arguments[0].expr as Rust.Expr
+        return "println!".toId(pos).call(listOf(Rust.StringLiteral(pos, "{}"), arg))
+    }
+}
+
+private val print: SupportCode = PrintCode
+
+private val dateToday = FunctionCall("std/temporal.type Date.today()", "temper_std::temporal::today")
+private val denseBitVectorConstructor =
+    FunctionCall("core.type DenseBitVector.constructor()", "temper_core::DenseBitVector::with_capacity")
+private val denseBitVectorGet = MethodCall("core.type DenseBitVector.get()", "get")
+private val denseBitVectorSet = MethodCall("core.type DenseBitVector.set()", "set")
+private val dequeAdd = FunctionCall("core.type Deque.add()", "temper_core::deque::add", hasGeneric = true)
+private val dequeConstructor = FunctionCall("core.type Deque.constructor()", "temper_core::deque::new")
+private val dequeIsEmpty = FunctionCall("core.type Deque.get isEmpty()", "temper_core::deque::is_empty")
+private val dequeRemoveFirst = FunctionCall("core.type Deque.removeFirst()", "temper_core::deque::remove_first")
+private val divFltFlt = FunctionCall("DivFltFlt", "temper_core::float64::div", BuiltinOperatorId.DivFltFlt)
+private object DivIntInt : FunctionCall("DivIntInt", "temper_core::int_div", BuiltinOperatorId.DivIntInt)
+private val divIntIntSafe = MethodCall("DivIntIntSafe", "wrapping_div", BuiltinOperatorId.DivIntIntSafe)
+private object DivIntInt64 : FunctionCall("DivIntInt64", "temper_core::int64_div", BuiltinOperatorId.DivIntInt64)
+
+private object DoneResult : Constant("core.doneResult()") {
+    override fun value(pos: Position) = "None".toId(pos)
+}
+object Empty : RustInlineSupportCode("core.empty()") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        check(arguments.isEmpty())
+        return Rust.Tuple(pos, emptyList())
+    }
+}
+
+private val eqFltFlt = Float64Compare("EqFltFlt", BuiltinOperatorId.EqFltFlt, RustOperator.Equals)
+
+private class EqNeGeneric(
+    baseName: String,
+    builtinOperatorId: BuiltinOperatorId,
+    operator: RustOperator,
+) : Infix(baseName, builtinOperatorId, operator, avoidTypeWrapping = true) {
+    override fun translateArg(actual: TmpL.Actual, wantedType: Type2?, translator: RustTranslator): Rust.Expr? {
+        return when {
+            translator.isIdentifiable(actual.typeOrInvalid) -> {
+                val expr = translator.translateExpression(actual as TmpL.Expression, avoidClone = true)
+                // TODO Even if we keep ptr_id, call as `temper_core::AnyValueTrait::ptr_id(&*actual)`?
+                // TODO We might need such trait call style throughout translation to avoid name collisions.
+                expr.methodCall("ptr_id")
+            }
+            // Avoids type wrapping because this depends for now on types just already being PartialEq.
+            else -> null
+        }
+    }
+}
+
+private val eqGeneric = EqNeGeneric("EqGeneric", BuiltinOperatorId.EqGeneric, RustOperator.Equals)
+private val eqIntInt = Infix("EqIntInt", BuiltinOperatorId.EqIntInt, RustOperator.Equals)
+private val eqStrStr = CmpStrStr("EqStrStr", BuiltinOperatorId.EqStrStr, RustOperator.Equals)
+private val float64Expm1 = MethodCall("core.type Float64.expm1()", "exp_m1")
+private val float64Log = MethodCall("core.type Float64.log()", "ln")
+private val float64Log1p = MethodCall("core.type Float64.log1p()", "ln_1p")
+private val float64Max = FunctionCall("core.type Float64.max()", "temper_core::float64::max")
+private val float64Min = FunctionCall("core.type Float64.min()", "temper_core::float64::min")
+private val float64Near = FunctionCall("core.type Float64.near()", "temper_core::float64::near")
+
+private object Float64E : Constant("core.type Float64.e") {
+    override fun value(pos: Position) = makePath(pos, "std", "f64", "consts", "E")
+}
+
+private object Float64Pi : Constant("core.type Float64.pi") {
+    override fun value(pos: Position) = makePath(pos, "std", "f64", "consts", "PI")
+}
+
+private val float64Sign = FunctionCall("core.type Float64.sign()", "temper_core::float64::sign")
+internal val float64ToInt = FunctionCall("core.type Float64.toInt32()", "temper_core::float64::to_int")
+internal val float64ToInt64 = FunctionCall("core.type Float64.toInt64()", "temper_core::float64::to_int64")
+internal val float64ToString = FunctionCall("core.type Float64.toString()", "temper_core::float64::to_string")
+
+private object Float64ToIntUnsafe : Cast("core.type Float64.toInt32Unsafe()") {
+    override fun buildType(pos: Position) = "i32".toId(pos)
+}
+
+private object Float64ToInt64Unsafe : Cast("core.type Float64.toInt64Unsafe()") {
+    override fun buildType(pos: Position) = "i64".toId(pos)
+}
+
+private val geFltFlt = Float64Compare("GeFltFlt", BuiltinOperatorId.GeFltFlt, RustOperator.GreaterEquals)
+private val geGeneric = Infix("GeGeneric", BuiltinOperatorId.GeGeneric, RustOperator.GreaterEquals)
+private val geIntInt = Infix("GeIntInt", BuiltinOperatorId.GeIntInt, RustOperator.GreaterEquals)
+private val geStrStr = Infix("GeStrStr", BuiltinOperatorId.GeStrStr, RustOperator.GreaterEquals)
+private val gtFltFlt = Float64Compare("GtFltFlt", BuiltinOperatorId.GtFltFlt, RustOperator.GreaterThan)
+private val gtGeneric = Infix("GtGeneric", BuiltinOperatorId.GtGeneric, RustOperator.GreaterThan)
+private val gtIntInt = Infix("GtIntInt", BuiltinOperatorId.GtIntInt, RustOperator.GreaterThan)
+private val gtStrStr = Infix("GtStrStr", BuiltinOperatorId.GtStrStr, RustOperator.GreaterThan)
+private val ignore = FunctionCall("core.ignore()", "temper_core::ignore")
+
+private object IntToFloat64 : Cast("core.type Int32.toFloat64()") {
+    override fun buildType(pos: Position) = "f64".toId(pos)
+}
+
+private object IntToInt64 : Cast("core.type Int32.toInt64()") {
+    override fun buildType(pos: Position) = "i64".toId(pos)
+}
+
+private object Int64ToFloat64Unsafe : Cast("core.type Int64.toFloat64Unsafe()") {
+    override fun buildType(pos: Position) = "f64".toId(pos)
+}
+
+private object Int64ToInt32Unsafe : Cast("core.type Int64.toInt32Unsafe()") {
+    override fun buildType(pos: Position) = "i32".toId(pos)
+}
+
+internal val intToString = FunctionCall("core.type Int32.toString()", "temper_core::int_to_string")
+private val int64ToFloat64 = FunctionCall("core.type Int64.toFloat64()", "temper_core::int64_to_float64")
+private val int64ToInt32 = FunctionCall("core.type Int64.toInt32()", "temper_core::int64_to_int32")
+internal val int64ToString = FunctionCall("core.type Int64.toString()", "temper_core::int64_to_string")
+private val isNonNull = MethodCall("IsNonNull", "is_some")
+private val isNull = MethodCall("IsNull", "is_none")
+private val leFltFlt = Float64Compare("LeFltFlt", BuiltinOperatorId.LeFltFlt, RustOperator.LessEquals)
+private val leGeneric = Infix("LeGeneric", BuiltinOperatorId.LeGeneric, RustOperator.LessEquals)
+private val leIntInt = Infix("LeIntInt", BuiltinOperatorId.LeIntInt, RustOperator.LessEquals)
+private val leStrStr = Infix("LeStrStr", BuiltinOperatorId.LeStrStr, RustOperator.LessEquals)
+
+private val listedTypes = listOf("Listed", "List", "ListBuilder")
+
+private val listForEach =
+    FunctionCall("core.type List.forEach()", "temper_core::listed::list_for_each", hasGeneric = true, fnIndex = -1)
+private val listBuilderAdd = FunctionCall("core.type ListBuilder.add()", "temper_core::listed::add", hasGeneric = true)
+private val listBuilderAddAll = FunctionCall("core.type ListBuilder.addAll()", "temper_core::listed::add_all")
+private val listBuilderClear = FunctionCall("core.type ListBuilder.clear()", "temper_core::listed::clear")
+private val listBuilderConstructor =
+    FunctionCall("core.type ListBuilder.constructor()", "temper_core::listed::new_builder")
+private val listBuilderRemoveLast =
+    FunctionCall("core.type ListBuilder.removeLast()", "temper_core::listed::remove_last")
+private val listBuilderReverse = FunctionCall("core.type ListBuilder.reverse()", "temper_core::listed::reverse")
+private val listBuilderSet = FunctionCall("core.type ListBuilder.set()", "temper_core::listed::set", hasGeneric = true)
+private val listBuilderSort = FunctionCall("core.type ListBuilder.sort()", "temper_core::listed::sort", fnIndex = -1)
+private val listBuilderSplice =
+    FunctionCall("core.type ListBuilder.splice()", "temper_core::listed::splice", fnIndex = -1)
+private val listedFilter =
+    FunctionCall("core.type Listed.filter()", "temper_core::listed::filter", hasGeneric = true, fnIndex = -1)
+private val listedGet =
+    FunctionCall(listedTypes.map { "core.type $it.get()" }, "$LISTED_TRAIT_NAME::get", hasGeneric = true)
+private val listedGetOr = FunctionCall("core.type Listed.getOr()", "$LISTED_TRAIT_NAME::get_or", hasGeneric = true)
+
+private val listedIsEmpty =
+    FunctionCall(listedTypes.map { "core.type $it.get isEmpty()" }, "$LISTED_TRAIT_NAME::is_empty", hasGeneric = true)
+private val listedJoin =
+    FunctionCall("core.type Listed.join()", "temper_core::listed::join", hasGeneric = true, fnIndex = -1)
+private val listedLength =
+    FunctionCall(listedTypes.map { "core.type $it.get length()" }, "$LISTED_TRAIT_NAME::len", hasGeneric = true)
+private val listedMap =
+    FunctionCall("core.type Listed.map()", "temper_core::listed::map", hasGeneric = true, fnIndex = -1)
+private val listedReduce =
+    FunctionCall("core.type Listed.reduce()", "temper_core::listed::reduce", hasGeneric = true, fnIndex = -1)
+private val listedReduceFrom =
+    FunctionCall("core.type Listed.reduceFrom()", "temper_core::listed::reduce_from", hasGeneric = true, fnIndex = -1)
+private val listedSlice = FunctionCall("core.type Listed.slice()", "temper_core::listed::slice", hasGeneric = true)
+private val listedSorted =
+    FunctionCall("core.type Listed.sorted()", "temper_core::listed::sorted", hasGeneric = true, fnIndex = -1)
+private val listedToList =
+    FunctionCall(listedTypes.map { "core.type $it.toList()" }, "$LISTED_TRAIT_NAME::to_list", hasGeneric = true)
+private val listedToListBuilder = FunctionCall(
+    connectedNames = listedTypes.map { "core.type $it.toListBuilder()" },
+    functionName = "$LISTED_TRAIT_NAME::to_list_builder",
+    hasGeneric = true,
+)
+
+internal object Listify : RustInlineSupportCode("Listify", cloneEvenIfFirst = true, hasGeneric = true) {
+    override fun argType(returnType: Type2): Type2? {
+        return (returnType as? DefinedType)?.bindings?.getOrNull(0)
+    }
+
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = Rust.MacroCall(
+        pos,
+        path = "vec!".toId(pos),
+        args = Rust.Array(pos, values = arguments.map { it.expr as Rust.Expr }),
+    ).wrapArc()
+}
+
+private val ltFltFlt = Float64Compare("LtFltFlt", BuiltinOperatorId.LtFltFlt, RustOperator.LessThan)
+private val ltGeneric = Infix("LtGeneric", BuiltinOperatorId.LtGeneric, RustOperator.LessThan)
+private val ltIntInt = Infix("LtIntInt", BuiltinOperatorId.LtIntInt, RustOperator.LessThan)
+private val ltStrStr = Infix("LtStrStr", BuiltinOperatorId.LtStrStr, RustOperator.LessThan)
+private val mapConstructor = FunctionCall("core.type Map.constructor()", "temper_core::Map::new")
+private val mapBuilderClear = FunctionCall("core.type MapBuilder.clear()", "temper_core::MapBuilder::clear")
+private val mapBuilderConstructor =
+    FunctionCall("core.type MapBuilder.constructor()", "temper_core::MapBuilder::new", hasGeneric = true)
+
+// Some of these function calls would be prettier as method calls, but we'd have to build more support network
+// infrastructure for MethodCall to match things in FunctionCall, and FunctionCall works for now.
+private val mapBuilderRemove =
+    FunctionCall("core.type MapBuilder.remove()", "temper_core::MapBuilder::remove", hasGeneric = true)
+private val mapBuilderSet =
+    FunctionCall("core.type MapBuilder.set()", "temper_core::MapBuilder::set", hasGeneric = true)
+private val mappedForEach =
+    FunctionCall("core.type Mapped.forEach()", "temper_core::MappedTrait::for_each", hasGeneric = true, fnIndex = -1)
+private val mappedGet = FunctionCall("core.type Mapped.get()", "temper_core::MappedTrait::get", hasGeneric = true)
+private val mappedGetOr =
+    FunctionCall("core.type Mapped.getOr()", "temper_core::MappedTrait::get_or", hasGeneric = true)
+private val mappedHas = FunctionCall("core.type Mapped.has()", "temper_core::MappedTrait::has", hasGeneric = true)
+private val mappedLength = FunctionCall("core.type Mapped.get length()", "temper_core::MappedTrait::len")
+private val mappedKeys = FunctionCall("core.type Mapped.keys()", "temper_core::MappedTrait::keys")
+private val mappedToList = FunctionCall("core.type Mapped.toList()", "temper_core::MappedTrait::to_list")
+private val mappedToListBuilder =
+    FunctionCall("core.type Mapped.toListBuilder()", "temper_core::MappedTrait::to_list_builder")
+private val mappedToListBuilderWith = FunctionCall(
+    "core.type Mapped.toListBuilderWith()",
+    "temper_core::MappedTrait::to_list_builder_with",
+    hasGeneric = true,
+    fnIndex = -1,
+)
+private val mappedToListWith =
+    FunctionCall("core.type Mapped.toListWith()", "temper_core::mapped_to_list_with", hasGeneric = true, fnIndex = -1)
+private val mappedToMap = FunctionCall("core.type Mapped.toMap()", "temper_core::MappedTrait::to_map")
+private val mappedToMapBuilder =
+    FunctionCall("core.type Mapped.toMapBuilder()", "temper_core::MappedTrait::to_map_builder")
+private val mappedValues = FunctionCall("core.type Mapped.values()", "temper_core::MappedTrait::values")
+private val minusFlt = Prefix("MinusFlt", BuiltinOperatorId.MinusFlt, RustOperator.Minus)
+private val minusFltFlt = Infix("MinusFltFlt", BuiltinOperatorId.MinusFltFlt, RustOperator.Subtraction)
+private val minusInt = MethodCall("MinusInt", "wrapping_neg", BuiltinOperatorId.MinusInt)
+private val minusIntInt = MethodCall("MinusIntInt", "wrapping_sub", BuiltinOperatorId.MinusIntInt)
+private val modFltFlt = FunctionCall("ModFltFlt", "temper_core::float64::rem", BuiltinOperatorId.ModFltFlt)
+private object ModIntInt : FunctionCall("ModIntInt", "temper_core::int_rem", BuiltinOperatorId.ModIntInt)
+private val modIntIntSafe = MethodCall("ModIntIntSafe", "wrapping_rem", BuiltinOperatorId.ModIntIntSafe)
+private object ModIntInt64 : FunctionCall("ModIntInt64", "temper_core::int64_rem", BuiltinOperatorId.ModIntInt64)
+private val neFltFlt = Float64Compare("NeFltFlt", BuiltinOperatorId.NeFltFlt, RustOperator.NotEquals)
+private val neGeneric = EqNeGeneric("NeGeneric", BuiltinOperatorId.NeGeneric, RustOperator.NotEquals)
+private val neIntInt = Infix("NeIntInt", BuiltinOperatorId.NeIntInt, RustOperator.NotEquals)
+private val neStrStr = CmpStrStr("NeStrStr", BuiltinOperatorId.NeStrStr, RustOperator.NotEquals)
+private val netSend = FunctionCall("std/net.sendRequest()", "send_request", cloneEvenIfFirst = true)
+
+internal object PairConstructor : RustInlineSupportCode(
+    "core.type Pair.constructor()",
+    cloneEvenIfFirst = true,
+    hasGeneric = true,
+) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return Rust.Tuple(pos, values = arguments.map { it.expr as Rust.Expr })
+    }
+}
+
+private val panic = FunctionCall("Panic", "panic!", BuiltinOperatorId.Panic)
+private val plusFltFlt = Infix("PlusFltFlt", BuiltinOperatorId.PlusFltFlt, RustOperator.Addition)
+private val plusIntInt = MethodCall("PlusIntInt", "wrapping_add", BuiltinOperatorId.PlusIntInt)
+private val powFltFlt = MethodCall("PowFltFlt", "powf", BuiltinOperatorId.PowFltFlt)
+private val promiseBuilderComplete = MethodCall("core.type PromiseBuilder.complete()", "complete", hasGeneric = true)
+
+internal object PureVirtualBuiltin : RustInlineSupportCode(pureVirtualBuiltinName.builtinKey) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = Rust.Call(pos, callee = "panic!".toId(pos), args = listOf())
+}
+
+private val regexCompileFormatted =
+    FunctionCall("std/regex.type RegexFormatter.regexCompileFormatted()", "compile_formatted")
+private val regexCompiledFind = FunctionCall("std/regex.type Regex.compiledFind()", "compiled_find")
+private val regexCompiledFound = FunctionCall("std/regex.type Regex.compiledFound()", "compiled_found")
+private val regexCompiledReplace =
+    FunctionCall("std/regex.type Regex.compiledReplace()", "compiled_replace", fnIndex = 2)
+private val regexCompiledSplit = FunctionCall("std/regex.type Regex.compiledSplit()", "compiled_split")
+private val regexFormatterPushCodeTo = FunctionCall("std/regex.type RegexFormatter.pushCodeTo()", "push_code_to")
+
+internal object SimpleToString : RustInlineSupportCode(listOf("core.type Boolean.toString()")) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return (arguments[0].expr as Rust.Expr).wrapArcString()
+    }
+}
+
+internal object StrCat : RustInlineSupportCode("StrCat") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = when (arguments.size) {
+        0 -> Rust.StringLiteral(pos, "").wrapArcString()
+        else -> {
+            Rust.Call(
+                pos,
+                callee = Rust.Id(pos, OutName(FORMAT_MACRO_NAME, null)),
+                args = buildList {
+                    // Inline string literal parts because that's nicer of us.
+                    val format = arguments.joinToString("") { arg ->
+                        when (val expr = arg.expr) {
+                            is Rust.StringLiteral -> expr.value.replace("{", "{{").replace("}", "}}")
+                            else -> "{}"
+                        }
+                    }
+                    add(Rust.StringLiteral(pos, format))
+                    for (arg in arguments) {
+                        if (arg.expr !is Rust.StringLiteral) {
+                            add((arg.expr as Rust.Expr).stripArc())
+                        }
+                    }
+                },
+            ).wrapArc()
+        }
+    }
+}
+
+private object StringBegin : Constant("core.type String.begin") {
+    override fun value(pos: Position) = "0usize".toId(pos)
+}
+
+private val stringCountBetween = FunctionCall("core.type String.countBetween()", "temper_core::string::count_between")
+private val stringEnd = MethodCall("core.type String.get end()", "len")
+private val stringForEach = FunctionCall("core.type String.forEach()", "temper_core::string::for_each", fnIndex = -1)
+private val stringFromCodePoint =
+    FunctionCall("core.type String.fromCodePoint()", "temper_core::string::from_code_point")
+private val stringFromCodePoints =
+    FunctionCall("core.type String.fromCodePoints()", "temper_core::string::from_code_points")
+private val stringGet = FunctionCall("core.type String.get()", "temper_core::string::get")
+private val stringHasAtLeast = FunctionCall("core.type String.hasAtLeast()", "temper_core::string::has_at_least")
+private val stringHasIndex = FunctionCall("core.type String.hasIndex()", "temper_core::string::has_index")
+private val stringIndexOf = FunctionCall("core.type String.indexOf()", "temper_core::string::index_of")
+private val stringNext = FunctionCall("core.type String.next()", "temper_core::string::next")
+private val stringPrev = FunctionCall("core.type String.prev()", "temper_core::string::prev")
+private val stringSlice = FunctionCall("core.type String.slice()", "temper_core::string::slice")
+private val stringSplit = FunctionCall("core.type String.split()", "temper_core::string::split")
+private val stringStep = FunctionCall("core.type String.step()", "temper_core::string::step")
+private val stringToFloat64 = FunctionCall("core.type String.toFloat64()", "temper_core::string::to_float64")
+private val stringToInt = FunctionCall("core.type String.toInt32()", "temper_core::string::to_int")
+private val stringToInt64 = FunctionCall("core.type String.toInt64()", "temper_core::string::to_int64")
+private val stringToString = MethodCall("core.type String.toString()", "clone")
+
+internal object StringBuilderConstructor : RustInlineSupportCode("core.type StringBuilder.constructor()") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ) = Rust.Call(pos, "String".toId(pos).extendWith("new"), listOf()).wrapLock().wrapArc()
+}
+private val stringBuilderAppend =
+    FunctionCall(baseName = "core.type StringBuilder.append()", functionName = "temper_core::string::builder::append")
+private val stringBuilderAppendBetween = FunctionCall(
+    baseName = "core.type StringBuilder.appendBetween()",
+    functionName = "temper_core::string::builder::append_between",
+)
+private val stringBuilderAppendCodePoint =
+    FunctionCall("core.type StringBuilder.appendCodePoint()", "temper_core::string::builder::append_code_point")
+private val stringBuilderClear =
+    FunctionCall(baseName = "core.type StringBuilder.clear()", functionName = "temper_core::string::builder::clear")
+private val stringBuilderEnd =
+    FunctionCall(baseName = "core.type StringBuilder.get end()", functionName = "temper_core::string::builder::end")
+private val stringBuilderToString =
+    FunctionCall("core.type StringBuilder.toString()", "temper_core::string::builder::to_string")
+
+private object StringIndexNone : Constant("core.type StringIndex.none") {
+    override fun value(pos: Position) = "()".toId(pos)
+}
+
+internal object TestBail : RustInlineSupportCode("std/testing.type Test.bail()") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        val messages = "self".toKeyId(pos).methodCall("messages_combined")
+        val makeError = "temper_core".toId(pos).extendWith(listOf("Error", "with_optional_message"))
+        val error = Rust.Call(pos, makeError, listOf(messages))
+        return Rust.Call(pos, "Err".toId(pos), listOf(error))
+    }
+}
+
+private val timesFltFlt = Infix("TimesFltFlt", BuiltinOperatorId.TimesFltFlt, RustOperator.Multiplication)
+private val timesIntInt = MethodCall("TimesIntInt", "wrapping_mul", BuiltinOperatorId.TimesIntInt)
+private val valueResultConstructor =
+    FunctionCall("core.type ValueResult.constructor()", "Some", cloneEvenIfFirst = true, hasGeneric = true)
+
+private val isOkResult = MethodCall(
+    baseName = "IsOkResult",
+    memberName = "is_ok",
+    builtinOperatorId = BuiltinOperatorId.IsOkResult,
+)
+
+private val packOkResult = FunctionCall(
+    baseName = "PackOkResult",
+    functionName = "Ok",
+    avoidDeref = true,
+    builtinOperatorId = BuiltinOperatorId.PackOkResult,
+    cloneEvenIfFirst = true,
+)
+
+private object RepackErrResult : RustInlineSupportCode(
+    baseName = "RepackErrResult",
+    builtinOperatorId = BuiltinOperatorId.RepackErrResult,
+    hasGeneric = true,
+) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        return Rust.Call(
+            pos,
+            callee = "Err".toId(pos),
+            // `.expect_err` and `.unwrap_err` both require the success type
+            // implements the Debug trait so that they can produce a panic message,
+            // `.unwrap_err_unchecked` is unsafe, and `.into_err` is nightly only.
+            // So live on `.err().unwrap()` instead.
+            // Meanwhile, we use these just for finished results, so avoid clone here.
+            args = listOf((arguments[0].expr as Rust.Expr).methodCall("err").methodCall("unwrap")),
+        )
+    }
+}
+
+private val unpackOkResult = MethodCall(
+    baseName = "UnpackOkResult",
+    memberName = "unwrap",
+    builtinOperatorId = BuiltinOperatorId.UnpackOkResult,
+)
+
+private val connectedReferences = listOf(
+    CmpGeneric,
+    ConsoleLog,
+    dateToday,
+    denseBitVectorConstructor,
+    denseBitVectorGet,
+    denseBitVectorSet,
+    dequeAdd,
+    dequeConstructor,
+    dequeIsEmpty,
+    dequeRemoveFirst,
+    DoneResult,
+    Empty,
+    float64Expm1,
+    float64Log,
+    float64Log1p,
+    float64Min,
+    float64Max,
+    float64Near,
+    float64Sign,
+    Float64E,
+    Float64Pi,
+    float64ToInt,
+    Float64ToIntUnsafe,
+    float64ToInt64,
+    Float64ToInt64Unsafe,
+    float64ToString,
+    GetConsole,
+    ignore,
+    IntToFloat64,
+    IntToInt64,
+    intToString,
+    int64ToFloat64,
+    Int64ToFloat64Unsafe,
+    int64ToInt32,
+    Int64ToInt32Unsafe,
+    int64ToString,
+    listForEach,
+    listBuilderAdd,
+    listBuilderAddAll,
+    listBuilderClear,
+    listBuilderConstructor,
+    listBuilderRemoveLast,
+    listBuilderReverse,
+    listBuilderSet,
+    listBuilderSort,
+    listBuilderSplice,
+    listedFilter,
+    listedGet,
+    listedGetOr,
+    listedIsEmpty,
+    listedJoin,
+    listedLength,
+    listedMap,
+    listedReduce,
+    listedReduceFrom,
+    listedSlice,
+    listedSorted,
+    listedToList,
+    listedToListBuilder,
+    mapConstructor,
+    mapBuilderClear,
+    mapBuilderConstructor,
+    mapBuilderRemove,
+    mapBuilderSet,
+    mappedForEach,
+    mappedGet,
+    mappedGetOr,
+    mappedHas,
+    mappedLength,
+    mappedKeys,
+    mappedToList,
+    mappedToListBuilder,
+    mappedToListBuilderWith,
+    mappedToListWith,
+    mappedToMap,
+    mappedToMapBuilder,
+    mappedValues,
+    netSend,
+    promiseBuilderComplete,
+    PairConstructor,
+    regexCompileFormatted,
+    regexCompiledFind,
+    regexCompiledFound,
+    regexCompiledReplace,
+    regexCompiledSplit,
+    regexFormatterPushCodeTo,
+    SimpleToString,
+    StringBegin,
+    stringCountBetween,
+    stringEnd,
+    stringForEach,
+    stringFromCodePoint,
+    stringFromCodePoints,
+    stringGet,
+    stringHasAtLeast,
+    stringHasIndex,
+    stringIndexOf,
+    stringNext,
+    stringPrev,
+    stringSlice,
+    stringSplit,
+    stringStep,
+    stringToFloat64,
+    stringToInt,
+    stringToInt64,
+    stringToString,
+    StringBuilderConstructor,
+    stringBuilderAppend,
+    stringBuilderAppendBetween,
+    stringBuilderAppendCodePoint,
+    stringBuilderClear,
+    stringBuilderEnd,
+    stringBuilderToString,
+    StringIndexNone,
+    TestBail,
+    valueResultConstructor,
+).flatMap { ref -> ref.connectedNames.map { it to ref } }.toMap()
+
+private const val FORMAT_MACRO_NAME = "format!"
+
+internal val connectedTypes = mapOf(
+    "core.type StringBuilder" to ConnectedType.StringBuilder,
+)

@@ -1,0 +1,10 @@
+@fn @reach(\none) let trick__3, @fn @reach(\none) treat__4, @fn @reach(\none) trail__5;
+trick__3 = (@stay fn trick /* return__0 */: Void {
+    return__0 = 123
+});
+treat__4 = (@stay fn treat /* return__1 */: Int32 {
+    return__1 = 456
+});
+trail__5 = (@stay fn trail /* return__2 */: Void {
+    return__2 = void
+})

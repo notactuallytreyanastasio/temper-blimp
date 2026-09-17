@@ -1,0 +1,26 @@
+  @stay @imported(\(`test//c/`.C)) @reach(\test) let C__1;
+  C__1 = type (C);
+  @stay @imported(\(`std//testing/`.Test)) @reach(\test) let Test__2;
+  Test__2 = type (Test);
+  @fn @test("to be or not to be null") let toBeOrNotToBeNull__5;
+  toBeOrNotToBeNull__5 = (@stay fn toBeOrNotToBeNull(test#0: Test) /* return__3 */: (Void | Bubble) {
+      return__3 = void;
+      let c0__4;
+      c0__4 = new C("");
+      let actual#6;
+      actual#6 = do_get_optionalString(c0__4);
+## Here's a block that computes the failure message if the predicate is false.
+      let fn__11;
+      fn__11 = (@stay fn /* return__8 */{
+          let t#9;
+## Here we're picking a string representation of the actual expression result
+          if (isNull(actual#6)) {
+            t#9 = "null"
+          } else {
+            t#9 = do_call_toString(notNull(actual#6))
+          };
+          return__8 = cat("expected c0.optionalString == (", "", ") not (", t#9, ")")
+      });
+## Here's the assertion predicate
+      do_call_assert(test#0, actual#6 == "", fn__11)
+  })

@@ -1,0 +1,11 @@
+fn (b__1 /* aka b */) /* return__0 */{
+  fn__2: do {
+    if(b__1, fn {
+        do {
+          return__0 = 1;
+          break(\label, fn__2)
+        }
+    });
+    0
+  }
+}

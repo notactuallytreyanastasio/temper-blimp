@@ -1,0 +1,46 @@
+@typeDecl(Hidden__0) @stay let Hidden__0;
+Hidden__0 = type (Hidden__0);
+@typeDecl(Exported<HI__1>) @stay let `test//`.Exported;
+`test//`.Exported = type (Exported);
+@fn let `test//`.consider, @fn `test//`.sneak, @typePlaceholder(Hidden__0) typePlaceholder#33: Empty;
+typePlaceholder#33 = {class: Empty__10};
+let `test//`.more;
+`test//`.more = new Map<String, Hidden__0>(list());
+@typeFormal(\HI) @typeDefined(HI__1) @fromType(Exported<HI__1>) let HI__1;
+HI__1 = type (HI__1);
+@constructorProperty @visibility(\public) @stay @fromType(Exported<HI__1>) let hi__13: Hidden__0;
+@visibility(\public) @fn @stay @fromType(Exported<HI__1>) let attempt__14;
+attempt__14 = (@stay fn attempt(@impliedThis(Exported<HI__1>) this__2: Exported<HI__1>) /* return__8 */: Hidden__0 {
+    return__8 = getp(hi__13, this__2)
+});
+@visibility(\public) @fn @stay @fromType(Exported<HI__1>) let attempt2__16;
+@typeFormal(\H) @typeDecl(H__4) let H__4;
+H__4 = type (H__4);
+attempt2__16 = (@stay fn attempt2<H__4 extends Hidden__0>(@impliedThis(Exported<HI__1>) this__3: Exported<HI__1>, hmm__17 /* aka hmm */: H__4) /* return__9 */: H__4 {
+    return__9 = hmm__17
+});
+@fn @static @visibility(\public) @stay @fromType(Exported<HI__1>) let subvert__19;
+subvert__19 = (@stay fn subvert /* return__10 */: (Map<String, Hidden__0>) {
+    return__10 = `test//`.more
+});
+@visibility(\private) @stay @fromType(Exported<HI__1>) let ha__21: Hidden__0;
+@fn @visibility(\public) @stay @fromType(Exported<HI__1>) let constructor__22;
+constructor__22 = (@stay fn constructor(@impliedThis(Exported<HI__1>) this__6: Exported<HI__1>, hi__23 /* aka hi */: Hidden__0) /* return__7 */: Void {
+    return__7 = void;
+    let t#29;
+    t#29 = hi__23;
+    setp(hi__13, this__6, t#29);
+    setp(ha__21, this__6, hi__23)
+});
+@fn @visibility(\public) @stay @fromType(Exported<HI__1>) let gethi__30;
+gethi__30 = (@stay fn (@impliedThis(Exported<HI__1>) this__31: Exported<HI__1>) /* return__32 */: Hidden__0 {
+    return__32 = getp(hi__13, this__31)
+});
+`test//`.consider = (@stay fn consider(hu__24 /* aka hu */: Hidden__0) /* return__11 */: (Hidden__0?) {
+    return__11 = hu__24
+});
+@typeFormal(\H) @typeDecl(H__5) let H__5;
+H__5 = type (H__5);
+`test//`.sneak = (@stay fn sneak<H__5 extends Hidden__0>(he__26 /* aka he */: H__5) /* return__12 */: H__5 {
+    return__12 = he__26
+})

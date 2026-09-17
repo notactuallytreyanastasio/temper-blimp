@@ -1,0 +1,15 @@
+# Build output
+build/
+.gradle/
+zig-out/
+.zig-cache/
+temper.out/
+temper.keep/
+target/
+node_modules/
+
+# Local tooling
+.DS_Store
+
+# PR bodies, used with gh pr create --body-file
+.prs/

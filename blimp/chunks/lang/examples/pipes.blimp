@@ -1,0 +1,34 @@
+# Pipe operator examples
+# The |> operator threads data through a chain of transformations.
+# Use _ as a placeholder for where the piped value goes.
+
+actor DataProcessor do
+  state items: [Item] :: []
+  state processed: Int :: 0
+
+  on :push(item: Item) -> Atom do
+    become items: [item | items],
+           processed: processed + 1
+    reply :ok
+  end
+
+  # Simple pipe: pass items to a single function
+  on :count -> Int do
+    reply items |> length(_)
+  end
+
+  # Chained pipes: filter then count
+  on :count_active -> Int do
+    reply items |> filter(_, :active) |> length(_)
+  end
+
+  # Pipe into a bare function (no args)
+  on :sorted -> [Item] do
+    reply items |> sort
+  end
+
+  # Pipe with multiple steps
+  on :first_active -> Item do
+    reply items |> filter(_, :active) |> first(_)
+  end
+end
