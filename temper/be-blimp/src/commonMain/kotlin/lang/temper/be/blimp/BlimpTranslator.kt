@@ -2,6 +2,7 @@ package lang.temper.be.blimp
 
 import lang.temper.ast.boundaryDescent
 import lang.temper.be.tmpl.TmpL
+import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.log.Position
 import lang.temper.name.OutName
 import lang.temper.name.ResolvedName
@@ -434,6 +435,19 @@ internal class BlimpTranslator(
             )
         }
         is TmpL.CastExpression -> translateCastExpression(expression)
+        is TmpL.InfixOperation -> translateInfixOperation(expression)
+        is TmpL.PrefixOperation -> Blimp.Operation(
+            expression.pos,
+            left = null,
+            operator = Blimp.Operator(
+                expression.op.pos,
+                when (expression.op.tmpLOperator) {
+                    // The only prefix operator TmpL has.
+                    TmpLOperator.Bang -> BlimpOperator.Not
+                },
+            ),
+            right = translateExpression(expression.operand),
+        )
         is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
         else -> TODO("expression: $expression")
     }
@@ -464,6 +478,86 @@ internal class BlimpTranslator(
             callee = Blimp.Id(cast.pos, OutName(TEMPER_CAST, null)),
             args = listOf(expr, Blimp.Atom(cast.pos, tag)),
         )
+    }
+
+    /**
+     * The handful of operators the frontend leaves as operators.
+     *
+     * Everything arithmetic arrives as an inlined support-code call instead,
+     * which is why this went missing until a `>= 0` in the middle of
+     * `types/string/indices` had nowhere to go.
+     *
+     * `&&` and `||` are the interesting ones. Blimp has `and` and `or`, and
+     * they are the wrong translation: they are eager, so both sides run
+     * whatever the left one says. Temper's short-circuit, and callers depend
+     * on it -- `i >= 0 && charAt(s, i) == c` reads out of range when `i` is
+     * negative. They lower to a `case` instead, which is the only construct
+     * in Blimp that will not evaluate a branch it did not take.
+     *
+     * Both `when`s below are exhaustive, so TmpL growing an operator is a
+     * compile error here rather than a `TODO()` someone finds at build time.
+     */
+    private fun translateInfixOperation(expression: TmpL.InfixOperation): Blimp.Expr {
+        val pos = expression.pos
+        val left = translateExpression(expression.left)
+        val operator = when (expression.op.tmpLOperator) {
+            TmpLOperator.AmpAmp ->
+                return shortCircuit(pos, left, Blimp.BoolLit(pos, false), rightFirst = true, expression = expression)
+            TmpLOperator.BarBar ->
+                return shortCircuit(pos, left, Blimp.BoolLit(pos, true), rightFirst = false, expression = expression)
+            TmpLOperator.EqEqInt -> BlimpOperator.Equals
+            TmpLOperator.GeInt -> BlimpOperator.GreaterEquals
+            TmpLOperator.GtInt -> BlimpOperator.GreaterThan
+            TmpLOperator.LeInt -> BlimpOperator.LessEquals
+            TmpLOperator.LtInt -> BlimpOperator.LessThan
+            // Blimp's Int is 64-bit and does not wrap. This operator is the
+            // frontend's own index arithmetic, which cannot overflow; Temper's
+            // wrapping Int32 addition arrives as a support-code call that goes
+            // through `temper_int32`.
+            TmpLOperator.PlusInt -> BlimpOperator.Addition
+        }
+        return Blimp.Operation(
+            pos,
+            left = left,
+            operator = Blimp.Operator(expression.op.pos, operator),
+            right = translateExpression(expression.right),
+        )
+    }
+
+    /**
+     * `case left do true -> a _ -> b end`, where one of the arms is the right
+     * operand and the other is the constant the operator settles on.
+     */
+    private fun shortCircuit(
+        pos: Position,
+        left: Blimp.Expr,
+        settled: Blimp.BoolLit,
+        /** True for `&&`, where the right operand is the `true` arm. */
+        rightFirst: Boolean,
+        expression: TmpL.InfixOperation,
+    ): Blimp.Expr {
+        val right = translateExpression(expression.right)
+        val whenTrue = if (rightFirst) right else settled
+        val whenFalse = if (rightFirst) settled else right
+        val cased = Blimp.CaseExpr(
+            pos,
+            subject = left,
+            arms = listOf(
+                Blimp.CaseArm(
+                    pos,
+                    pattern = Blimp.BoolLit(pos, true),
+                    guard = null,
+                    body = Blimp.Block(pos, statements = listOf(Blimp.ExprStatement(pos, whenTrue))),
+                ),
+                Blimp.CaseArm(
+                    pos,
+                    pattern = Blimp.Wildcard(pos),
+                    guard = null,
+                    body = Blimp.Block(pos, statements = listOf(Blimp.ExprStatement(pos, whenFalse))),
+                ),
+            ),
+        )
+        return cased
     }
 
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
