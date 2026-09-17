@@ -218,9 +218,10 @@ internal class BlimpTranslator(
     private fun processModuleInitBlock(block: TmpL.ModuleInitBlock) {
         scopes.addLast(moduleScope)
         try {
-            for (statement in block.body.statements) {
-                translateStatementInto(statement, mainStatements)
-            }
+            // Through `translateBody`, not statement by statement: module code
+            // gets labelled blocks too, and a `break` out of one needs the
+            // continuation split that only this path performs.
+            translateBody(block.body.statements, mainStatements)
         } finally {
             scopes.removeLast()
         }
@@ -1988,10 +1989,14 @@ internal class BlimpTranslator(
         val enclosing = loops.lastOrNull()
         // Falling off the end of a loop body is itself a signal, so a loop
         // nested in another cannot just evaluate to nil here.
-        val fallThrough = when {
-            continuation != null -> continuation.callFrom(pos)
-            enclosing != null -> enclosing.signal(pos, LOOP_FALL)
-            else -> Blimp.ExprStatement(pos, Blimp.NilLit(pos))
+        // Built fresh each time: the same statement is needed in two arms, and
+        // a Blimp tree node can only have one parent.
+        val fallThrough = {
+            when {
+                continuation != null -> continuation.callFrom(pos)
+                enclosing != null -> enclosing.signal(pos, LOOP_FALL)
+                else -> Blimp.ExprStatement(pos, Blimp.NilLit(pos))
+            }
         }
         val arms = mutableListOf<Blimp.CaseArm>()
         for ((destination, id) in escapeIds) {
@@ -2003,7 +2008,7 @@ internal class BlimpTranslator(
                         ?.takeIf { it.second == loops.size }
                         // A labelled block with nothing after it means "skip
                         // the rest of this loop body", which is a fall, not nil.
-                        ?.let { it.first?.callFrom(pos) ?: fallThrough }
+                        ?.let { it.first?.callFrom(pos) ?: fallThrough() }
                 else -> null
             } ?: continue
             arms.add(
@@ -2052,7 +2057,7 @@ internal class BlimpTranslator(
                         pos,
                         pattern = Blimp.Wildcard(pos),
                         guard = null,
-                        body = Blimp.Block(pos, statements = listOf(fallThrough)),
+                        body = Blimp.Block(pos, statements = listOf(fallThrough())),
                     ),
                 ),
             ),
