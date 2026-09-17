@@ -593,3 +593,109 @@ def temper_new_cell(v: Any) -> Any do
   c
 end
 
+# ── Mutable strings ──────────────────────────────────
+#
+# StringBuilder is mutable for the same reason ListBuilder is, and gets the
+# same answer: an actor holding the value.
+
+actor TemperStringBuilder do
+  state text: String :: ""
+
+  on :__temper_types do reply [:StringBuilder] end
+  on :text do reply text end
+  on :toString do reply text end
+  on :isEmpty do reply empty?(text) end
+
+  # Temper's String indices are byte offsets, and `end` is one past the last.
+  on :end do reply length(text) end
+
+  on :append(s: String) do
+    text = concat(text, s)
+    become text: text
+    reply nil
+  end
+
+  # Temper's appendCodePoint bubbles on anything that is not a code point:
+  # past the maximum, or in the surrogate range, which UTF-8 never encodes.
+  on :appendCodePoint(cp: Int) do
+    case temper_is_code_point(cp) do
+      true ->
+        text = concat(text, u8_encode(cp))
+        become text: text
+        reply nil
+      _ -> bubble :not_a_code_point
+    end
+  end
+
+  on :appendBetween(source: String, from: Int, to: Int) do
+    text = concat(text, temper_slice(source, from, to))
+    become text: text
+    reply nil
+  end
+
+  on :clear do
+    become text: ""
+    reply nil
+  end
+end
+
+def temper_new_string_builder() -> Any do
+  spawn TemperStringBuilder
+end
+
+# ── String indices ───────────────────────────────────
+#
+# A Temper StringIndex is a byte offset that has to land on the start of a
+# UTF-8 sequence, so stepping is a sequence-width walk rather than arithmetic.
+
+def temper_string_prev(s: String, i: Int) -> Int do
+  temper_string_prev_loop(s, i - 1)
+end
+
+def temper_string_prev_loop(s: String, i: Int) -> Int do
+  case i <= 0 do
+    true -> 0
+    _ -> case rem(char_code(s, i), 256) >= 128 and rem(char_code(s, i), 256) < 192 do
+      true -> temper_string_prev_loop(s, i - 1)
+      _ -> i
+    end
+  end
+end
+
+def temper_string_step(s: String, i: Int, by: Int) -> Int do
+  case by == 0 do
+    true -> i
+    _ -> case by > 0 do
+      true -> temper_string_step(s, temper_string_next(s, i), by - 1)
+      _ -> temper_string_step(s, temper_string_prev(s, i), by + 1)
+    end
+  end
+end
+
+def temper_string_count_between(s: String, from: Int, to: Int) -> Int do
+  temper_string_count_loop(s, from, to, 0)
+end
+
+def temper_string_count_loop(s: String, i: Int, to: Int, n: Int) -> Int do
+  case i >= to or i >= length(s) do
+    true -> n
+    _ -> temper_string_count_loop(s, temper_string_next(s, i), to, n + 1)
+  end
+end
+
+def temper_string_has_at_least(s: String, from: Int, to: Int, least: Int) -> Bool do
+  temper_string_count_between(s, from, to) >= least
+end
+
+# Temper's String.begin is the index of the first code point. Blimp's string
+# indices are byte offsets, so it is 0. It arrives as a static property read,
+# which the backend flattens to this name.
+String__begin = 0
+
+def temper_is_code_point(cp: Int) -> Bool do
+  case cp < 0 or cp > 1114111 do
+    true -> false
+    _ -> cp < 55296 or cp > 57343
+  end
+end
+

@@ -438,7 +438,7 @@ internal class BlimpTranslator(
                 message = Blimp.MessageCall(
                     call.pos,
                     name = Blimp.Atom(call.pos, fn.methodName.dotNameText),
-                    args = call.parameters.map { translateActual(it) },
+                    args = call.parameters.map { rootSendArg(translateActual(it)) },
                 ),
             )
 
@@ -463,7 +463,7 @@ internal class BlimpTranslator(
                             message = Blimp.MessageCall(
                                 pos,
                                 name = Blimp.Atom(pos, CONSTRUCTOR_MESSAGE),
-                                args = call.parameters.map { translateActual(it) },
+                                args = call.parameters.map { rootSendArg(translateActual(it)) },
                             ),
                         ),
                     ),
@@ -487,6 +487,26 @@ internal class BlimpTranslator(
 
             else -> TODO("callable: $fn")
         }
+
+    /**
+     * Binds a computed send argument to a local first.
+     *
+     * Works around a Blimp bug: an actor spawned directly into a send
+     * argument is not rooted, so storing it in the receiver's state leaves a
+     * dangling reference and the next use segfaults with the undefined-memory
+     * pattern. Binding it to a local first is enough, and costs a line.
+     * See blimp/chunks/lang/test/regression_spawn_in_send_arg.blimp.
+     */
+    private fun rootSendArg(arg: Blimp.Expr): Blimp.Expr = when (arg) {
+        is Blimp.Id, is Blimp.StringLit, is Blimp.NumberLit, is Blimp.BoolLit,
+        is Blimp.NilLit, is Blimp.Atom,
+        -> arg
+        else -> {
+            val id = Blimp.Id(arg.pos, names.gensym("arg"))
+            hoisted.add(Blimp.Assign(arg.pos, target = id.deepCopy(), value = arg))
+            id
+        }
+    }
 
     private fun translateActual(actual: TmpL.Actual): Blimp.Expr = when (actual) {
         is TmpL.Expression -> translateExpression(actual)
