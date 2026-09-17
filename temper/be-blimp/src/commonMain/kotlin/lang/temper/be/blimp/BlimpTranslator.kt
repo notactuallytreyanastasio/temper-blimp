@@ -69,7 +69,11 @@ private const val LOOP_FALL = "fall"
  * pick a functional test, see what breaks, and fill in the path it needs. A
  * loud failure with the node in the message is the point.
  */
-internal class BlimpTranslator(private val module: TmpL.Module) {
+internal class BlimpTranslator(
+    private val module: TmpL.Module,
+    /** Every class in the module set, so a subclass can be flattened. */
+    private val types: Map<String, TmpL.TypeDeclaration> = mapOf(),
+) {
 
     /** `actor` and `def` items, which must precede any code that runs them. */
     private val declarations = mutableListOf<Blimp.Item>()
@@ -97,6 +101,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
 
     /** Module-level names, in scope for every init block in the module. */
     private val moduleScope = mutableSetOf<ResolvedName>()
+
+    /**
+     * Locals that a nested function assigns to, and so live in a cell.
+     *
+     * A Blimp closure captures the values of names already bound when it is
+     * made, and an assignment inside it is local to it. Temper closures
+     * capture by reference and may assign, so those locals are held in a
+     * `TemperCell` actor that the closure captures instead: reads become
+     * `x <- :get`, writes `x <- :set(v)`.
+     */
+    private val boxed = mutableSetOf<ResolvedName>()
 
     /**
      * The actor whose handler is being translated, if any.
@@ -214,12 +229,40 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                     null -> Blimp.NilLit(statement.pos)
                     else -> translateExpressionHoisting(init, out)
                 }
-                out.add(Blimp.Assign(statement.pos, target = idOf(statement.name), value = value))
+                val boxedHere = nameOf(statement.name) in boxed
+                val stored = when {
+                    boxedHere -> {
+                        preludeHelpers.addAll(needsCore)
+                        Blimp.Call(
+                            statement.pos,
+                            callee = Blimp.Id(statement.pos, OutName(TEMPER_NEW_CELL, null)),
+                            args = listOf(value),
+                        )
+                    }
+                    else -> value
+                }
+                out.add(Blimp.Assign(statement.pos, target = idOf(statement.name), value = stored))
             }
 
             is TmpL.Assignment -> {
                 val value = translateExpressionHoisting(statement.right, out)
-                out.add(Blimp.Assign(statement.pos, target = idOf(statement.left), value = value))
+                when (nameOf(statement.left)) {
+                    in boxed -> out.add(
+                        Blimp.ExprStatement(
+                            statement.pos,
+                            Blimp.Send(
+                                statement.pos,
+                                target = idOf(statement.left),
+                                message = Blimp.MessageCall(
+                                    statement.pos,
+                                    name = Blimp.Atom(statement.pos, CELL_SET),
+                                    args = listOf(value),
+                                ),
+                            ),
+                        ),
+                    )
+                    else -> out.add(Blimp.Assign(statement.pos, target = idOf(statement.left), value = value))
+                }
             }
 
             is TmpL.WhileStatement -> translateWhileStatement(statement, out)
@@ -316,9 +359,18 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     private fun translateExpression(expression: TmpL.Expression): Blimp.Expr = when (expression) {
         is TmpL.ValueReference -> translateValueReference(expression)
         is TmpL.CallExpression -> translateCallExpression(expression)
-        is TmpL.Reference -> idOf(expression.id)
+        is TmpL.Reference -> when (nameOf(expression.id)) {
+            in boxed -> cellRead(expression.pos, idOf(expression.id))
+            else -> idOf(expression.id)
+        }
         is TmpL.This -> Blimp.Id(expression.pos, OutName("self", null))
         is TmpL.GetProperty -> translateGetProperty(expression)
+        // A callable used as a value. Blimp closures are values already, so
+        // the wrapper carries nothing at run time.
+        is TmpL.FunInterfaceExpression -> when (val callable = expression.callable) {
+            is TmpL.FnReference -> idOf(callable.id)
+            else -> TODO("function value: $callable")
+        }
         // Temper has already checked the type, and a Blimp actor dispatches on
         // whatever it actually is, so a cast carries no runtime meaning.
         is TmpL.InstanceOfExpression -> {
@@ -419,6 +471,14 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                 target
             }
 
+            // A function value being called: in Blimp a closure is called like
+            // anything else, so the expression becomes the callee.
+            is TmpL.FunInterfaceCallable -> Blimp.Call(
+                call.pos,
+                callee = translateExpression(fn.expr),
+                args = call.parameters.map { translateActual(it) },
+            )
+
             is TmpL.FnReference -> Blimp.Call(
                 call.pos,
                 callee = idOf(fn.id),
@@ -446,6 +506,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val scope = mutableSetOf<ResolvedName>()
         decl.parameters.parameters.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
         scopes.addLast(scope)
+        collectBoxedCaptures(decl.body)
         val body = try {
             translateBlock(decl.body)
         } finally {
@@ -801,9 +862,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     /**
      * A nested function becomes a `fn(...) do ... end` bound to its name.
      *
-     * Blimp closures capture the enclosing environment by reference, and a
-     * lambda sees a local assigned after it was defined, so nothing has to be
-     * hoisted or reordered here.
+     * A Blimp closure captures the values of names already bound when it is
+     * made; a name not yet bound resolves when the closure runs, and an
+     * assignment inside it is local to it. So a local the closure assigns to
+     * has to live in a cell -- see [collectBoxedCaptures].
      *
      * The enclosing loop and label context is set aside: a `return` inside the
      * lambda is the lambda's own, not a jump out of the function around it.
@@ -838,6 +900,42 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         )
     }
 
+    /**
+     * Records every enclosing local that a nested function assigns to, so its
+     * declaration, reads and writes can all go through a cell.
+     */
+    private fun collectBoxedCaptures(block: TmpL.BlockStatement?) {
+        val declared = mutableSetOf<ResolvedName>()
+        block?.boundaryDescent { node ->
+            if (node is TmpL.LocalDeclaration) nameOf(node.name)?.let(declared::add)
+            true
+        }
+        block?.boundaryDescent { node ->
+            if (node is TmpL.LocalFunctionDeclaration) {
+                val inner = mutableSetOf<ResolvedName>()
+                node.boundaryDescent { child ->
+                    when (child) {
+                        is TmpL.LocalDeclaration -> nameOf(child.name)?.let(inner::add)
+                        is TmpL.Formal -> nameOf(child.name)?.let(inner::add)
+                        else -> {}
+                    }
+                    true
+                }
+                node.boundaryDescent { child ->
+                    if (child is TmpL.Assignment) {
+                        val target = nameOf(child.left)
+                        if (target != null && target !in inner) boxed.add(target)
+                    }
+                    true
+                }
+            }
+            true
+        }
+    }
+
+    private fun cellRead(pos: Position, id: Blimp.Id): Blimp.Expr =
+        Blimp.Send(pos, target = id, message = Blimp.Atom(pos, CELL_GET))
+
     private fun translateBlock(block: TmpL.BlockStatement?): Blimp.Block {
         val statements = mutableListOf<Blimp.Statement>()
         block?.statements?.let { translateBody(it, statements) }
@@ -868,7 +966,10 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         }
         val typePrefix = names.outName(nameOf(decl.name)!!).outputNameText
         val pos = decl.pos
-        val properties = decl.members
+        // A subclass carries its parents' members, because a Blimp actor has
+        // no super to defer to. Own members win over inherited ones.
+        val flattened = flattenMembers(decl)
+        val properties = flattened
             .filterIsInstance<TmpL.InstanceProperty>()
             .filter { it.memberShape.abstractness == Abstractness.Concrete }
         val fieldNames = properties.mapNotNull { nameOf(it.name) }.toSet()
@@ -905,7 +1006,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                 ),
             ),
         )
-        for (member in decl.members) {
+        for (member in flattened) {
             when (member) {
                 is TmpL.InstanceProperty -> {}
                 is TmpL.Constructor ->
@@ -936,7 +1037,6 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                             Blimp.Atom(member.pos, "set_${member.dotName.dotNameText}"),
                         ),
                     )
-                else -> TODO("class member: $member")
             }
         }
         declarations.add(
@@ -948,6 +1048,55 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             ),
         )
     }
+
+    /**
+     * This class's members plus every inherited one it does not redefine.
+     *
+     * Blimp has no inheritance and needs none: an actor with the handlers is
+     * the thing. Dispatch is a send, so a flattened subclass answers for
+     * itself without any vtable.
+     */
+    private fun flattenMembers(decl: TmpL.TypeDeclaration): List<TmpL.Member> {
+        val byName = linkedMapOf<String, TmpL.Member>()
+        // Breadth first, so a nearer supertype wins over a farther one. With
+        // `class D extends B & C` where both extend A and only C overrides,
+        // C is at depth 1 and A at depth 2, so C wins -- which is what every
+        // other backend does.
+        var level = listOf(decl)
+        val seen = mutableSetOf<String>()
+        while (level.isNotEmpty()) {
+            for (type in level) {
+                for (member in type.members.filterIsInstance<TmpL.Member>()) {
+                    memberKey(member)?.let { byName.putIfAbsent(it, member) }
+                }
+            }
+            level = level.flatMap { type ->
+                type.superTypes.mapNotNull { superType ->
+                    val key = (superType.typeName.sourceDefinition?.name as? ResolvedParsedName)
+                        ?.baseName?.nameText
+                    when {
+                        key == null || !seen.add(key) -> null
+                        else -> types[key]
+                    }
+                }
+            }
+        }
+        return byName.values.toList()
+    }
+
+    /** What makes two members the same member for override purposes. */
+    private fun memberKey(member: TmpL.Member): String? = when (member) {
+        is TmpL.InstanceProperty -> "prop:" + (member.dotName?.dotNameText ?: nameText(member.name))
+        is TmpL.StaticProperty -> "static-prop:" + nameText(member.name)
+        is TmpL.Getter -> "get:" + member.dotName.dotNameText
+        is TmpL.Setter -> "set:" + member.dotName.dotNameText
+        is TmpL.NormalMethod -> "fn:" + messageAtom(member)
+        is TmpL.StaticMethod -> "static-fn:" + nameText(member.name)
+        is TmpL.Constructor -> "ctor"
+    }
+
+    private fun nameText(id: TmpL.Id): String =
+        nameOf(id)?.let { names.outName(it).outputNameText } ?: "$id"
 
     private fun messageAtom(method: TmpL.NormalMethod): String =
         method.dotName?.dotNameText ?: names.outName(nameOf(method.name)!!).outputNameText
@@ -977,6 +1126,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         actorScope = ActorScope(fieldNames)
         scopes.addLast(scope)
         val statements = mutableListOf<Blimp.Statement>()
+        collectBoxedCaptures(method.body)
         val mutated = try {
             method.body?.statements?.let { translateBody(it, statements) }
             actorScope!!.mutated.toList()
@@ -1020,8 +1170,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val pos = expression.pos
         val propertyName = propertyAtom(expression.property)
         return when (val subject = expression.subject) {
-            // A field of the actor running this handler is in lexical scope.
-            is TmpL.This -> Blimp.Id(pos, OutName(propertyName, null))
+            // A backed property is a real field, and an actor's state is in
+            // lexical scope inside its handlers. An abstract one is a getter,
+            // so it has to be invoked even on `this`.
+            is TmpL.This -> when (expression) {
+                is TmpL.GetBackedProperty -> Blimp.Id(pos, OutName(propertyName, null))
+                else -> Blimp.Send(
+                    pos,
+                    target = Blimp.Id(pos, OutName("self", null)),
+                    message = Blimp.Atom(pos, propertyName),
+                )
+            }
             is TmpL.TypeSubject ->
                 Blimp.Id(pos, OutName(staticName(typeSubjectName(subject), propertyName), null))
             is TmpL.Expression -> Blimp.Send(
@@ -1037,11 +1196,29 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val value = translateExpressionHoisting(statement.right, out)
         val propertyName = propertyAtom(statement.left.property)
         when (val subject = statement.left.subject) {
-            is TmpL.This -> {
-                // Assigning the field name creates a local that shadows the
-                // state; one `become` at the end of the handler publishes it.
-                internalNameOf(statement.left.property)?.let { actorScope?.mutated?.add(it) }
-                out.add(Blimp.Assign(pos, target = Blimp.Id(pos, OutName(propertyName, null)), value = value))
+            // A backed property is a real field: assigning the field name
+            // creates a local that shadows the state, and one `become` at the
+            // end of the handler publishes it. An abstract one is a setter and
+            // has to be invoked, even on `this`.
+            is TmpL.This -> when (statement) {
+                is TmpL.SetBackedProperty -> {
+                    internalNameOf(statement.left.property)?.let { actorScope?.mutated?.add(it) }
+                    out.add(Blimp.Assign(pos, target = Blimp.Id(pos, OutName(propertyName, null)), value = value))
+                }
+                else -> out.add(
+                    Blimp.ExprStatement(
+                        pos,
+                        Blimp.Send(
+                            pos,
+                            target = Blimp.Id(pos, OutName("self", null)),
+                            message = Blimp.MessageCall(
+                                pos,
+                                name = Blimp.Atom(pos, "set_$propertyName"),
+                                args = listOf(value),
+                            ),
+                        ),
+                    ),
+                )
             }
             is TmpL.Expression -> out.add(
                 Blimp.ExprStatement(

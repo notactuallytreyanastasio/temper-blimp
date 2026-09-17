@@ -305,6 +305,11 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** The cell a local lives in when a nested function assigns to it. */
+internal const val TEMPER_NEW_CELL = "temper_new_cell"
+internal const val CELL_GET = "get"
+internal const val CELL_SET = "set"
+
 /** A cast that can fail: checks the tag and bubbles if it does not match. */
 internal const val TEMPER_CAST = "temper_cast"
 

@@ -23,3 +23,14 @@ internal fun TmpL.ModuleLevelDeclaration.isConsole(): Boolean {
     }
     return false
 }
+
+/**
+ * The name a class is known by when flattening a subclass into it.
+ *
+ * Supertypes are named through `NominalType`, so both sides have to agree on
+ * the same text.
+ */
+internal fun typeKeyOf(decl: TmpL.TypeDeclaration): String? =
+    (decl.name.nameContent as? lang.temper.common.Either.Left)?.item?.let { name ->
+        (name as? ResolvedParsedName)?.baseName?.nameText ?: "$name"
+    }

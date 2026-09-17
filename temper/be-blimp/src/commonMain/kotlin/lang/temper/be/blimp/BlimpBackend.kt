@@ -62,8 +62,20 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         val declarations = mutableListOf<Blimp.Item>()
         val mainStatements = mutableListOf<Blimp.Statement>()
         val preludeHelpers = mutableSetOf<String>()
+        // A Blimp actor stands alone -- there is no super to call -- so a
+        // subclass is flattened, which means every class has to be reachable
+        // before any of them is translated.
+        val types = buildMap {
+            for (module in finished.modules) {
+                for (topLevel in module.topLevels) {
+                    if (topLevel is TmpL.TypeDeclaration) {
+                        typeKeyOf(topLevel)?.let { put(it, topLevel) }
+                    }
+                }
+            }
+        }
         for (module in finished.modules) {
-            val translated = BlimpTranslator(module).translateModule()
+            val translated = BlimpTranslator(module, types).translateModule()
             declarations.addAll(translated.declarations)
             mainStatements.addAll(translated.mainStatements)
             preludeHelpers.addAll(translated.preludeHelpers)
