@@ -690,7 +690,7 @@ end
 # Temper's String.begin is the index of the first code point. Blimp's string
 # indices are byte offsets, so it is 0. It arrives as a static property read,
 # which the backend flattens to this name.
-String__begin = 0
+static_String__begin = 0
 
 def temper_is_code_point(cp: Int) -> Bool do
   case cp < 0 or cp > 1114111 do
