@@ -30,6 +30,7 @@ import lang.temper.type2.Signature2
 import lang.temper.type2.Type2
 import lang.temper.type2.withType
 import lang.temper.value.BuiltinOperatorId
+import lang.temper.value.HoleFn
 import lang.temper.value.NamedBuiltinFun
 import lang.temper.value.PureVirtual
 import lang.temper.value.pureVirtualBuiltinName
@@ -159,7 +160,7 @@ private fun supportCodeByOperatorId(builtinOperatorId: BuiltinOperatorId?): Supp
         BuiltinOperatorId.CmpStrStr -> CmpStrStrOrdering
         BuiltinOperatorId.CmpGeneric -> CmpGeneric
         BuiltinOperatorId.Bubble -> bubble
-        BuiltinOperatorId.Panic -> panic
+        BuiltinOperatorId.Panic -> Panic
         BuiltinOperatorId.Print -> print
         BuiltinOperatorId.StrCat -> StrCat
         BuiltinOperatorId.Listify -> Listify
@@ -179,6 +180,7 @@ private fun supportCodeByOperatorId(builtinOperatorId: BuiltinOperatorId?): Supp
 }
 
 private val builtinFunSupportCode = mapOf(
+    HoleFn.name to Hole,
     PureVirtual.name to PureVirtualBuiltin,
     ConvertedCoroutineAwakeUponFn.name to AwakeUponSupportCode,
     GetPromiseResultSyncFn.name to GetPromiseResultSyncSupportCode,
@@ -990,7 +992,41 @@ internal object PairConstructor : RustInlineSupportCode(
     }
 }
 
-private val panic = FunctionCall("Panic", "panic!", BuiltinOperatorId.Panic)
+/**
+ * A Temper hole becomes `panic!("{}", directive)`.
+ *
+ * Rust has no gap construct to translate a hole to, so the directive at least
+ * reaches whoever hits it at run time.
+ */
+private object Hole : RustInlineSupportCode("Hole") {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree = Panic.inlineToTree(pos, arguments, returnType, translator)
+}
+
+/**
+ * `panic!()`, or `panic!("{}", message)` when there is one.
+ *
+ * `panic!` is a format macro, so a message cannot be passed positionally:
+ * `panic!(x)` is "format argument must be a string literal" unless `x` is one.
+ */
+private object Panic : RustInlineSupportCode("Panic", BuiltinOperatorId.Panic) {
+    override fun inlineToTree(
+        pos: Position,
+        arguments: List<TypedArg<Rust.Tree>>,
+        returnType: Type2,
+        translator: RustTranslator,
+    ): Rust.Tree {
+        val args = when (val message = arguments.firstOrNull()?.expr as? Rust.Expr) {
+            null -> listOf()
+            else -> listOf(Rust.StringLiteral(pos, "{}"), message.stripArc())
+        }
+        return Rust.Call(pos, callee = Rust.Id(pos, OutName("panic!", null)), args = args)
+    }
+}
 private val plusFltFlt = Infix("PlusFltFlt", BuiltinOperatorId.PlusFltFlt, RustOperator.Addition)
 private val plusIntInt = MethodCall("PlusIntInt", "wrapping_add", BuiltinOperatorId.PlusIntInt)
 private val powFltFlt = MethodCall("PowFltFlt", "powf", BuiltinOperatorId.PowFltFlt)

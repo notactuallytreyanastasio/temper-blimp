@@ -25,6 +25,14 @@ import lang.temper.value.TSymbol
 import lang.temper.value.TType
 import lang.temper.value.TVoid
 
+/** The handler a `spawn` is followed by, standing in for Temper's constructor. */
+private const val CONSTRUCTOR_MESSAGE = "__new"
+
+/** How a lowered loop body reports which way it left. */
+private const val LOOP_BREAK = "break"
+private const val LOOP_CONTINUE = "continue"
+private const val LOOP_FALL = "fall"
+
 /**
  * Turns one [TmpL.Module] into Blimp items.
  *
@@ -42,9 +50,6 @@ import lang.temper.value.TVoid
  * pick a functional test, see what breaks, and fill in the path it needs. A
  * loud failure with the node in the message is the point.
  */
-/** The handler a `spawn` is followed by, standing in for Temper's constructor. */
-private const val CONSTRUCTOR_MESSAGE = "__new"
-
 internal class BlimpTranslator(private val module: TmpL.Module) {
 
     /** `actor` and `def` items, which must precede any code that runs them. */
@@ -209,9 +214,22 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             is TmpL.BreakStatement -> {
                 val label = statement.label?.id?.let { nameOf(it) }
                 val continuation = label?.let { labelContinuations[it] }
-                when (continuation) {
-                    null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
-                    else -> out.add(continuation.callFrom(statement.pos))
+                val loop = loops.lastOrNull()
+                when {
+                    continuation != null -> out.add(continuation.callFrom(statement.pos))
+                    // An unlabelled break leaves the innermost lowered loop.
+                    label == null && loop != null -> out.add(loop.signal(statement.pos, LOOP_BREAK))
+                    label != null -> TODO("break to a label that is not an enclosing block: $statement")
+                    else -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
+                }
+            }
+
+            is TmpL.ContinueStatement -> {
+                val loop = loops.lastOrNull()
+                when {
+                    statement.label != null -> TODO("labelled continue: $statement")
+                    loop != null -> out.add(loop.signal(statement.pos, LOOP_CONTINUE))
+                    else -> TODO("continue outside a loop: $statement")
                 }
             }
 
@@ -402,13 +420,13 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
      *       _ -> b
      *     end
      */
-    private fun translateBody(statements: List<TmpL.Statement>, out: MutableList<Blimp.Statement>) {
+    private fun translateBody(statements: List<TmpL.Statement>, out: MutableList<Blimp.Statement>): Boolean {
         val splitIndex = statements.indexOfFirst { statement ->
             !statement.isExit() && statement.containsExit()
         }
         if (splitIndex < 0) {
             statements.forEach { translateStatementInto(it, out) }
-            return
+            return statements.lastOrNull()?.isExit() == true
         }
         statements.subList(0, splitIndex).forEach { translateStatementInto(it, out) }
         val split = statements[splitIndex]
@@ -417,11 +435,21 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             tail.isEmpty() -> null
             else -> makeContinuation(tail, split.pos)
         }
-        when (split) {
-            is TmpL.IfStatement -> translateReturningIf(split, continuation, out)
+        return when (split) {
+            is TmpL.IfStatement -> {
+                translateReturningIf(split, continuation, out)
+                // Both arms end in an exit or in the continuation call.
+                true
+            }
             is TmpL.LabeledStatement -> translateLabeledBlock(split, continuation, out)
             else -> TODO("early exit inside: $split")
         }
+    }
+
+    /** Appends the loop's fall-through signal unless [terminated] already covers every path. */
+    private fun endLoopPath(terminated: Boolean, out: MutableList<Blimp.Statement>, pos: Position) {
+        val loop = loops.lastOrNull()
+        if (!terminated && loop != null) out.add(loop.signal(pos, LOOP_FALL))
     }
 
     /**
@@ -437,11 +465,11 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         labeled: TmpL.LabeledStatement,
         continuation: Continuation?,
         out: MutableList<Blimp.Statement>,
-    ) {
+    ): Boolean {
         val label = nameOf(labeled.label.id)
         val previous = label?.let { labelContinuations.put(it, continuation) }
         try {
-            when (val inner = labeled.statement) {
+            return when (val inner = labeled.statement) {
                 is TmpL.BlockStatement -> translateBody(inner.statements, out)
                 else -> translateBody(listOf(inner), out)
             }
@@ -455,20 +483,72 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         }
     }
 
-    /** Statements that end a path: the continuation picks up from here. */
-    private fun TmpL.Statement.isExit(): Boolean = this is TmpL.ReturnStatement || this is TmpL.BreakStatement
+    private fun elemOf(pos: Position, list: Blimp.Id, index: Int): Blimp.Expr = Blimp.Call(
+        pos,
+        callee = Blimp.Id(pos, OutName("elem", null)),
+        args = listOf(list.deepCopy(), Blimp.NumberLit(pos, index)),
+    )
 
-    private fun TmpL.Statement.containsExit(): Boolean {
+    private fun TmpL.Statement.containsReturn(): Boolean {
         var found = false
         boundaryDescent { node ->
-            if (node is TmpL.ReturnStatement || node is TmpL.BreakStatement) found = true
+            if (node is TmpL.ReturnStatement) found = true
             !found
+        }
+        return found
+    }
+
+    /** Statements that end a path: the continuation picks up from here. */
+    private fun TmpL.Statement.isExit(): Boolean =
+        this is TmpL.ReturnStatement || this is TmpL.BreakStatement || this is TmpL.ContinueStatement
+
+    /**
+     * Whether this statement can leave the enclosing block.
+     *
+     * A `break` or `continue` inside a nested loop belongs to that loop and is
+     * handled by its own lowering, so the walk stops at a loop boundary and
+     * only a `return` from inside one still counts as an escape.
+     */
+    private fun TmpL.Statement.containsExit(): Boolean {
+        // A loop captures its own break and continue, wherever it sits.
+        if (this is TmpL.WhileStatement) return containsReturn()
+        var found = false
+        boundaryDescent { node ->
+            when {
+                found -> false
+                node is TmpL.WhileStatement -> {
+                    if (node.containsReturn()) found = true
+                    false
+                }
+                node is TmpL.ReturnStatement || node is TmpL.BreakStatement || node is TmpL.ContinueStatement -> {
+                    found = true
+                    false
+                }
+                else -> true
+            }
         }
         return found
     }
 
     /** Continuations for labelled blocks, so a `break L` knows where to go. */
     private val labelContinuations = mutableMapOf<ResolvedName, Continuation?>()
+
+    /** Enclosing lowered loops, innermost last, so `break` and `continue` know their target. */
+    private val loops = ArrayDeque<LoopSignals>()
+
+    /**
+     * How a loop body reports which way it left.
+     *
+     * A Blimp case arm does not reliably export its assignments, so the body
+     * cannot just fall out with the loop variables updated. Instead every path
+     * ends in `[tag, carried...]` and the loop decodes it.
+     */
+    private class LoopSignals(val carried: List<Blimp.Id>) {
+        fun signal(pos: Position, tag: String): Blimp.Statement = Blimp.ExprStatement(
+            pos,
+            Blimp.ListLit(pos, items = listOf(Blimp.Atom(pos, tag)) + carried.map { it.deepCopy() }),
+        )
+    }
 
     private class Continuation(val id: Blimp.Id, val params: List<Blimp.Id>) {
         fun callFrom(pos: Position): Blimp.Statement = Blimp.ExprStatement(
@@ -497,7 +577,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             .map { Blimp.Id(pos, names.outName(it)) }
         val id = Blimp.Id(pos, names.gensym("cont"))
         val body = mutableListOf<Blimp.Statement>()
-        translateBody(tail, body)
+        endLoopPath(translateBody(tail, body), body, pos)
         declarations.add(
             Blimp.DefDecl(
                 pos,
@@ -527,8 +607,11 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         val consequent = translateBranch(statement.consequent, continuation, pos)
         val alternate = when (val alternate = statement.alternate) {
             null -> mutableListOf<Blimp.Statement>().also { branch ->
-                continuation?.let { branch.add(it.callFrom(pos)) }
-                    ?: branch.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+                when {
+                    continuation != null -> branch.add(continuation.callFrom(pos))
+                    loops.isNotEmpty() -> branch.add(loops.last().signal(pos, LOOP_FALL))
+                    else -> branch.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+                }
             }
             else -> translateBranch(alternate, continuation, pos)
         }
@@ -575,8 +658,11 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             statements.any { it.containsExit() } -> TODO("conditional early exit: $branch")
             else -> {
                 statements.forEach { translateStatementInto(it, out) }
-                continuation?.let { out.add(it.callFrom(pos)) }
-                    ?: out.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+                when {
+                    continuation != null -> out.add(continuation.callFrom(pos))
+                    loops.isNotEmpty() -> out.add(loops.last().signal(pos, LOOP_FALL))
+                    else -> out.add(Blimp.ExprStatement(pos, Blimp.NilLit(pos)))
+                }
             }
         }
         return out
@@ -886,11 +972,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
                 Blimp.Assign(
                     pos,
                     target = id.deepCopy(),
-                    value = Blimp.Call(
-                        pos,
-                        callee = Blimp.Id(pos, OutName("elem", null)),
-                        args = listOf(resultId.deepCopy(), Blimp.NumberLit(pos, index)),
-                    ),
+                    value = elemOf(pos, resultId, index),
                 ),
             )
         }
@@ -927,29 +1009,106 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
      *       end
      *     end
      *
-     * `break`, `continue` and a `return` out of a loop body need a tagged
-     * signal the call site decodes; that is not built yet and shows up as the
-     * TODO below rather than as wrong output.
+     * `break` returns the carried values immediately and `continue` is just
+     * the recursive call, so neither needs a signal of its own. What does need
+     * one is getting the values back out of a branch at all. A `return` out of
+     * a loop still needs continuation splitting threaded through here.
      */
     private fun translateWhileStatement(loop: TmpL.WhileStatement, out: MutableList<Blimp.Statement>) {
-        if (loop.body.anyChildRecursiveJump()) {
-            TODO("loop with break, continue or return: $loop")
+        if (loop.body.containsReturn()) {
+            TODO("return out of a loop: $loop")
         }
         val pos = loop.pos
         val carried = loopCarriedNames(loop)
         val loopFn = Blimp.Id(pos, names.gensym("loop"))
         val carriedIds = carried.map { Blimp.Id(pos, names.outName(it)) }
 
+        // Every path out of the body ends in `[tag, carried...]`. A case arm
+        // does not reliably export its assignments, so the loop variables have
+        // to be handed out explicitly rather than left to fall through.
+        val signals = LoopSignals(carriedIds)
+        loops.addLast(signals)
+        val inner = mutableListOf<Blimp.Statement>()
+        try {
+            val terminated = when (val body = loop.body) {
+                is TmpL.BlockStatement -> translateBody(body.statements, inner)
+                else -> translateBody(listOf(body), inner)
+            }
+            endLoopPath(terminated, inner, pos)
+        } finally {
+            loops.removeLast()
+        }
+
+        val signalId = Blimp.Id(pos, names.gensym("signal"))
         val bodyStatements = mutableListOf<Blimp.Statement>()
-        translateStatementInto(loop.body, bodyStatements)
+        // A one-armed `case true` turns the body back into an expression so
+        // the signal can be bound to a name.
+        bodyStatements.add(
+            Blimp.Assign(
+                pos,
+                target = signalId.deepCopy(),
+                value = Blimp.CaseExpr(
+                    pos,
+                    subject = Blimp.BoolLit(pos, true),
+                    arms = listOf(
+                        Blimp.CaseArm(
+                            pos,
+                            pattern = Blimp.BoolLit(pos, true),
+                            guard = null,
+                            body = Blimp.Block(pos, statements = inner),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        carriedIds.forEachIndexed { index, id ->
+            bodyStatements.add(Blimp.Assign(pos, target = id.deepCopy(), value = elemOf(pos, signalId, index + 1)))
+        }
         bodyStatements.add(
             Blimp.ExprStatement(
                 pos,
-                Blimp.Call(pos, callee = loopFn.deepCopy(), args = carriedIds.map { it.deepCopy() }),
+                Blimp.CaseExpr(
+                    pos,
+                    subject = elemOf(pos, signalId, 0),
+                    arms = listOf(
+                        Blimp.CaseArm(
+                            pos,
+                            pattern = Blimp.Atom(pos, LOOP_BREAK),
+                            guard = null,
+                            body = Blimp.Block(
+                                pos,
+                                statements = listOf(
+                                    Blimp.ExprStatement(
+                                        pos,
+                                        Blimp.ListLit(pos, items = carriedIds.map { it.deepCopy() }),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        Blimp.CaseArm(
+                            pos,
+                            pattern = Blimp.Wildcard(pos),
+                            guard = null,
+                            body = Blimp.Block(
+                                pos,
+                                statements = listOf(
+                                    Blimp.ExprStatement(
+                                        pos,
+                                        Blimp.Call(
+                                            pos,
+                                            callee = loopFn.deepCopy(),
+                                            args = carriedIds.map { it.deepCopy() },
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
             ),
         )
 
-        val test = translateExpressionHoisting(loop.test, bodyStatements.let { mutableListOf() })
+        val test = translateExpressionHoisting(loop.test, mutableListOf())
         declarations.add(
             Blimp.DefDecl(
                 pos,
@@ -1042,19 +1201,6 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             }
         }
         return (mentioned - boundInside).filter { it in enclosing }.sortedBy { names.outName(it).outputNameText }
-    }
-
-    /** Whether the subtree jumps in a way the plain loop lowering cannot express. */
-    private fun TmpL.Statement.anyChildRecursiveJump(): Boolean {
-        var found = false
-        boundaryDescent { node ->
-            when (node) {
-                is TmpL.BreakStatement, is TmpL.ContinueStatement, is TmpL.ReturnStatement -> found = true
-                else -> {}
-            }
-            !found
-        }
-        return found
     }
 
     // ── Names ────────────────────────────────────────────────────────────
