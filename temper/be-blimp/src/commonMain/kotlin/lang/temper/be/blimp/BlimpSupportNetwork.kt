@@ -28,9 +28,9 @@ import lang.temper.value.NamedBuiltinFun
  *   are never used.
  * - Blimp's `nil` gives void a value to be.
  *
- * Coroutines are the one uncomfortable fit: Blimp has no generators, so the
- * eventual answer is likely to be an actor per coroutine. Until the translator
- * grows that, the generator strategy at least keeps the TmpL shape workable.
+ * Coroutines looked like the uncomfortable fit, but they are not: rewriting
+ * them to a state machine keeps YieldStatement out of the tree entirely, so
+ * Blimp never needs generators.
  */
 object BlimpSupportNetwork : SupportNetwork {
     override val backendDescription: String
@@ -38,7 +38,14 @@ object BlimpSupportNetwork : SupportNetwork {
 
     override val bubbleStrategy: BubbleBranchStrategy = BubbleBranchStrategy.Exceptions
 
-    override val coroutineStrategy: CoroutineStrategy = CoroutineStrategy.TranslateToGenerator
+    /**
+     * Blimp has no generators, so leaving yields in the tree would leave
+     * TmpL.YieldStatement unsupportable. Rewriting a coroutine into a
+     * caseIndex-driven state machine instead produces a plain `while` over an
+     * `if`/`else if` chain, which is entirely within what the loop lowering
+     * already handles. be-rust makes the same choice.
+     */
+    override val coroutineStrategy: CoroutineStrategy = CoroutineStrategy.TranslateToRegularFunction
 
     override val functionTypeStrategy: FunctionTypeStrategy = FunctionTypeStrategy.ToFunctionType
 
@@ -55,7 +62,15 @@ object BlimpSupportNetwork : SupportNetwork {
         optionalSupportCodeKind: OptionalSupportCodeKind,
     ): Pair<SupportCode, Signature2>? = null
 
-    override fun translateConnectedReference(pos: Position, connectedKey: String, genre: Genre): SupportCode? = null
+    /**
+     * Where `console.log` is answered.
+     *
+     * ConstantPool.alternatePoolable reaches this through the MacroValue
+     * overload of getSupportCode, so a null answer here is what produced
+     * "Cannot translate value fn getConsole: Function".
+     */
+    override fun translateConnectedReference(pos: Position, connectedKey: String, genre: Genre): SupportCode? =
+        blimpConnectedReferences[connectedKey]
 
     override fun translatedConnectedType(
         pos: Position,

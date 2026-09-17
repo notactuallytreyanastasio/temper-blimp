@@ -223,6 +223,120 @@ class BlimpGrammarTest {
         assertCode("""x = 1.0""", Blimp.Assign(p0, target = id("x"), value = Blimp.NumberLit(p0, 1.0)))
     }
 
+    /** Boolean negation is `!`; `not` is a builtin function, not an operator. */
+    @Test
+    fun booleanNegationUsesBang() {
+        assertCode(
+            """x = !ready""",
+            Blimp.Assign(
+                p0,
+                target = id("x"),
+                value = Blimp.Operation(
+                    p0,
+                    left = null,
+                    operator = Blimp.Operator(p0, BlimpOperator.Not),
+                    right = id("ready"),
+                ),
+            ),
+        )
+    }
+
+    /** `++` concatenates strings and lists. */
+    @Test
+    fun concatOperator() {
+        assertCode(
+            """x = a ++ b""",
+            Blimp.Assign(
+                p0,
+                target = id("x"),
+                value = Blimp.Operation(
+                    p0,
+                    left = id("a"),
+                    operator = Blimp.Operator(p0, BlimpOperator.Concat),
+                    right = id("b"),
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Blimp's `and` is eager, so this form is only emitted when the right
+     * operand is effect-free; Temper's short-circuiting `&&` lowers to a
+     * hoisted `case` instead.
+     */
+    @Test
+    fun eagerLogicalAnd() {
+        assertCode(
+            """x = a and b""",
+            Blimp.Assign(
+                p0,
+                target = id("x"),
+                value = Blimp.Operation(
+                    p0,
+                    left = id("a"),
+                    operator = Blimp.Operator(p0, BlimpOperator.LogicalAnd),
+                    right = id("b"),
+                ),
+            ),
+        )
+    }
+
+    /** A short-circuiting `&&` becomes this, because `and` would run both sides. */
+    @Test
+    fun shortCircuitAndLowersToCase() {
+        assertCode(
+            """
+                |t = case a do
+                |  true -> b
+                |  _ -> false
+                |end
+            """.trimMargin(),
+            Blimp.Assign(
+                p0,
+                target = id("t"),
+                value = Blimp.CaseExpr(
+                    p0,
+                    subject = id("a"),
+                    arms = listOf(
+                        arm(Blimp.BoolLit(p0, true), null, id("b")),
+                        arm(Blimp.Wildcard(p0), null, Blimp.BoolLit(p0, false)),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun tryCatchWithoutBinder() {
+        assertCode(
+            """
+                |x = try do
+                |  risky()
+                |catch do
+                |  0
+                |end
+            """.trimMargin(),
+            Blimp.Assign(
+                p0,
+                target = id("x"),
+                value = Blimp.TryCatch(
+                    p0,
+                    body = Blimp.Block(
+                        p0,
+                        statements = listOf(
+                            Blimp.ExprStatement(p0, Blimp.Call(p0, callee = id("risky"), args = listOf())),
+                        ),
+                    ),
+                    id = null,
+                    handler = Blimp.Block(
+                        p0,
+                        statements = listOf(Blimp.ExprStatement(p0, Blimp.NumberLit(p0, 0))),
+                    ),
+                ),
+            ),
+        )
+    }
+
     @Test
     fun stringEscapes() {
         assertCode(

@@ -16,7 +16,7 @@ object BlimpFormattingHints : FormattingHints {
 
     private val closers = setOf(")", "]", "}", ",")
     private val openers = setOf("(", "[", "%{")
-    private val breakBefore = setOf("actor", "def", "end", "on", "state")
+    private val breakBefore = setOf("actor", "catch", "def", "end", "on", "state")
 
     /** Tokens after which a `(` opens an argument list rather than a grouping. */
     private val callableTypes = setOf<OutputTokenType>(OutputTokenType.Name, OutputTokenType.OtherValue)
@@ -50,7 +50,8 @@ object BlimpFormattingHints : FormattingHints {
 
     override fun indents(token: OutputToken): Boolean = token.text == "do"
 
-    override fun dedents(token: OutputToken): Boolean = token.text == "end"
+    /** `catch` closes the tried block before its own `do` reopens one. */
+    override fun dedents(token: OutputToken): Boolean = token.text == "end" || token.text == "catch"
 
     /**
      * Blimp blocks are delimited by `do` and `end`, never by a single

@@ -31,6 +31,12 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.RegexMatch,
         Ft.TypesNetresponse,
     )
+    // Blimp is new. No issue numbers because there is no tracking issue yet;
+    // `blimp()` skips without claiming one.
+    onlyPasses(
+        blimp(),
+        Ft.AlgosHelloWorld,
+    )
     onlyPasses(
         cppv(198),
         Ft.AlgosFibonacci,
