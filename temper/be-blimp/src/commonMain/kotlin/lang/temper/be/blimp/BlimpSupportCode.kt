@@ -18,6 +18,11 @@ internal const val TEMPER_STRING_END = "temper_string_end"
 internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
 internal const val TEMPER_IDENTITY = "temper_identity"
 
+/** List operations Blimp lacks, plus the loops they run on. */
+internal val listHelpers = setOf(
+    "temper_filter", "temper_filter_loop", "temper_join", "temper_join_loop", "temper_for_each",
+)
+
 /** The UTF-8 layer, which the code-point string operations all lean on. */
 internal val utf8Helpers = setOf(
     "temper_string_code_point_at", "temper_string_next", "u8_encode", "u8_decode_at", "u8_seq_len",
@@ -159,6 +164,15 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // Blimp's slice takes a length; Temper's takes an exclusive end.
         BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
         BlimpConnectedCall("core.type Listed.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        // map, reduce and sort are Blimp builtins with the same argument order;
+        // filter, join and forEach are not, so temper-core supplies them.
+        BlimpConnectedCall("core.type Listed.map()", "map"),
+        BlimpConnectedCall("core.type Listed.sorted()", "sort"),
+        BlimpConnectedCall("core.type Listed.reduceFrom()", "reduce"),
+        BlimpConnectedCall("core.type Listed.filter()", "temper_filter", listHelpers),
+        BlimpConnectedCall("core.type Listed.join()", "temper_join", listHelpers),
+        BlimpConnectedCall("core.type Listed.forEach()", "temper_for_each", listHelpers),
+        BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
     ).associateBy { it.connectedKey }
 
 /**

@@ -141,3 +141,15 @@ actor ShimTests do
     refute(temper_string_has_index("abc", 3))
   end
 end
+
+actor ListTests do
+  test "filter keeps what the predicate accepts" do
+    assert_eq(temper_filter([1, 2, 3], fn(x: Int) do x > 1 end), [2, 3])
+    assert_eq(temper_filter([1, 2, 3], fn(x: Int) do false end), [])
+  end
+  test "join separates, with nothing trailing" do
+    assert_eq(temper_join([1, 2, 3], ",", fn(x: Int) do to_string(x) end), "1,2,3")
+    assert_eq(temper_join([1], ",", fn(x: Int) do to_string(x) end), "1")
+    assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
+  end
+end

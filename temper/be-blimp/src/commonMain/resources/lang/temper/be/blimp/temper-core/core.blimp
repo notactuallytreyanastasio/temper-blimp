@@ -265,3 +265,48 @@ def temper_identity(x: Any) -> Any do
   x
 end
 
+# ── List operations ──────────────────────────────────
+#
+# Blimp has map, reduce and sort but no filter or join, and its `reduce` takes
+# the initial value, so reduceFrom lines up with it directly.
+
+def temper_filter(items: List, keep: Any) -> List do
+  temper_filter_loop(items, keep, [])
+end
+
+def temper_filter_loop(items: List, keep: Any, acc: List) -> List do
+  case empty?(items) do
+    true -> acc
+    _ ->
+      x = head(items)
+      acc2 = case keep(x) do
+        true -> append(acc, x)
+        _ -> acc
+      end
+      temper_filter_loop(tail(items), keep, acc2)
+  end
+end
+
+def temper_join(items: List, sep: String, show: Any) -> String do
+  case empty?(items) do
+    true -> ""
+    _ -> temper_join_loop(tail(items), sep, show, show(head(items)))
+  end
+end
+
+def temper_join_loop(items: List, sep: String, show: Any, acc: String) -> String do
+  case empty?(items) do
+    true -> acc
+    _ -> temper_join_loop(tail(items), sep, show, concat(acc, concat(sep, show(head(items)))))
+  end
+end
+
+def temper_for_each(items: List, body: Any) -> Any do
+  case empty?(items) do
+    true -> nil
+    _ ->
+      body(head(items))
+      temper_for_each(tail(items), body)
+  end
+end
+
