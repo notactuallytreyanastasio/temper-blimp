@@ -7,6 +7,7 @@ import lang.temper.name.OutName
 import lang.temper.name.ResolvedName
 import lang.temper.name.ResolvedParsedName
 import lang.temper.type.Abstractness
+import lang.temper.type2.Signature2
 import lang.temper.value.TBoolean
 import lang.temper.value.TClass
 import lang.temper.value.TClosureRecord
@@ -438,7 +439,11 @@ internal class BlimpTranslator(
                 message = Blimp.MessageCall(
                     call.pos,
                     name = Blimp.Atom(call.pos, fn.methodName.dotNameText),
-                    args = call.parameters.map { rootSendArg(translateActual(it)) },
+                    args = padOptional(
+                        call.pos,
+                        call.parameters.map { rootSendArg(translateActual(it)) },
+                        declaredArity(fn.type),
+                    ),
                 ),
             )
 
@@ -463,7 +468,11 @@ internal class BlimpTranslator(
                             message = Blimp.MessageCall(
                                 pos,
                                 name = Blimp.Atom(pos, CONSTRUCTOR_MESSAGE),
-                                args = call.parameters.map { rootSendArg(translateActual(it)) },
+                                args = padOptional(
+                                    pos,
+                                    call.parameters.map { rootSendArg(translateActual(it)) },
+                                    constructorArity(fn.typeName),
+                                ),
                             ),
                         ),
                     ),
@@ -660,6 +669,39 @@ internal class BlimpTranslator(
             if (childOrNull(index)?.findReturn() == true) return true
         }
         return false
+    }
+
+    /**
+     * Fills in omitted optional arguments with `nil`.
+     *
+     * A Blimp handler takes a fixed number of arguments, but Temper drops
+     * trailing optional ones at the call site -- the same constructor turns up
+     * as `__new(1)` and `__new(2, 3)`. The declared body already tests
+     * `isNull` for each default, so `nil` is exactly what it expects.
+     */
+    private fun padOptional(pos: Position, args: List<Blimp.Expr>, arity: Int): List<Blimp.Expr> = when {
+        arity <= args.size -> args
+        else -> args + List(arity - args.size) { Blimp.NilLit(pos) }
+    }
+
+    /**
+     * How many parameters a signature declares, excluding `this`.
+     *
+     * Optional ones count: the handler takes them all, and the call site is
+     * where the omitted ones get filled in.
+     */
+    private fun declaredArity(sig: Signature2): Int {
+        val required = sig.requiredInputTypes.size - if (sig.hasThisFormal) 1 else 0
+        return required + sig.optionalInputTypes.size
+    }
+
+    /** How many parameters the class's constructor declares, excluding `this`. */
+    private fun constructorArity(typeName: TmpL.TypeName): Int {
+        val key = (typeName.sourceDefinition?.name as? ResolvedParsedName)?.baseName?.nameText
+        val decl = key?.let { types[it] } ?: return 0
+        val constructor = flattenMembers(decl).filterIsInstance<TmpL.Constructor>().firstOrNull() ?: return 0
+        val thisName = constructor.parameters.thisName?.let { nameOf(it) }
+        return constructor.parameters.parameters.count { nameOf(it.name) != thisName }
     }
 
     /** Statements that end a path: the continuation picks up from here. */
@@ -976,9 +1018,10 @@ internal class BlimpTranslator(
     private fun processTypeDeclaration(decl: TmpL.TypeDeclaration) {
         if (decl.kind == TmpL.TypeDeclarationKind.Interface) {
             // Blimp has no interface concept and does not need one: dispatch
-            // is a send, so an implementation only has to carry the handlers.
-            // A default method body comes along through `decl.inherited` on the
-            // concrete class.
+            // is a send, so an implementation only carries the handlers, which
+            // it gets by being flattened. But an interface's statics have no
+            // instance either way, so they are emitted like any other.
+            emitStatics(decl)
             return
         }
         if (decl.kind != TmpL.TypeDeclarationKind.Class) {
@@ -1033,18 +1076,8 @@ internal class BlimpTranslator(
                     handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, CONSTRUCTOR_MESSAGE)))
                 is TmpL.NormalMethod ->
                     handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, messageAtom(member))))
-                // A static has no instance, so it cannot be a handler. It
-                // becomes a flat top-level name instead.
-                is TmpL.StaticMethod -> declarations.add(
-                    translateFunction(member, nameOverride = staticName(typePrefix, member.name)),
-                )
-                is TmpL.StaticProperty -> mainStatements.add(
-                    Blimp.Assign(
-                        member.pos,
-                        target = Blimp.Id(member.pos, OutName(staticName(typePrefix, member.name), null)),
-                        value = translateExpressionHoisting(member.expression, mainStatements),
-                    ),
-                )
+                // Statics have no instance, so they are emitted separately.
+                is TmpL.StaticMethod, is TmpL.StaticProperty -> {}
                 is TmpL.Getter ->
                     handlers.add(
                         translateHandler(member, fieldNames, Blimp.Atom(member.pos, member.dotName.dotNameText)),
@@ -1067,6 +1100,32 @@ internal class BlimpTranslator(
                 handlers = handlers,
             ),
         )
+        emitStatics(decl)
+    }
+
+    /**
+     * A type's statics, which have no instance and so cannot be handlers.
+     *
+     * They flatten to top-level names, which works because Blimp has one
+     * namespace. Interfaces get this too even though they emit no actor.
+     */
+    private fun emitStatics(decl: TmpL.TypeDeclaration) {
+        val typePrefix = names.outName(nameOf(decl.name)!!).outputNameText
+        for (member in decl.members) {
+            when (member) {
+                is TmpL.StaticMethod -> declarations.add(
+                    translateFunction(member, nameOverride = staticName(typePrefix, member.name)),
+                )
+                is TmpL.StaticProperty -> mainStatements.add(
+                    Blimp.Assign(
+                        member.pos,
+                        target = Blimp.Id(member.pos, OutName(staticName(typePrefix, member.name), null)),
+                        value = translateExpressionHoisting(member.expression, mainStatements),
+                    ),
+                )
+                else -> {}
+            }
+        }
     }
 
     /**
@@ -1273,11 +1332,31 @@ internal class BlimpTranslator(
         else -> TODO("call subject: $subject")
     }
 
-    /** Statics are flattened to `Type__member`, since Blimp has one namespace. */
-    private fun staticName(typePrefix: String, member: String): String = "${typePrefix}__$member"
+    /**
+     * Statics are flattened to `static_Type__member`, since Blimp has one
+     * namespace.
+     *
+     * The `static_` is not decoration: Blimp's `def` takes a lower-case
+     * identifier, and an upper-case one is a parse error, so `Thing__go` will
+     * not do. Prefixing also keeps a static clear of any user name.
+     */
+    private fun staticName(typePrefix: String, member: String): String = "static_${typePrefix}__$member"
 
+    /**
+     * A static is named by its source name, not its TmpL one.
+     *
+     * A read arrives as a dot name with no disambiguating suffix, so the
+     * declaration has to drop the suffix too or the two never meet.
+     */
     private fun staticName(typePrefix: String, member: TmpL.Id): String =
-        staticName(typePrefix, nameOf(member)?.let { names.outName(it).outputNameText } ?: "$member")
+        staticName(typePrefix, baseNameText(member))
+
+    private fun baseNameText(id: TmpL.Id): String {
+        val name = nameOf(id)
+        return (name as? ResolvedParsedName)?.baseName?.nameText
+            ?: name?.let { names.outName(it).outputNameText }
+            ?: "$id"
+    }
 
     private fun staticName(typePrefix: String, member: TmpL.DotName): String =
         staticName(typePrefix, member.dotNameText)
