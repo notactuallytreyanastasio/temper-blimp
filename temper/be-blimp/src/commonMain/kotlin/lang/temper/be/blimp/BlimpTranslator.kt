@@ -397,8 +397,6 @@ internal class BlimpTranslator(
             is TmpL.FnReference -> idOf(callable.id)
             else -> TODO("function value: $callable")
         }
-        // Temper has already checked the type, and a Blimp actor dispatches on
-        // whatever it actually is, so a cast carries no runtime meaning.
         is TmpL.InstanceOfExpression -> {
             preludeHelpers.addAll(isATypeHelpers)
             Blimp.Call(
@@ -410,9 +408,37 @@ internal class BlimpTranslator(
                 ),
             )
         }
-        is TmpL.CastExpression -> translateExpression(expression.expr)
+        is TmpL.CastExpression -> translateCastExpression(expression)
         is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
         else -> TODO("expression: $expression")
+    }
+
+    /**
+     * A cast that can fail has to check, because nothing else will.
+     *
+     * Blimp is untyped: an actor answers whatever message it is sent and a
+     * mismatch surfaces, if at all, as a later `NOT AN ACTOR` or a wrong
+     * answer. Temper's `x as Apple` bubbles when `x` is not an Apple, and the
+     * bubble is the observable behaviour -- `casts/as-expr` prints "Cast
+     * failed!" from the `orelse` arm. Passing the value straight through, as
+     * this did until now, silently produced the success path for a cast that
+     * should have failed.
+     *
+     * `canFail` is false for an upcast, where the frontend has already proved
+     * the value's type, so those still cost nothing. A tag of `nil` means the
+     * target is not a nominal type `temper_is_a` can answer for, and checking
+     * it would reject every value.
+     */
+    private fun translateCastExpression(cast: TmpL.CastExpression): Blimp.Expr {
+        val tag = typeTagOf(cast.checkedType)
+        val expr = translateExpression(cast.expr)
+        if (!cast.canFail || tag == "nil") return expr
+        preludeHelpers.addAll(castTypeHelpers)
+        return Blimp.Call(
+            cast.pos,
+            callee = Blimp.Id(cast.pos, OutName(TEMPER_CAST, null)),
+            args = listOf(expr, Blimp.Atom(cast.pos, tag)),
+        )
     }
 
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
@@ -1056,9 +1082,12 @@ internal class BlimpTranslator(
 
         // Blimp has no type tags of its own, so each actor carries the list a
         // runtime type test consults: itself, then its supertypes.
-        val typeNames = listOf(typePrefix) + decl.superTypes.mapNotNull { superType ->
-            (superType.typeName.sourceDefinition?.name as? ResolvedParsedName)?.baseName?.nameText
-        }
+        // The tag is the base name, not `typePrefix`. The actor is called
+        // `HiGreeter__1` because TmpL disambiguates declarations, but every
+        // reader of the tag -- `typeTagOf`, for both `instanceof` and a cast --
+        // resolves a type to its suffix-free name, so tagging the actor with
+        // the suffixed one made `x as HiGreeter` bubble against `:HiGreeter__1`.
+        val typeNames = listOf(baseNameText(decl.name)) + ancestorTagsOf(decl)
         val handlers = mutableListOf(
             Blimp.Handler(
                 pos,
@@ -1166,6 +1195,35 @@ internal class BlimpTranslator(
             }
         }
         return byName.values.toList()
+    }
+
+    /**
+     * Every supertype name above this one, nearest first.
+     *
+     * Direct supertypes are not enough: `class C extends B`, `class B extends
+     * A` makes `c as A` a legitimate cast, and the tag list is the only thing
+     * a Blimp actor can be asked about itself.
+     */
+    private fun ancestorTagsOf(decl: TmpL.TypeDeclaration): List<String> {
+        val tags = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        var level = listOf(decl)
+        while (level.isNotEmpty()) {
+            level = level.flatMap { type ->
+                type.superTypes.mapNotNull { superType ->
+                    val key = (superType.typeName.sourceDefinition?.name as? ResolvedParsedName)
+                        ?.baseName?.nameText
+                    when {
+                        key == null || !seen.add(key) -> null
+                        else -> {
+                            tags.add(key)
+                            types[key]
+                        }
+                    }
+                }
+            }
+        }
+        return tags
     }
 
     /** What makes two members the same member for override purposes. */

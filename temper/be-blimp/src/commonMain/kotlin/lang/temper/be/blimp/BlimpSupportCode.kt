@@ -372,6 +372,9 @@ internal const val TEMPER_IS_A = "temper_is_a"
 internal const val TYPES_MESSAGE = "__temper_types"
 internal val isATypeHelpers = setOf(TEMPER_IS_A, "temper_list_has")
 
+/** What `temper_cast` needs: the type test, plus the bubble it raises on a miss. */
+internal val castTypeHelpers = isATypeHelpers + setOf(TEMPER_CAST, "temper_bubble")
+
 /** temper-core bit operations, done arithmetically since Blimp has no bitwise operators. */
 internal const val TEMPER_BIT_AND = "temper_bit_and"
 internal const val TEMPER_BIT_OR = "temper_bit_or"

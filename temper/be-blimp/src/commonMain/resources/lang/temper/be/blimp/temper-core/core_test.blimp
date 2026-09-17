@@ -118,6 +118,30 @@ actor TypeTests do
     assert(temper_is_a(s, :Shape))
     refute(temper_is_a(s, :Circle))
   end
+  test "a cast to a type the value is returns it" do
+    s = spawn Square
+    assert_eq(temper_cast(s, :Shape), s)
+    assert_eq(temper_cast("x", :string), "x")
+  end
+  test "a cast to a type the value is not bubbles" do
+    s = spawn Square
+    caught = try do
+      temper_cast(s, :Circle)
+      ["no bubble"]
+    catch do
+      ["bubbled"]
+    end
+    assert_eq(elem(caught, 0), "bubbled")
+  end
+  test "a cast of nil bubbles" do
+    caught = try do
+      temper_cast(nil, :Square)
+      ["no bubble"]
+    catch do
+      ["bubbled"]
+    end
+    assert_eq(elem(caught, 0), "bubbled")
+  end
   test "primitives answer from type_of" do
     assert(temper_is_a("x", :string))
     refute(temper_is_a(1, :string))
