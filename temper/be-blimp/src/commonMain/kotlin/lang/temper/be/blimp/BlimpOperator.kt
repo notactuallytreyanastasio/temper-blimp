@@ -5,8 +5,17 @@ import lang.temper.format.TokenSink
 /**
  * The operators this backend emits.
  *
- * Blimp spells logical and/or as words, and has no remainder operator -- `rem`
- * is a builtin call, so it is absent here on purpose.
+ * Three of Blimp's choices differ from what a C-family backend would assume,
+ * and all three were checked against the interpreter:
+ *
+ * - Boolean negation is `!`. There is no `not` operator; `not` is a builtin
+ *   function, so `not false` is an undefined-variable error while `!false` and
+ *   `not(false)` both work.
+ * - [LogicalAnd] and [LogicalOr] are EAGER. `false and side(true)` still runs
+ *   `side`. They are safe only when the right operand has no effects; Temper's
+ *   short-circuiting `&&` and `||` must lower to a hoisted `case` instead.
+ * - There is no remainder operator. `rem(a, b)` is a builtin call, so it is
+ *   absent here on purpose.
  */
 enum class BlimpOperator(
     private val operatorName: String,
@@ -14,7 +23,11 @@ enum class BlimpOperator(
 ) {
     OrElse("orelse", BlimpOperatorDefinition.OrElse),
     Pipe("|>", BlimpOperatorDefinition.Pipe),
+
+    /** Eager, not short-circuiting. See the class comment. */
     LogicalOr("or", BlimpOperatorDefinition.LogicalOr),
+
+    /** Eager, not short-circuiting. See the class comment. */
     LogicalAnd("and", BlimpOperatorDefinition.LogicalAnd),
     Equals("==", BlimpOperatorDefinition.Relational),
     NotEquals("!=", BlimpOperatorDefinition.Relational),
@@ -32,7 +45,9 @@ enum class BlimpOperator(
     /** Truncating on Int, like Temper's `Int` division. */
     Division("/", BlimpOperatorDefinition.Multiplicative),
     Negate("-", BlimpOperatorDefinition.Prefix),
-    Not("not", BlimpOperatorDefinition.Prefix),
+
+    /** `!`, not `not`. `not` is a builtin function, not an operator. */
+    Not("!", BlimpOperatorDefinition.Prefix),
     ;
 
     fun emit(sink: TokenSink) = when (operatorDefinition) {
