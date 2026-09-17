@@ -1,0 +1,115 @@
+# temper-core for Blimp.
+#
+# Blimp and Temper disagree in three places, and this file is the bridge:
+#
+#   - Blimp's Int is 64-bit and does not wrap; Temper's Int is 32-bit wrapping.
+#   - Blimp's to_string drops a whole Float's decimal point: 1.0 prints as "1".
+#   - Blimp strings are byte arrays over UTF-8; Temper strings are addressed by
+#     code point.
+#
+# Everything here is plain Blimp so it can be read, tested and stepped through
+# with the same tools as translated code.
+
+# ── Int ──────────────────────────────────────────────
+
+# Wrap to a signed 32-bit value, the way Temper's Int arithmetic does.
+def temper_int32(n: Int) -> Int do
+  m = rem(n, 4294967296)
+  m2 = case m < 0 do
+    true -> m + 4294967296
+    _ -> m
+  end
+  case m2 >= 2147483648 do
+    true -> m2 - 4294967296
+    _ -> m2
+  end
+end
+
+# ── Float ────────────────────────────────────────────
+
+# Temper prints a whole float with its decimal point; Blimp does not.
+def temper_float_to_string(f: Float) -> String do
+  s = to_string(f)
+  case contains(s, ".") do
+    true -> s
+    _ -> concat(s, ".0")
+  end
+end
+
+# ── UTF-8 ────────────────────────────────────────────
+
+# Byte count of the sequence that starts with byte b.
+def u8_seq_len(b: Int) -> Int do
+  case b < 128 do
+    true -> 1
+    _ -> case b < 224 do
+      true -> 2
+      _ -> case b < 240 do
+        true -> 3
+        _ -> 4
+      end
+    end
+  end
+end
+
+# The code point whose sequence starts at byte index i.
+def u8_decode_at(s: String, i: Int) -> Int do
+  b0 = char_code(s, i)
+  n = u8_seq_len(b0)
+  case n == 1 do
+    true -> b0
+    _ -> case n == 2 do
+      true -> (rem(b0, 32) * 64) + rem(char_code(s, i + 1), 64)
+      _ -> case n == 3 do
+        true -> (rem(b0, 16) * 4096) + (rem(char_code(s, i + 1), 64) * 64) + rem(char_code(s, i + 2), 64)
+        _ -> (rem(b0, 8) * 262144) + (rem(char_code(s, i + 1), 64) * 4096) + (rem(char_code(s, i + 2), 64) * 64) + rem(char_code(s, i + 3), 64)
+      end
+    end
+  end
+end
+
+# Encode one code point as UTF-8 bytes.
+def u8_encode(cp: Int) -> String do
+  case cp < 128 do
+    true -> from_char_code(cp)
+    _ -> case cp < 2048 do
+      true -> concat(from_char_code(192 + (cp / 64)), from_char_code(128 + rem(cp, 64)))
+      _ -> case cp < 65536 do
+        true -> concat(from_char_code(224 + (cp / 4096)),
+                  concat(from_char_code(128 + rem(cp / 64, 64)), from_char_code(128 + rem(cp, 64))))
+        _ -> concat(from_char_code(240 + (cp / 262144)),
+               concat(from_char_code(128 + rem(cp / 4096, 64)),
+                 concat(from_char_code(128 + rem(cp / 64, 64)), from_char_code(128 + rem(cp, 64)))))
+      end
+    end
+  end
+end
+
+# Every code point in s, in order.
+def u8_code_points(s: String) -> List do
+  u8_cp_loop(s, 0, [])
+end
+
+def u8_cp_loop(s: String, i: Int, acc: List) -> List do
+  case i >= length(s) do
+    true -> acc
+    _ ->
+      cp = u8_decode_at(s, i)
+      u8_cp_loop(s, i + u8_seq_len(char_code(s, i)), append(acc, cp))
+  end
+end
+
+# Temper's String.length counts code points, not bytes.
+def temper_string_length(s: String) -> Int do
+  length(u8_code_points(s))
+end
+
+# Temper's String indices are byte offsets that must land on a sequence start,
+# so advancing is a byte step of the current sequence's width.
+def temper_string_next(s: String, i: Int) -> Int do
+  i + u8_seq_len(char_code(s, i))
+end
+
+def temper_string_code_point_at(s: String, i: Int) -> Int do
+  u8_decode_at(s, i)
+end
