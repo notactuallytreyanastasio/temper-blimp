@@ -106,3 +106,24 @@ actor BitTests do
     assert_eq(temper_ushr32(0 - 1, 28), 15)
   end
 end
+
+actor Square do
+  on :__temper_types do reply [:Square, :Shape] end
+end
+
+actor TypeTests do
+  test "an actor answers for itself and its supertypes" do
+    s = spawn Square
+    assert(temper_is_a(s, :Square))
+    assert(temper_is_a(s, :Shape))
+    refute(temper_is_a(s, :Circle))
+  end
+  test "primitives answer from type_of" do
+    assert(temper_is_a("x", :string))
+    refute(temper_is_a(1, :string))
+    assert(temper_is_a(1, :integer))
+    assert(temper_is_a(1.5, :float))
+    assert(temper_is_a(nil, :nil))
+    assert(temper_is_a([1], :list))
+  end
+end

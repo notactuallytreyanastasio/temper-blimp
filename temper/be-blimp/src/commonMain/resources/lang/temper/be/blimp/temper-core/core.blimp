@@ -216,3 +216,27 @@ end
 def temper_ushr32(a: Int, n: Int) -> Int do
   temper_int32(temper_u32(a) / temper_pow2(rem(n, 32)))
 end
+
+# ── Runtime type tests ───────────────────────────────
+
+def temper_list_has(items: List, target: Any) -> Bool do
+  case empty?(items) do
+    true -> false
+    _ -> case head(items) == target do
+      true -> true
+      _ -> temper_list_has(tail(items), target)
+    end
+  end
+end
+
+# Temper's `instanceof`. A primitive answers from type_of; an actor answers
+# from the :__temper_types list every translated class carries, which names the
+# class and its supertypes so a subtype test works.
+def temper_is_a(value: Any, tag: Atom) -> Bool do
+  t = type_of(value)
+  case t == :actor_ref do
+    true -> temper_list_has(value <- :__temper_types, tag)
+    _ -> t == tag
+  end
+end
+

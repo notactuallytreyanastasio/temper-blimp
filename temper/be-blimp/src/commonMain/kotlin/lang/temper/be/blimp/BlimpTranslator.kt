@@ -5,6 +5,7 @@ import lang.temper.be.tmpl.TmpL
 import lang.temper.log.Position
 import lang.temper.name.OutName
 import lang.temper.name.ResolvedName
+import lang.temper.name.ResolvedParsedName
 import lang.temper.type.Abstractness
 import lang.temper.value.TBoolean
 import lang.temper.value.TClass
@@ -27,6 +28,24 @@ import lang.temper.value.TVoid
 
 /** The handler a `spawn` is followed by, standing in for Temper's constructor. */
 private const val CONSTRUCTOR_MESSAGE = "__new"
+
+/** Temper's primitives, keyed to the tags Blimp's `type_of` returns. */
+private val primitiveTypeTags = mapOf(
+    "String" to "string",
+    "Int" to "integer",
+    "Int32" to "integer",
+    "Int64" to "integer",
+    "Float64" to "float",
+    "Boolean" to "boolean",
+    "Listed" to "list",
+    "List" to "list",
+    "ListBuilder" to "list",
+    "Mapped" to "map",
+    "Map" to "map",
+    "MapBuilder" to "map",
+    "Null" to "nil",
+    "Void" to "nil",
+)
 
 /** How a lowered loop body reports which way it left. */
 private const val LOOP_BREAK = "break"
@@ -302,6 +321,17 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         is TmpL.GetProperty -> translateGetProperty(expression)
         // Temper has already checked the type, and a Blimp actor dispatches on
         // whatever it actually is, so a cast carries no runtime meaning.
+        is TmpL.InstanceOfExpression -> {
+            preludeHelpers.addAll(isATypeHelpers)
+            Blimp.Call(
+                expression.pos,
+                callee = Blimp.Id(expression.pos, OutName(TEMPER_IS_A, null)),
+                args = listOf(
+                    translateExpression(expression.expr),
+                    Blimp.Atom(expression.pos, typeTagOf(expression.checkedType)),
+                ),
+            )
+        }
         is TmpL.CastExpression -> translateExpression(expression.expr)
         is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
         else -> TODO("expression: $expression")
@@ -845,7 +875,26 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             )
         }
 
-        val handlers = mutableListOf<Blimp.Handler>()
+        // Blimp has no type tags of its own, so each actor carries the list a
+        // runtime type test consults: itself, then its supertypes.
+        val typeNames = listOf(typePrefix) + decl.superTypes.mapNotNull { superType ->
+            (superType.typeName.sourceDefinition?.name as? ResolvedParsedName)?.baseName?.nameText
+        }
+        val handlers = mutableListOf(
+            Blimp.Handler(
+                pos,
+                message = Blimp.Atom(pos, TYPES_MESSAGE),
+                params = listOf(),
+                guard = null,
+                bubbles = null,
+                body = Blimp.Block(
+                    pos,
+                    statements = listOf(
+                        Blimp.Reply(pos, Blimp.ListLit(pos, items = typeNames.map { Blimp.Atom(pos, it) })),
+                    ),
+                ),
+            ),
+        )
         for (member in decl.members) {
             when (member) {
                 is TmpL.InstanceProperty -> {}
@@ -1029,6 +1078,18 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     private fun typeSubjectName(subject: TmpL.TypeSubject): String = when (subject) {
         is TmpL.TypeName -> subject.toString()
         else -> TODO("type subject: $subject")
+    }
+
+    /**
+     * The atom a runtime type test compares against.
+     *
+     * Temper's primitives map onto Blimp's own `type_of` tags; anything else
+     * is a translated class, which answers for its own name.
+     */
+    private fun typeTagOf(type: TmpL.AType): String {
+        val definition = (type.ot as? TmpL.NominalType)?.typeName?.sourceDefinition
+        val text = (definition?.name as? ResolvedParsedName)?.baseName?.nameText ?: return "nil"
+        return primitiveTypeTags[text] ?: text
     }
 
     private fun typeNameOf(typeName: TmpL.TypeName): Blimp.Name =

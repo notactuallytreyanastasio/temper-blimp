@@ -180,6 +180,11 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** temper-core's runtime type test, and the handler every translated actor carries. */
+internal const val TEMPER_IS_A = "temper_is_a"
+internal const val TYPES_MESSAGE = "__temper_types"
+internal val isATypeHelpers = setOf(TEMPER_IS_A, "temper_list_has")
+
 /** temper-core bit operations, done arithmetically since Blimp has no bitwise operators. */
 internal const val TEMPER_BIT_AND = "temper_bit_and"
 internal const val TEMPER_BIT_OR = "temper_bit_or"
