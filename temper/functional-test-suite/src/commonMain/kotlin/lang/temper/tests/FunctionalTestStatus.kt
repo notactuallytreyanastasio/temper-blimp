@@ -61,6 +61,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.SemanticsTypeCheckedLocals,
         Ft.TypesIntBasics,
         Ft.TypesListEmpty,
+        Ft.TypesStringBuild,
         Ft.TypesStringIsEmpty,
     )
     onlyPasses(

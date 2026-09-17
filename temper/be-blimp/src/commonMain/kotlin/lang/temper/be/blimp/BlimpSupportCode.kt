@@ -215,6 +215,10 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
         BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
         BlimpConnectedCall("core.type String.next()", "temper_string_next", utf8Helpers),
+        BlimpConnectedCall("core.type String.prev()", "temper_string_prev", needsCore),
+        BlimpConnectedCall("core.type String.step()", "temper_string_step", needsCore),
+        BlimpConnectedCall("core.type String.countBetween()", "temper_string_count_between", needsCore),
+        BlimpConnectedCall("core.type String.hasAtLeast()", "temper_string_has_at_least", needsCore),
         BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode", utf8Helpers),
         // Blimp's slice takes a length; Temper's takes an exclusive end.
         BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
@@ -228,6 +232,14 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Listed.join()", "temper_join", listHelpers),
         BlimpConnectedCall("core.type Listed.forEach()", "temper_for_each", listHelpers),
         BlimpConnectedCall("core.type List.forEach()", "temper_for_each", listHelpers),
+        // A StringBuilder is mutable, so it is an actor too.
+        BlimpConnectedCall("core.type StringBuilder.constructor()", "temper_new_string_builder", needsCore),
+        BlimpConnectedSend("core.type StringBuilder.append()", "append"),
+        BlimpConnectedSend("core.type StringBuilder.appendCodePoint()", "appendCodePoint"),
+        BlimpConnectedSend("core.type StringBuilder.appendBetween()", "appendBetween"),
+        BlimpConnectedSend("core.type StringBuilder.clear()", "clear"),
+        BlimpConnectedSend("core.type StringBuilder.toString()", "toString"),
+        BlimpConnectedSend("core.type StringBuilder.get end()", "end"),
         // A ListBuilder is an actor, so its methods are sends.
         BlimpConnectedCall("core.type ListBuilder.constructor()", "temper_new_list_builder", needsCore),
         BlimpConnectedSend("core.type ListBuilder.add()", "add", mapOf(2 to "add_at")),
