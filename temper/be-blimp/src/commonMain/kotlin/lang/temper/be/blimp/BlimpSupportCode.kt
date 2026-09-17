@@ -165,10 +165,21 @@ internal class BlimpConnectedCall(
     connectedKey: String,
     private val fn: String,
     override val preludeHelpers: Set<String> = setOf(),
+    /**
+     * Helpers to use at particular argument counts.
+     *
+     * A Blimp `def` has a fixed arity and no defaults, so a Temper member that
+     * arrives at more than one arity needs a helper per shape. `Map`'s
+     * constructor turns up bare and with a list of `Pair`s.
+     */
+    private val byArity: Map<Int, String> = mapOf(),
 ) : BlimpInlineSupportCode(connectedKey) {
     override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
-        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(fn, null)), args = args)
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(byArity[args.size] ?: fn, null)), args = args)
 }
+
+/** The temper-core helper that builds a map from a list of `Pair`s. */
+internal const val TEMPER_NEW_MAP_FROM = "temper_new_map_from"
 
 /** The temper-core helper that restores a whole float's decimal point. */
 internal const val TEMPER_FLOAT_TO_STRING = "temper_float_to_string"
@@ -237,8 +248,18 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // Blimp's maps take string keys only, so a Temper map is an actor
         // holding entries. Pair is connected too, so it needs one as well.
         BlimpConnectedCall("core.type Pair.constructor()", "temper_new_pair", needsCore),
-        BlimpConnectedCall("core.type Map.constructor()", "temper_new_map", needsCore),
-        BlimpConnectedCall("core.type MapBuilder.constructor()", "temper_new_map", needsCore),
+        BlimpConnectedCall(
+            "core.type Map.constructor()",
+            "temper_new_map",
+            needsCore,
+            byArity = mapOf(1 to TEMPER_NEW_MAP_FROM),
+        ),
+        BlimpConnectedCall(
+            "core.type MapBuilder.constructor()",
+            "temper_new_map",
+            needsCore,
+            byArity = mapOf(1 to TEMPER_NEW_MAP_FROM),
+        ),
         BlimpConnectedCall("core.type Mapped.toMap()", "temper_copy_map", needsCore),
         BlimpConnectedCall("core.type Mapped.toMapBuilder()", "temper_copy_map", needsCore),
         BlimpConnectedCall("core.type Mapped.toListWith()", "temper_map_to_list_with", needsCore),

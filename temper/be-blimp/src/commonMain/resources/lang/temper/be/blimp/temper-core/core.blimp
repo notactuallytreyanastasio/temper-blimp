@@ -828,6 +828,26 @@ def temper_new_map() -> Any do
   spawn TemperMap
 end
 
+# Temper's Map constructor also takes a list of Pairs. Blimp handlers have a
+# fixed arity, so that shape gets its own helper rather than a default
+# argument, and it fills by sending `:set` per pair instead of building the
+# entry list in one handler: `:set` already replaces a duplicate key, and two
+# `become`s in one handler would not compose anyway.
+def temper_new_map_from(pairs: List) -> Any do
+  m = spawn TemperMap
+  temper_map_fill(m, pairs, 0)
+end
+
+def temper_map_fill(m: Any, pairs: List, i: Int) -> Any do
+  case i >= length(pairs) do
+    true -> m
+    _ ->
+      p = elem(pairs, i)
+      m <- :set(p <- :key, p <- :value)
+      temper_map_fill(m, pairs, i + 1)
+  end
+end
+
 def temper_copy_map(source: Any) -> Any do
   m = spawn TemperMap
   m <- :copyFrom(source)
