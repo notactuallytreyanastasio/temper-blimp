@@ -43,6 +43,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.ClassesDirectGetter,
         Ft.ClassesInheritedGetter,
         Ft.ClassesPrivateMethod,
+        Ft.ClassesPropertyOrder,
         Ft.ClassesSetters,
         Ft.ClassesStaticPropertiesScope,
         Ft.ControlFlowIfReturn,

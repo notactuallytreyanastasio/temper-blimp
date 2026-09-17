@@ -463,7 +463,11 @@ internal class BlimpTranslator(
                             message = Blimp.MessageCall(
                                 pos,
                                 name = Blimp.Atom(pos, CONSTRUCTOR_MESSAGE),
-                                args = call.parameters.map { rootSendArg(translateActual(it)) },
+                                args = padOptional(
+                                    pos,
+                                    call.parameters.map { rootSendArg(translateActual(it)) },
+                                    constructorArity(fn.typeName),
+                                ),
                             ),
                         ),
                     ),
@@ -660,6 +664,28 @@ internal class BlimpTranslator(
             if (childOrNull(index)?.findReturn() == true) return true
         }
         return false
+    }
+
+    /**
+     * Fills in omitted optional arguments with `nil`.
+     *
+     * A Blimp handler takes a fixed number of arguments, but Temper drops
+     * trailing optional ones at the call site -- the same constructor turns up
+     * as `__new(1)` and `__new(2, 3)`. The declared body already tests
+     * `isNull` for each default, so `nil` is exactly what it expects.
+     */
+    private fun padOptional(pos: Position, args: List<Blimp.Expr>, arity: Int): List<Blimp.Expr> = when {
+        arity <= args.size -> args
+        else -> args + List(arity - args.size) { Blimp.NilLit(pos) }
+    }
+
+    /** How many parameters the class's constructor declares, excluding `this`. */
+    private fun constructorArity(typeName: TmpL.TypeName): Int {
+        val key = (typeName.sourceDefinition?.name as? ResolvedParsedName)?.baseName?.nameText
+        val decl = key?.let { types[it] } ?: return 0
+        val constructor = flattenMembers(decl).filterIsInstance<TmpL.Constructor>().firstOrNull() ?: return 0
+        val thisName = constructor.parameters.thisName?.let { nameOf(it) }
+        return constructor.parameters.parameters.count { nameOf(it.name) != thisName }
     }
 
     /** Statements that end a path: the continuation picks up from here. */
