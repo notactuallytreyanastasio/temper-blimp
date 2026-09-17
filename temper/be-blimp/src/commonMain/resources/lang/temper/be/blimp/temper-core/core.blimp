@@ -561,3 +561,13 @@ end
 def temper_list_insert(items: List, at: Int, x: Any) -> List do
   (temper_list_slice(items, 0, at) ++ [x]) ++ temper_list_slice(items, at, length(items))
 end
+
+# Temper's `as` can fail. Blimp's actors dispatch on whatever they are, so the
+# check has to be explicit.
+def temper_cast(value: Any, tag: Atom) -> Any do
+  case temper_is_a(value, tag) do
+    true -> value
+    _ -> temper_bubble()
+  end
+end
+

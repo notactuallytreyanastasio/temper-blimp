@@ -305,6 +305,9 @@ private fun wrapping(id: BuiltinOperatorId, op: BlimpOperator) =
 /** The temper-core helper that wraps an Int to 32 bits. */
 internal const val TEMPER_INT32 = "temper_int32"
 
+/** A cast that can fail: checks the tag and bubbles if it does not match. */
+internal const val TEMPER_CAST = "temper_cast"
+
 /** temper-core's runtime type test, and the handler every translated actor carries. */
 internal const val TEMPER_IS_A = "temper_is_a"
 internal const val TYPES_MESSAGE = "__temper_types"
@@ -393,8 +396,10 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
     // Boolean negation is `!`; `not` is a builtin function, not an operator.
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
-    // `++` concatenates strings.
-    infix(BuiltinOperatorId.StrCat, BlimpOperator.Concat),
+    // StrCat is variadic -- `"a" ++ b ++ "c"` arrives as one call with three
+    // arguments -- and Blimp's `concat` builtin is too, so the operator form
+    // would silently drop everything past the second.
+    call(BuiltinOperatorId.StrCat, "concat"),
     // Blimp has no bitwise operators; temper-core does these arithmetically.
     call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
     call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),
