@@ -1,6 +1,10 @@
 package lang.temper.be.blimp
 
+import lang.temper.ast.boundaryDescent
 import lang.temper.be.tmpl.TmpL
+import lang.temper.log.Position
+import lang.temper.name.OutName
+import lang.temper.name.ResolvedName
 import lang.temper.value.TBoolean
 import lang.temper.value.TClass
 import lang.temper.value.TClosureRecord
@@ -53,6 +57,19 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
      */
     private val preludeHelpers = mutableSetOf<String>()
 
+    private val names = BlimpNames()
+
+    /**
+     * Names bound in enclosing scopes, innermost last.
+     *
+     * Used to decide which locals a lowered loop has to carry, since a Blimp
+     * top-level `def` closes over nothing.
+     */
+    private val scopes = ArrayDeque<MutableSet<ResolvedName>>()
+
+    /** Module-level names, in scope for every init block in the module. */
+    private val moduleScope = mutableSetOf<ResolvedName>()
+
     /**
      * Statements hoisted out of the expression currently being translated.
      *
@@ -92,7 +109,7 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         when (topLevel) {
             is TmpL.ModuleInitBlock -> processModuleInitBlock(topLevel)
             is TmpL.ModuleLevelDeclaration -> processModuleLevelDeclaration(topLevel)
-            is TmpL.ModuleFunctionDeclaration -> TODO("module function: $topLevel")
+            is TmpL.ModuleFunctionDeclaration -> declarations.add(translateFunction(topLevel))
             is TmpL.TypeDeclaration -> TODO("type declaration: $topLevel")
             is TmpL.Test -> TODO("test: $topLevel")
             // TypeConnection, PooledValueDeclaration, SupportCodeDeclaration,
@@ -102,8 +119,13 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     }
 
     private fun processModuleInitBlock(block: TmpL.ModuleInitBlock) {
-        for (statement in block.body.statements) {
-            translateStatementInto(statement, mainStatements)
+        scopes.addLast(moduleScope)
+        try {
+            for (statement in block.body.statements) {
+                translateStatementInto(statement, mainStatements)
+            }
+        } finally {
+            scopes.removeLast()
         }
     }
 
@@ -112,7 +134,14 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         // reference to the global console. Console.log is inlined at its call
         // site, so the temporary would only be a stray binding.
         if (decl.isConsole()) return
-        TODO("module level declaration: $decl")
+        // Blimp has no module scope distinct from the file's top level, so a
+        // module var is just an assignment that runs before the init blocks.
+        nameOf(decl.name)?.let { moduleScope.add(it) }
+        val value = when (val init = decl.init) {
+            null -> Blimp.NilLit(decl.pos)
+            else -> translateExpressionHoisting(init, mainStatements)
+        }
+        mainStatements.add(Blimp.Assign(decl.pos, target = idOf(decl.name), value = value))
     }
 
     // ── Statements ───────────────────────────────────────────────────────
@@ -129,6 +158,34 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
             }
 
             is TmpL.BlockStatement -> for (inner in statement.statements) translateStatementInto(inner, out)
+
+            is TmpL.LocalDeclaration -> {
+                nameOf(statement.name)?.let { scopes.lastOrNull()?.add(it) }
+                // Blimp's assignment is also its declaration, and it has no
+                // uninitialised form, so an init-less local starts as nil. That
+                // binding matters: it is what makes a following `case` able to
+                // assign to the name.
+                val value = when (val init = statement.init) {
+                    null -> Blimp.NilLit(statement.pos)
+                    else -> translateExpressionHoisting(init, out)
+                }
+                out.add(Blimp.Assign(statement.pos, target = idOf(statement.name), value = value))
+            }
+
+            is TmpL.Assignment -> {
+                val value = translateExpressionHoisting(statement.right, out)
+                out.add(Blimp.Assign(statement.pos, target = idOf(statement.left), value = value))
+            }
+
+            is TmpL.WhileStatement -> translateWhileStatement(statement, out)
+
+            // A Blimp block's value is its last statement, so a trailing return
+            // is just that expression. Anything else needs continuation
+            // splitting, which is not built yet.
+            is TmpL.ReturnStatement -> when (val returned = statement.expression) {
+                null -> out.add(Blimp.ExprStatement(statement.pos, Blimp.NilLit(statement.pos)))
+                else -> out.add(Blimp.ExprStatement(statement.pos, translateExpressionHoisting(returned, out)))
+            }
 
             else -> TODO("statement: $statement")
         }
@@ -155,15 +212,24 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
     private fun translateExpression(expression: TmpL.Expression): Blimp.Expr = when (expression) {
         is TmpL.ValueReference -> translateValueReference(expression)
         is TmpL.CallExpression -> translateCallExpression(expression)
+        is TmpL.Reference -> idOf(expression.id)
         else -> TODO("expression: $expression")
     }
 
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
         when (val fn = call.fn) {
             // Support code such as console.log becomes Blimp syntax right here.
-            is TmpL.InlineSupportCodeWrapper ->
-                (fn.supportCode as BlimpInlineSupportCode)
-                    .callFactory(call.pos, call.parameters.map { translateActual(it) }) as Blimp.Expr
+            is TmpL.InlineSupportCodeWrapper -> {
+                val supportCode = fn.supportCode as BlimpInlineSupportCode
+                preludeHelpers.addAll(supportCode.preludeHelpers)
+                supportCode.callFactory(call.pos, call.parameters.map { translateActual(it) }) as Blimp.Expr
+            }
+
+            is TmpL.FnReference -> Blimp.Call(
+                call.pos,
+                callee = idOf(fn.id),
+                args = call.parameters.map { translateActual(it) },
+            )
 
             else -> TODO("callable: $fn")
         }
@@ -172,6 +238,234 @@ internal class BlimpTranslator(private val module: TmpL.Module) {
         is TmpL.Expression -> translateExpression(actual)
         else -> TODO("actual: $actual")
     }
+
+    // ── Declarations ─────────────────────────────────────────────────────
+
+    /** A Temper function becomes a top-level `def`. */
+    private fun translateFunction(decl: TmpL.FunctionDeclarationOrMethod): Blimp.DefDecl {
+        val params = decl.parameters.parameters.map { formal ->
+            Blimp.Param(formal.pos, id = idOf(formal.name), type = anyType(formal.pos))
+        }
+        val scope = mutableSetOf<ResolvedName>()
+        decl.parameters.parameters.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
+        scopes.addLast(scope)
+        checkOnlyTrailingReturn(decl.body)
+        val body = try {
+            translateBlock(decl.body)
+        } finally {
+            scopes.removeLast()
+        }
+        return Blimp.DefDecl(
+            decl.pos,
+            id = idOf(decl.name),
+            params = params,
+            returnType = anyType(decl.pos),
+            body = body,
+        )
+    }
+
+    /**
+     * Rejects a `return` that is not the function body's last statement.
+     *
+     * Blimp has no `return`: a body's value is its final statement. A trailing
+     * return is therefore free, but an early one needs the remaining
+     * statements hoisted into a continuation `def`. Until that exists this
+     * fails loudly rather than dropping the control flow.
+     */
+    private fun checkOnlyTrailingReturn(block: TmpL.BlockStatement?) {
+        val statements = block?.statements ?: return
+        statements.forEachIndexed { index, statement ->
+            val isLast = index == statements.lastIndex
+            val hasReturn = when (statement) {
+                is TmpL.ReturnStatement -> !isLast
+                else -> statement.anyChildRecursiveReturn()
+            }
+            if (hasReturn) TODO("early return: $statement")
+        }
+    }
+
+    private fun TmpL.Statement.anyChildRecursiveReturn(): Boolean {
+        var found = false
+        boundaryDescent { node ->
+            if (node is TmpL.ReturnStatement) found = true
+            !found
+        }
+        return found
+    }
+
+    private fun translateBlock(block: TmpL.BlockStatement?): Blimp.Block {
+        val statements = mutableListOf<Blimp.Statement>()
+        block?.statements?.forEach { translateStatementInto(it, statements) }
+        return Blimp.Block(block?.pos ?: module.pos, statements = statements)
+    }
+
+    // ── Loop lowering ────────────────────────────────────────────────────
+
+    /**
+     * A Temper `while` becomes a top-level tail-recursive `def`.
+     *
+     * Blimp has no `while`, but it does optimise tail calls, so a loop of a
+     * million iterations runs flat. The lowered `def` takes the loop-carried
+     * locals, returns them as a list when the test fails, and the call site
+     * unpacks them back into the same names.
+     *
+     *     def loop_0(i, total) do
+     *       case i < 10 do
+     *         true ->
+     *           total = total + i
+     *           i = i + 1
+     *           loop_0(i, total)
+     *         _ -> [i, total]
+     *       end
+     *     end
+     *
+     * `break`, `continue` and a `return` out of a loop body need a tagged
+     * signal the call site decodes; that is not built yet and shows up as the
+     * TODO below rather than as wrong output.
+     */
+    private fun translateWhileStatement(loop: TmpL.WhileStatement, out: MutableList<Blimp.Statement>) {
+        if (loop.body.anyChildRecursiveJump()) {
+            TODO("loop with break, continue or return: $loop")
+        }
+        val pos = loop.pos
+        val carried = loopCarriedNames(loop)
+        val loopFn = Blimp.Id(pos, names.gensym("loop"))
+        val carriedIds = carried.map { Blimp.Id(pos, names.outName(it)) }
+
+        val bodyStatements = mutableListOf<Blimp.Statement>()
+        translateStatementInto(loop.body, bodyStatements)
+        bodyStatements.add(
+            Blimp.ExprStatement(
+                pos,
+                Blimp.Call(pos, callee = loopFn.deepCopy(), args = carriedIds.map { it.deepCopy() }),
+            ),
+        )
+
+        val test = translateExpressionHoisting(loop.test, bodyStatements.let { mutableListOf() })
+        declarations.add(
+            Blimp.DefDecl(
+                pos,
+                id = loopFn.deepCopy(),
+                params = carriedIds.map { Blimp.Param(pos, id = it.deepCopy(), type = anyType(pos)) },
+                returnType = anyType(pos),
+                body = Blimp.Block(
+                    pos,
+                    statements = listOf(
+                        Blimp.ExprStatement(
+                            pos,
+                            Blimp.CaseExpr(
+                                pos,
+                                subject = test,
+                                arms = listOf(
+                                    Blimp.CaseArm(
+                                        pos,
+                                        pattern = Blimp.BoolLit(pos, true),
+                                        guard = null,
+                                        body = Blimp.Block(pos, statements = bodyStatements),
+                                    ),
+                                    Blimp.CaseArm(
+                                        pos,
+                                        pattern = Blimp.Wildcard(pos),
+                                        guard = null,
+                                        body = Blimp.Block(
+                                            pos,
+                                            statements = listOf(
+                                                Blimp.ExprStatement(
+                                                    pos,
+                                                    Blimp.ListLit(pos, items = carriedIds.map { it.deepCopy() }),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        // Call it, then unpack the carried values back into their own names.
+        val resultId = Blimp.Id(pos, names.gensym("carried"))
+        out.add(
+            Blimp.Assign(
+                pos,
+                target = resultId.deepCopy(),
+                value = Blimp.Call(pos, callee = loopFn.deepCopy(), args = carriedIds.map { it.deepCopy() }),
+            ),
+        )
+        carriedIds.forEachIndexed { index, id ->
+            out.add(
+                Blimp.Assign(
+                    pos,
+                    target = id.deepCopy(),
+                    value = Blimp.Call(
+                        pos,
+                        callee = Blimp.Id(pos, OutName("elem", null)),
+                        args = listOf(resultId.deepCopy(), Blimp.NumberLit(pos, index)),
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * The locals a lowered loop must take as parameters: every enclosing name
+     * the loop reads or writes.
+     *
+     * Sorted for stable output. Names bound inside the loop are excluded
+     * because they are recreated each iteration; the induction variable of a
+     * desugared `for` is hoisted outside the loop by the frontend, so it lands
+     * here automatically.
+     */
+    private fun loopCarriedNames(loop: TmpL.WhileStatement): List<ResolvedName> {
+        val enclosing = scopes.flatten().toSet()
+        val mentioned = mutableSetOf<ResolvedName>()
+        val boundInside = mutableSetOf<ResolvedName>()
+        for (root in listOf<TmpL.Tree>(loop.test, loop.body)) {
+            root.boundaryDescent { node ->
+                when (node) {
+                    is TmpL.Reference -> nameOf(node.id)?.let(mentioned::add)
+                    is TmpL.Assignment -> nameOf(node.left)?.let(mentioned::add)
+                    is TmpL.LocalDeclaration -> nameOf(node.name)?.let(boundInside::add)
+                    else -> {}
+                }
+                true
+            }
+        }
+        return (mentioned - boundInside).filter { it in enclosing }.sortedBy { names.outName(it).outputNameText }
+    }
+
+    /** Whether the subtree jumps in a way the plain loop lowering cannot express. */
+    private fun TmpL.Statement.anyChildRecursiveJump(): Boolean {
+        var found = false
+        boundaryDescent { node ->
+            when (node) {
+                is TmpL.BreakStatement, is TmpL.ContinueStatement, is TmpL.ReturnStatement -> found = true
+                else -> {}
+            }
+            !found
+        }
+        return found
+    }
+
+    // ── Names ────────────────────────────────────────────────────────────
+
+    /**
+     * Blimp requires a type annotation on every `def` parameter and result.
+     *
+     * Its annotations are shallow and unparameterized, and Temper has already
+     * done the type checking, so `Any` carries all the information that
+     * survives the trip.
+     */
+    private fun anyType(pos: Position): Blimp.Id = Blimp.Id(pos, OutName("Any", null))
+
+    private fun idOf(id: TmpL.Id): Blimp.Id =
+        Blimp.Id(id.pos, nameOf(id)?.let { names.outName(it) } ?: OutName("$id", null))
+
+    private fun nameOf(id: TmpL.Id): ResolvedName? = runCatching { id.name }.getOrNull()
+
+    private fun freshLocal(pos: Position, hint: String): Blimp.Id = Blimp.Id(pos, names.gensym(hint))
 
     private fun translateValueReference(expression: TmpL.ValueReference): Blimp.Expr {
         val pos = expression.pos
