@@ -118,6 +118,21 @@ actor TypeTests do
     assert(temper_is_a(s, :Shape))
     refute(temper_is_a(s, :Circle))
   end
+  test "a string index is an Int that is not negative" do
+    assert(temper_is_a(0, :StringIndex))
+    assert(temper_is_a(3, :StringIndex))
+    refute(temper_is_a(static_StringIndex__none, :StringIndex))
+    refute(temper_is_a("x", :StringIndex))
+  end
+  test "the absence of a string index is the negative one" do
+    assert(temper_is_a(static_StringIndex__none, :NoStringIndex))
+    refute(temper_is_a(0, :NoStringIndex))
+    refute(temper_is_a("x", :NoStringIndex))
+  end
+  test "the absent string index sorts before every valid one" do
+    assert(temper_cmp(static_StringIndex__none, static_String__begin) < 0)
+    assert(temper_cmp(static_StringIndex__none, 5) < 0)
+  end
   test "a cast to a type the value is returns it" do
     s = spawn Square
     assert_eq(temper_cast(s, :Shape), s)
