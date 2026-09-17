@@ -52,7 +52,7 @@ functional-test-matrix.md` after test runs.
 ## Rules that are load-bearing here
 
 **Verify against the interpreter, not the source.** Every claim about Blimp in
-this repo was checked by running `blimp`. Four of its scoping behaviours are
+this repo was checked by running `blimp`. Five of its scoping behaviours are
 asymmetric in ways that silently miscompile, and reading the Zig would not have
 caught any of them:
 
@@ -60,6 +60,9 @@ caught any of them:
 - a `case` arm's assignment escapes from the wildcard arm but not the `true` arm
 - a `try` body's assignment escapes, a `catch` body's does not
 - a handler's `state` bindings are frozen at entry
+- a closure captures the *values* of names already bound when it is made, a
+  name not yet bound resolves when the closure runs, and an assignment inside
+  a closure is local to it
 
 When you find another, write the probe, keep it, and put the finding in the
 commit message.
