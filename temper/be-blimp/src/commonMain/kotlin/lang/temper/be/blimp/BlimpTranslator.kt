@@ -153,6 +153,7 @@ internal class BlimpTranslator(
 
     fun translateModule(): Translated {
         processImports()
+        collectModuleBoxes()
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
@@ -239,7 +240,18 @@ internal class BlimpTranslator(
             null -> Blimp.NilLit(decl.pos)
             else -> translateExpressionHoisting(init, mainStatements)
         }
-        mainStatements.add(Blimp.Assign(decl.pos, target = idOf(decl.name), value = value))
+        val stored = when (nameOf(decl.name)) {
+            in boxed -> {
+                preludeHelpers.addAll(needsCore)
+                Blimp.Call(
+                    decl.pos,
+                    callee = Blimp.Id(decl.pos, OutName(TEMPER_NEW_CELL, null)),
+                    args = listOf(value),
+                )
+            }
+            else -> value
+        }
+        mainStatements.add(Blimp.Assign(decl.pos, target = idOf(decl.name), value = stored))
     }
 
     // ── Statements ───────────────────────────────────────────────────────
@@ -601,7 +613,11 @@ internal class BlimpTranslator(
                     call.pos,
                     OutName(staticName(typeSubjectName(fn.subject as TmpL.TypeSubject), fn.methodName), null),
                 ),
-                args = call.parameters.map { translateActual(it) },
+                args = padOptional(
+                    call.pos,
+                    call.parameters.map { translateActual(it) },
+                    declaredArity(fn.type),
+                ),
             )
 
             is TmpL.MethodReference -> Blimp.Send(
@@ -656,13 +672,21 @@ internal class BlimpTranslator(
             is TmpL.FunInterfaceCallable -> Blimp.Call(
                 call.pos,
                 callee = translateExpression(fn.expr),
-                args = call.parameters.map { translateActual(it) },
+                args = padOptional(
+                    call.pos,
+                    call.parameters.map { translateActual(it) },
+                    declaredArity(fn.type),
+                ),
             )
 
             is TmpL.FnReference -> Blimp.Call(
                 call.pos,
                 callee = idOf(fn.id),
-                args = call.parameters.map { translateActual(it) },
+                args = padOptional(
+                    call.pos,
+                    call.parameters.map { translateActual(it) },
+                    declaredArity(fn.type),
+                ),
             )
 
             else -> TODO("callable: $fn")
@@ -1170,6 +1194,39 @@ internal class BlimpTranslator(
             },
             body = body,
         )
+    }
+
+    /**
+     * Boxes every module-level variable that a function assigns to.
+     *
+     * [collectBoxedCaptures] covers a nested function assigning a local of the
+     * function around it. A module-level `var` has the same problem one level
+     * up, and a `def` is a function too: an assignment inside one binds in the
+     * def's own scope and the module's binding never moves. The counter in
+     * functions/defaulting stayed at 0 while the function it called counted to
+     * two.
+     *
+     * The init block goes through [collectBoxedCaptures] instead, because a
+     * lambda in module code is the nested-function case exactly.
+     */
+    private fun collectModuleBoxes() {
+        val moduleNames = mutableSetOf<ResolvedName>()
+        for (topLevel in module.topLevels) {
+            if (topLevel is TmpL.ModuleLevelDeclaration) nameOf(topLevel.name)?.let(moduleNames::add)
+        }
+        if (moduleNames.isEmpty()) return
+        for (topLevel in module.topLevels) {
+            when (topLevel) {
+                is TmpL.ModuleInitBlock -> collectBoxedCaptures(topLevel.body)
+                else -> topLevel.boundaryDescent { node ->
+                    if (node is TmpL.Assignment) {
+                        val target = nameOf(node.left)
+                        if (target != null && target in moduleNames) boxed.add(target)
+                    }
+                    true
+                }
+            }
+        }
     }
 
     /**
