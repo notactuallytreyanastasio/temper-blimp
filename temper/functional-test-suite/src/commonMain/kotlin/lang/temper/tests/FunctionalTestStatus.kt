@@ -90,9 +90,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.AlgosFibonacci,
         Ft.AlgosHelloWorld,
         Ft.ClassesDirectGetter,
-        Ft.TypesFloatOps,
         Ft.TypesIntBasics,
-        Ft.TypesIntShifty,
         Ft.TypesIntLimits,
         Ft.TypesListEmpty,
     )
