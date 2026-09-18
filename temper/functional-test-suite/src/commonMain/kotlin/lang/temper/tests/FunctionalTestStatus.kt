@@ -34,7 +34,10 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
     // Blimp is new. No issue numbers because there is no tracking issue yet;
     // `blimp()` skips without claiming one.
     onlyPasses(
-        blimp(),        Ft.TestingAsserts,
+        blimp(),        Ft.TypesDenseBitVector,
+        Ft.AlgosMyersDiff,
+        Ft.TypesDeque,
+        Ft.TestingAsserts,
 
         Ft.AlgosFibonacci,
         Ft.AlgosHelloFromClassToTop,

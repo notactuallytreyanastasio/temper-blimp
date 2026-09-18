@@ -1484,6 +1484,96 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── DenseBitVector ───────────────────────────────────
+#
+# Dense is a promise about memory, not about behaviour, and Blimp has no packed
+# representation to make it with: a list of booleans answers the same
+# questions. myers-diff is the program that leans on it.
+
+actor TemperBitVector do
+  state bits: List :: []
+
+  on :init(n: Int) do
+    bits = temper_falses(n, [])
+    become bits: bits
+    reply nil
+  end
+
+  on :set(i: Int, b: Bool) do
+    bits = set_at(bits, i, b)
+    become bits: bits
+    reply nil
+  end
+
+  on :get(i: Int) do
+    reply elem(bits, i)
+  end
+end
+
+def temper_falses(n: Int, acc: List) -> List do
+  case n <= 0 do
+    true -> acc
+    _ -> temper_falses(n - 1, append(acc, false))
+  end
+end
+
+def temper_new_bit_vector(n: Int) -> Any do
+  v = spawn TemperBitVector
+  v <- :init(n)
+  v
+end
+
+# ── Deque ────────────────────────────────────────────
+#
+# A list held by an actor, like the builders above: adds go on the end and
+# removes come off the front, which is what breadth-first work wants.
+
+actor TemperDeque do
+  state items: List :: []
+
+  on :add(x: Any) do
+    items = append(items, x)
+    become items: items
+    reply nil
+  end
+
+  on :addFirst(x: Any) do
+    items = [x] ++ items
+    become items: items
+    reply nil
+  end
+
+  on :removeFirst do
+    first = head(items)
+    items = tail(items)
+    become items: items
+    reply first
+  end
+
+  on :removeLast do
+    last = elem(items, length(items) - 1)
+    items = temper_list_slice(items, 0, length(items) - 1)
+    become items: items
+    reply last
+  end
+
+  on :isEmpty do
+    reply empty?(items)
+  end
+
+  on :length do
+    reply length(items)
+  end
+
+  on :items do
+    reply items
+  end
+end
+
+def temper_new_deque() -> Any do
+  spawn TemperDeque
+end
+
 def temper_new_list_builder() -> Any do
   spawn TemperListBuilder
 end
