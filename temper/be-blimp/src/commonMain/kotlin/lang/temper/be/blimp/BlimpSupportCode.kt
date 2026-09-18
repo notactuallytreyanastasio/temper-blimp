@@ -242,18 +242,19 @@ internal val floatEdgeHelpers = setOf(
     "temper_float_is_negative",
 )
 
-/** Every `@connected` key be-blimp understands, keyed by the key string. */
 /**
  * `core.empty()`, the value with nothing in it.
  *
- * be-rust and be-py both answer an empty tuple. Blimp has tuples -- `{a, b}` --
- * but `{}` is a type error, so nil stands in, which is already what a void
- * value translates to here.
+ * be-rust and be-py both answer an empty tuple, and Blimp has one: `{}` binds
+ * and prints as `{}`. What it cannot do is `to_string({})`, which is a
+ * TypeError, and this value reaches string interpolation. So nil, which is
+ * already what a void value translates to here and does print.
  */
 internal object Empty : BlimpInlineSupportCode("core.empty()") {
     override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree = Blimp.NilLit(pos)
 }
 
+/** Every `@connected` key be-blimp understands, keyed by the key string. */
 internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
     listOf(
         ConsoleLog,

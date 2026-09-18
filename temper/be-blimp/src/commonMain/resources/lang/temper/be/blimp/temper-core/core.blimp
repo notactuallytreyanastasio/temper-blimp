@@ -248,7 +248,7 @@ def temper_parse_float_unsigned(t: String) -> Float do
     true -> temper_parse_decimal(t)
     _ ->
       mantissa = temper_parse_decimal(slice(t, 0, e))
-      exponent = temper_parse_int64(slice(t, e + 1, length(t) - e - 1), 10)
+      exponent = temper_parse_exponent(slice(t, e + 1, length(t) - e - 1))
       mantissa * pow(10.0, exponent + 0.0)
   end
 end
@@ -280,10 +280,34 @@ def temper_parse_frac(whole: String, frac: String) -> Float do
   end
 end
 
-def temper_digits_value(s: String) -> Int do
+# `1.0e+25` is what temper_float_to_string writes, so the parser has to read
+# its own output, and temper_parse_int64 takes a minus and not a plus.
+def temper_parse_exponent(s: String) -> Int do
   case empty?(s) do
-    true -> 0
+    true -> temper_bubble()
+    _ -> case slice(s, 0, 1) == "+" do
+      true -> temper_parse_int64(slice(s, 1, length(s) - 1), 10)
+      _ -> temper_parse_int64(s, 10)
+    end
+  end
+end
+
+# Digits and nothing else. temper_parse_int64 reads its own sign, so handing it
+# the mantissa directly made "--1" parse as 1.0 and a bare "-" as -0.0.
+def temper_digits_value(s: String) -> Int do
+  case empty?(s) or not(temper_all_digits(s, 0)) do
+    true -> temper_bubble()
     _ -> temper_parse_int64(s, 10)
+  end
+end
+
+def temper_all_digits(s: String, i: Int) -> Bool do
+  case i >= length(s) do
+    true -> true
+    _ -> case char_code(s, i) >= 48 and char_code(s, i) <= 57 do
+      true -> temper_all_digits(s, i + 1)
+      _ -> false
+    end
   end
 end
 
