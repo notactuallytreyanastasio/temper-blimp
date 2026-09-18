@@ -672,20 +672,28 @@ internal class BlimpTranslator(
             is TmpL.FunInterfaceCallable -> Blimp.Call(
                 call.pos,
                 callee = translateExpression(fn.expr),
-                args = padOptional(
+                args = packRest(
                     call.pos,
-                    call.parameters.map { translateActual(it) },
-                    declaredArity(fn.type),
+                    fn.type,
+                    padOptional(
+                        call.pos,
+                        call.parameters.map { translateActual(it) },
+                        declaredArity(fn.type),
+                    ),
                 ),
             )
 
             is TmpL.FnReference -> Blimp.Call(
                 call.pos,
                 callee = idOf(fn.id),
-                args = padOptional(
+                args = packRest(
                     call.pos,
-                    call.parameters.map { translateActual(it) },
-                    declaredArity(fn.type),
+                    fn.type,
+                    padOptional(
+                        call.pos,
+                        call.parameters.map { translateActual(it) },
+                        declaredArity(fn.type),
+                    ),
                 ),
             )
 
@@ -704,11 +712,15 @@ internal class BlimpTranslator(
         decl: TmpL.FunctionDeclarationOrMethod,
         nameOverride: String? = null,
     ): Blimp.DefDecl {
+        val rest = decl.parameters.restParameter
         val params = decl.parameters.parameters.map { formal ->
             Blimp.Param(formal.pos, id = idOf(formal.name), type = anyType(formal.pos))
-        }
+        } + listOfNotNull(
+            rest?.let { Blimp.Param(it.pos, id = idOf(it.name), type = anyType(it.pos)) },
+        )
         val scope = mutableSetOf<ResolvedName>()
         decl.parameters.parameters.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
+        rest?.let { nameOf(it.name)?.let(scope::add) }
         scopes.addLast(scope)
         collectBoxedCaptures(decl.body)
         val body = try {
@@ -869,6 +881,20 @@ internal class BlimpTranslator(
             if (childOrNull(index)?.findReturn() == true) return true
         }
         return false
+    }
+
+    /**
+     * Packs a call's trailing arguments into the list its rest formal holds.
+     *
+     * Blimp has no variadic call and no variadic `def`, so `...bar` is an
+     * ordinary parameter and `foo("1", "2")` has to arrive as `foo(["1",
+     * "2"])`. A call with nothing left over still passes the empty list: the
+     * body reads `bar.length` either way.
+     */
+    private fun packRest(pos: Position, sig: Signature2, args: List<Blimp.Expr>): List<Blimp.Expr> {
+        if (sig.restInputsType == null) return args
+        val fixed = declaredArity(sig)
+        return args.take(fixed) + Blimp.ListLit(pos, items = args.drop(fixed))
     }
 
     /**
@@ -1172,6 +1198,7 @@ internal class BlimpTranslator(
         val formals = decl.parameters.parameters.filter { formal -> nameOf(formal.name) != thisName }
         val scope = mutableSetOf<ResolvedName>()
         formals.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
+        decl.parameters.restParameter?.let { nameOf(it.name)?.let(scope::add) }
 
         val outerLoops = loops.toList()
         val outerLabels = labelContinuations.toMap()
@@ -1191,7 +1218,11 @@ internal class BlimpTranslator(
             pos,
             params = formals.map { formal ->
                 Blimp.Param(formal.pos, id = idOf(formal.name), type = anyType(formal.pos))
-            },
+            } + listOfNotNull(
+                decl.parameters.restParameter?.let {
+                    Blimp.Param(it.pos, id = idOf(it.name), type = anyType(it.pos))
+                },
+            ),
             body = body,
         )
     }
