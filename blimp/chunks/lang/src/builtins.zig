@@ -3118,9 +3118,9 @@ test "the transcendental functions agree with their identities" {
 
     inline for (float_fns) |entry| {
         const result = try unaryFloat(entry[1])(alloc, args);
-        // Every one of these is defined at 1.0, which the table's own
-        // registration would not catch if an entry were wired to the wrong
-        // function.
+        // Every one of these is defined at 1.0. That is all this asserts:
+        // sin wired to cos would pass it. The identity below is the check
+        // with teeth.
         try std.testing.expect(result.* == .float);
         try std.testing.expect(!std.math.isNan(result.float));
     }
