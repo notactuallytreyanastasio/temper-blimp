@@ -1,0 +1,26 @@
+# Blimp implementations for the @connected declarations in connected.temper.md.
+#
+# The backend splices this file in beside temper-core and gives a @connected
+# declaration a body that calls `connected_<name>`. The prefix is not
+# decoration: Blimp has no namespaces, and a bare `length` here would shadow
+# the builtin for every program this file is spliced into.
+
+def connected_sum(i: Int, j: Int, bonus: Any) -> Int do
+  extra = case nil?(bonus) do
+    true -> 0
+    _ -> bonus
+  end
+  i + j + extra
+end
+
+def connected_prod(hidden: Any, j: Int) -> Int do
+  (hidden <- :i) * j
+end
+
+# -1 for a null string, which is what the other backends' versions answer.
+def connected_length(s: Any) -> Int do
+  case nil?(s) do
+    true -> 0 - 1
+    _ -> length(s)
+  end
+end

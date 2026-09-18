@@ -10,6 +10,7 @@ import lang.temper.frontend.Module
 import lang.temper.fs.ResourceDescriptor
 import lang.temper.fs.declareResources
 import lang.temper.log.FilePath
+import lang.temper.log.resolveFile
 import lang.temper.log.dirPath
 import lang.temper.log.filePath
 import lang.temper.name.BackendId
@@ -74,7 +75,14 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 }
             }
         }
+        // A library can hand the backend its own Blimp, the way it hands
+        // be-lua a `_connected.lua`: a `_connected.blimp` beside the module
+        // source is spliced in and its `connected_<name>` functions are what a
+        // @connected declaration calls.
+        val connectedSources = mutableListOf<String>()
         for (module in finished.modules) {
+            val connectedPath = module.codeLocation.codeLocation.sourceFile.resolveFile(CONNECTED_FILE)
+            rawBackendFiles[connectedPath]?.let(connectedSources::add)
             val translated = BlimpTranslator(module, types).translateModule()
             declarations.addAll(translated.declarations)
             mainStatements.addAll(translated.mainStatements)
@@ -86,10 +94,14 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
             preludeHelpers.isEmpty() -> listOf()
             else -> listOf(Blimp.Prelude(finished.pos, preludeResource.load()))
         }
+        val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
         return listOf(
             TranslatedFileSpecification(
                 path = filePath(MAIN_FILE),
-                content = Blimp.SourceFile(finished.pos, items = prelude + declarations + mainStatements),
+                content = Blimp.SourceFile(
+                    finished.pos,
+                    items = prelude + connected + declarations + mainStatements,
+                ),
                 mimeType = mimeType,
             ),
         )
@@ -105,6 +117,9 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
 
         /** Blimp has no module system, so a library is entered through one file. */
         const val MAIN_FILE = "main.blimp"
+
+        /** A library's own Blimp, spliced in beside the prelude. */
+        const val CONNECTED_FILE = "_connected.blimp"
 
         /** Where a translated test module writes its JUnit XML. */
         const val TEST_RESULTS_FILE = "test-results.xml"

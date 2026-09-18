@@ -2,9 +2,11 @@ package lang.temper.be.blimp
 
 import lang.temper.ast.boundaryDescent
 import lang.temper.be.tmpl.TmpL
+import lang.temper.be.tmpl.isStdLib
 import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.log.Position
 import lang.temper.name.OutName
+import lang.temper.value.connectedSymbol
 import lang.temper.name.ResolvedName
 import lang.temper.name.ResolvedParsedName
 import lang.temper.type.Abstractness
@@ -808,6 +810,18 @@ internal class BlimpTranslator(
         val scope = mutableSetOf<ResolvedName>()
         decl.parameters.parameters.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
         rest?.let { nameOf(it.name)?.let(scope::add) }
+        connectedBody(decl, params)?.let { body ->
+            return Blimp.DefDecl(
+                decl.pos,
+                id = when (nameOverride) {
+                    null -> idOf(decl.name)
+                    else -> Blimp.Id(decl.pos, OutName(nameOverride, null))
+                },
+                params = params,
+                returnType = anyType(decl.pos),
+                body = body,
+            )
+        }
         scopes.addLast(scope)
         collectBoxedCaptures(decl.body)
         val body = try {
@@ -824,6 +838,41 @@ internal class BlimpTranslator(
             params = params,
             returnType = anyType(decl.pos),
             body = body,
+        )
+    }
+
+    /**
+     * The body of a `@connected` declaration: a call into the library's own
+     * Blimp.
+     *
+     * The frontend gives such a declaration a body that panics, because there
+     * is no Temper implementation to translate -- that is the point of
+     * `@connected`. be-lua calls `_connected.<name>`; Blimp has no namespaces,
+     * so the convention is a `connected_` prefix.
+     *
+     * The prefix keeps the library's own function out of the way. It does
+     * nothing for the wrapper, whose name is the Temper one: a library
+     * exporting `length` produced `def length(s) do connected_length(s) end`,
+     * which shadowed the builtin `length` that `connected_length` then called.
+     * That is [BlimpNames]'s job, not this one's.
+     */
+    private fun connectedBody(decl: TmpL.FunctionLike, params: List<Blimp.Param>): Blimp.Block? {
+        if (decl !is TmpL.ModuleFunctionDeclaration) return null
+        if (decl.metadata.none { it.key.symbol == connectedSymbol }) return null
+        if (module.isStdLib) return null
+        val name = (decl.name.name as? ResolvedParsedName)?.baseName?.nameText ?: return null
+        return Blimp.Block(
+            decl.pos,
+            statements = listOf(
+                Blimp.ExprStatement(
+                    decl.pos,
+                    Blimp.Call(
+                        decl.pos,
+                        callee = Blimp.Id(decl.pos, OutName("connected_$name", null)),
+                        args = params.map { it.id.deepCopy() },
+                    ),
+                ),
+            ),
         )
     }
 
