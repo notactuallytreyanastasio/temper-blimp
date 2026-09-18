@@ -1495,6 +1495,69 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── Generators ──────────────────────────────────
+#
+# BlimpSupportNetwork says "Blimp never needs generators", and the state
+# machine lowering is why: a `yield` is gone before the backend sees the tree.
+# What it leaves behind is a plain function that has to be called once per
+# step, and something has to remember when it has run out. That something is
+# what `adaptGeneratorFn` builds, and every backend supplies it.
+#
+# be-rust models a result as an Option -- `doneResult()` is None and
+# `ValueResult(v)` is Some(v). The same two shapes fit a list, where the empty
+# list is done, so `isDone` is `empty?`.
+
+def temper_done_result() -> List do
+  []
+end
+
+def temper_value_result(v: Any) -> List do
+  [v]
+end
+
+actor TemperGenerator do
+  state step: Any :: nil
+  state done: Bool :: false
+
+  on :init(f: Any) do
+    step = f
+    become step: step
+    reply nil
+  end
+
+  # The step function is handed the generator, because the lowered machine can
+  # yield back into it. Blimp actors have no `self`, so the caller passes the
+  # handle it is already holding.
+  on :next(me: Any) do
+    r = case done do
+      true -> []
+      _ -> step(me)
+    end
+    fin = empty?(r)
+    become done: fin
+    reply r
+  end
+
+  on :done do
+    reply done
+  end
+
+  on :close do
+    become done: true
+    reply nil
+  end
+end
+
+def temper_adapt_generator_fn(f: Any) -> Any do
+  g = spawn TemperGenerator
+  g <- :init(f)
+  g
+end
+
+def temper_generator_next(g: Any) -> Any do
+  g <- :next(g)
+end
+
 # ── Date ─────────────────────────────────────────────
 #
 # A Date is [year, month, day] and nothing mutates one, so unlike the builders
