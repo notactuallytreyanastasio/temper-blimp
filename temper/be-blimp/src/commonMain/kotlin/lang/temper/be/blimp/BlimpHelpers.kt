@@ -5,9 +5,14 @@ import lang.temper.format.TokenSink
 /**
  * Quotes a string as a Blimp string literal.
  *
- * Blimp's lexer only understands `\n`, `\t`, `\"` and `\\`; a `\uXXXX` escape
- * passes through verbatim as those six characters. Blimp strings are byte
- * arrays over UTF-8 source, so everything else is emitted raw.
+ * Blimp decodes `\n`, `\t`, `\r`, `\e`, `\"` and `\\`. It does not decode `\0`,
+ * `\uXXXX` or anything else: an unrecognised escape keeps its backslash, so
+ * `\q` is two characters and `\u000d` is six. Blimp strings are byte arrays
+ * over UTF-8 source, so everything else is emitted raw.
+ *
+ * Decoded by the evaluator, not the lexer. `lexString` only counts a
+ * backslash as "the next byte cannot close this string"; the switch that
+ * turns `\r` into a carriage return is in eval.zig's `.string_lit` branch.
  */
 internal fun stringTokenText(value: String): String = buildString {
     append('"')
@@ -17,9 +22,16 @@ internal fun stringTokenText(value: String): String = buildString {
             '\\' -> append("\\\\")
             '\n' -> append("\\n")
             '\t' -> append("\\t")
-            // No escape exists for these, and raw control characters would
-            // break the literal, so drop back to the closest printable thing.
-            '\r' -> append("\\n")
+            // Blimp has this escape -- `char_code("\r", 0)` answers 13.
+            // Writing `\n` here instead, on the theory that it did not, is
+            // what made a JSON encoder turn U+000D into U+000A.
+            //
+            // A raw CR would in fact survive too: `lexString` does not stop at
+            // a line break, and all 33 raw control bytes round-trip through a
+            // literal unchanged, which is how every other one in this switch's
+            // `else` branch gets through. The escape is for the reader, and
+            // for any tool that sees the generated file as lines.
+            '\r' -> append("\\r")
             else -> append(char)
         }
     }
