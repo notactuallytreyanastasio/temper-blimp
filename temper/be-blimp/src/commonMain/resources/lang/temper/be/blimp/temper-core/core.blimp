@@ -1174,6 +1174,162 @@ def temper_pow(base: Float, exponent: Float) -> Float do
   pow(base, exponent)
 end
 
+# ── Tests ────────────────────────────────────────────
+#
+# Blimp has no test framework to ask for a report, so a translated test module
+# runs its own tests and writes the JUnit XML the harness reads. Each test is
+# a `def` taking the Test it reports to; an assertion that fails records the
+# message its closure returns, and one that passes never calls the closure.
+
+actor TemperTest do
+  state failures: List :: []
+
+  on :assert(ok: Bool, msg: Any) do
+    next = case ok do
+      true -> failures
+      _ -> append(failures, msg())
+    end
+    become failures: next
+    reply nil
+  end
+
+  on :failures do
+    reply failures
+  end
+end
+
+def temper_run_tests(tests: List, path: String) -> Any do
+  results = temper_run_tests_loop(tests, [])
+  write_file(path, temper_junit_xml(results))
+  temper_report_tests(results, 0)
+end
+
+def temper_run_tests_loop(tests: List, acc: List) -> List do
+  case empty?(tests) do
+    true -> acc
+    _ ->
+      entry = head(tests)
+      temper_run_tests_loop(tail(tests), append(acc, [elem(entry, 0), temper_run_one(elem(entry, 1))]))
+  end
+end
+
+# A test that bubbles has failed, and what it managed to assert before that
+# still counts: the messages come back either way.
+def temper_run_one(body: Any) -> List do
+  t = spawn TemperTest
+  try do
+    body(t)
+    t <- :failures
+  catch do
+    append(t <- :failures, "test raised")
+  end
+end
+
+# A run that reported a failure exits non-zero, because a test runner that
+# says nothing to the shell is a test runner nobody notices.
+def temper_report_tests(results: List, failed: Int) -> Any do
+  case empty?(results) do
+    true -> case failed > 0 do
+      true -> exit(1)
+      _ -> nil
+    end
+    _ ->
+      entry = head(results)
+      failures = elem(entry, 1)
+      mark = case empty?(failures) do
+        true -> "ok   "
+        _ -> "FAIL "
+      end
+      puts(concat(mark, elem(entry, 0)))
+      temper_report_tests(tail(results), failed + length(failures))
+  end
+end
+
+def temper_junit_xml(results: List) -> String do
+  concat(
+    concat("<testsuites>\n<testsuite name=\"blimp\" tests=\"", to_string(length(results))),
+    concat(
+      concat("\" failures=\"", to_string(temper_count_failed(results, 0))),
+      concat("\" time=\"0\">\n", concat(temper_junit_cases(results, ""), "</testsuite>\n</testsuites>\n"))
+    )
+  )
+end
+
+def temper_count_failed(results: List, n: Int) -> Int do
+  case empty?(results) do
+    true -> n
+    _ ->
+      next = case empty?(elem(head(results), 1)) do
+        true -> n
+        _ -> n + 1
+      end
+      temper_count_failed(tail(results), next)
+  end
+end
+
+def temper_junit_cases(results: List, acc: String) -> String do
+  case empty?(results) do
+    true -> acc
+    _ -> temper_junit_cases(tail(results), concat(acc, temper_junit_case(head(results))))
+  end
+end
+
+def temper_junit_case(entry: List) -> String do
+  name = temper_xml_escape(elem(entry, 0))
+  failures = elem(entry, 1)
+  open = concat(concat("<testcase name=\"", name), "\" time=\"0\" classname=\"blimp\">")
+  case empty?(failures) do
+    true -> concat(open, "</testcase>\n")
+    _ ->
+      why = temper_xml_escape(temper_join_failures(failures, ""))
+      concat(open, concat(concat("<failure message=\"", why), concat("\">", concat(why, "</failure></testcase>\n"))))
+  end
+end
+
+def temper_join_failures(failures: List, acc: String) -> String do
+  case empty?(failures) do
+    true -> acc
+    _ ->
+      next = case empty?(acc) do
+        true -> head(failures)
+        _ -> concat(acc, concat(", ", head(failures)))
+      end
+      temper_join_failures(tail(failures), next)
+  end
+end
+
+# The message is a Temper string and lands in both an attribute and the
+# element body, so the five that matter all go.
+def temper_xml_escape(s: String) -> String do
+  temper_xml_escape_loop(s, 0, "")
+end
+
+def temper_xml_escape_loop(s: String, i: Int, acc: String) -> String do
+  case i >= length(s) do
+    true -> acc
+    _ -> temper_xml_escape_loop(s, i + 1, concat(acc, temper_xml_char(slice(s, i, 1))))
+  end
+end
+
+def temper_xml_char(c: String) -> String do
+  case c == "&" do
+    true -> "&amp;"
+    _ -> case c == "<" do
+      true -> "&lt;"
+      _ -> case c == ">" do
+        true -> "&gt;"
+        _ -> case c == "\"" do
+          true -> "&quot;"
+          _ -> case c == "'" do
+            true -> "&apos;"
+            _ -> c
+          end
+        end
+      end
+    end
+  end
+end
+
 # ── Mutable lists ────────────────────────────────────
 #
 # Temper's ListBuilder is mutable and Blimp's lists are not, so a builder is

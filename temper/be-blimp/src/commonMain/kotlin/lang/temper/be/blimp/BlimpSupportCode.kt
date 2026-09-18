@@ -556,6 +556,9 @@ private val bitHelpers = setOf(
 /** temper-core helpers that raise from anywhere, including a plain `def` body. */
 internal const val TEMPER_BUBBLE = "temper_bubble"
 
+/** temper-core's test runner, which writes the JUnit XML the harness reads. */
+internal const val TEMPER_RUN_TESTS = "temper_run_tests"
+
 /** temper-core's stand-in for a node the frontend refused. */
 internal const val TEMPER_UNTRANSLATABLE = "temper_untranslatable"
 internal const val TEMPER_PANIC = "temper_panic"

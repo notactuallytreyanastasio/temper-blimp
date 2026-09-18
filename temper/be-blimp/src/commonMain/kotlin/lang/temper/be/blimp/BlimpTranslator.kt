@@ -157,10 +157,51 @@ internal class BlimpTranslator(
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
+        emitTestRunner()
         return Translated(
             declarations = declarations.toList(),
             mainStatements = mainStatements.toList(),
             preludeHelpers = preludeHelpers.toSet(),
+        )
+    }
+
+    /** Tests declared in this module, in source order. */
+    private val tests = mutableListOf<TmpL.Test>()
+
+    /**
+     * The call that runs this module's tests and writes the JUnit XML.
+     *
+     * Blimp has no test framework to ask for a report -- be-lua runs busted
+     * with `-o junit` -- so the translated module runs its own tests and writes
+     * the file the harness reads. Each entry is `[name, fn]`: the name is the
+     * declaration's, because the harness strips a `__123` suffix and converts
+     * camelCase back to the sentence the test was declared with.
+     */
+    private fun emitTestRunner() {
+        if (tests.isEmpty()) return
+        preludeHelpers.addAll(needsCore)
+        val pos = module.pos
+        val entries = tests.map { test ->
+            Blimp.ListLit(
+                test.pos,
+                items = listOf(
+                    Blimp.StringLit(test.pos, names.outName(test.name.name).outputNameText),
+                    idOf(test.name),
+                ),
+            )
+        }
+        mainStatements.add(
+            Blimp.ExprStatement(
+                pos,
+                Blimp.Call(
+                    pos,
+                    callee = Blimp.Id(pos, OutName(TEMPER_RUN_TESTS, null)),
+                    args = listOf(
+                        Blimp.ListLit(pos, items = entries),
+                        Blimp.StringLit(pos, BlimpBackend.TEST_RESULTS_FILE),
+                    ),
+                ),
+            ),
         )
     }
 
@@ -209,7 +250,12 @@ internal class BlimpTranslator(
             is TmpL.ModuleLevelDeclaration -> processModuleLevelDeclaration(topLevel)
             is TmpL.ModuleFunctionDeclaration -> declarations.add(translateFunction(topLevel))
             is TmpL.TypeDeclaration -> processTypeDeclaration(topLevel)
-            is TmpL.Test -> TODO("test: $topLevel")
+            // A test is a function taking the Test it reports to, plus a line
+            // in the runner at the end of the module.
+            is TmpL.Test -> {
+                declarations.add(translateFunction(topLevel))
+                tests.add(topLevel)
+            }
             // TypeConnection, PooledValueDeclaration, SupportCodeDeclaration,
             // comments and garbage carry no Blimp output, as in be-rust.
             else -> {}
@@ -749,7 +795,7 @@ internal class BlimpTranslator(
 
     /** A Temper function becomes a top-level `def`. */
     private fun translateFunction(
-        decl: TmpL.FunctionDeclarationOrMethod,
+        decl: TmpL.FunctionLike,
         nameOverride: String? = null,
     ): Blimp.DefDecl {
         val rest = decl.parameters.restParameter
