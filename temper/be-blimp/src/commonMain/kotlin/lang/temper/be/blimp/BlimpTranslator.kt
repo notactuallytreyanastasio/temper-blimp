@@ -1584,9 +1584,14 @@ internal class BlimpTranslator(
      * Every backend spells these out: be-lua reaches for `math.pi`, and Blimp
      * has no maths module, so the literal is what is left.
      */
-    private val builtinStatics = mapOf(
+    private val builtinStatics = mapOf<String, Number>(
         "Float64.pi" to kotlin.math.PI,
         "Float64.e" to kotlin.math.E,
+        // A Temper String index is a byte offset into UTF-8, which is what
+        // Blimp uses too, and the first one is zero. `String.end` is a getter
+        // on the string rather than a constant, and goes through the support
+        // table.
+        "String.begin" to 0,
     )
 
     private fun translateSetProperty(statement: TmpL.SetProperty, out: MutableList<Blimp.Statement>) {
@@ -1723,6 +1728,7 @@ internal class BlimpTranslator(
      */
     private fun translateIfStatement(statement: TmpL.IfStatement, out: MutableList<Blimp.Statement>) {
         val pos = statement.pos
+        val boundBefore = scopes.flatten().toSet()
         val test = translateExpressionHoisting(statement.test, out)
         val consequent = mutableListOf<Blimp.Statement>()
         translateStatementInto(statement.consequent, consequent)
@@ -1761,6 +1767,7 @@ internal class BlimpTranslator(
             out.add(Blimp.ExprStatement(pos, caseExpr))
             return
         }
+        bindPayloadNames(pos, assigned, boundBefore, out)
         val resultId = Blimp.Id(pos, names.gensym("branch"))
         out.add(Blimp.Assign(pos, target = resultId.deepCopy(), value = caseExpr))
         ids.forEachIndexed { index, id ->
@@ -1786,6 +1793,7 @@ internal class BlimpTranslator(
      */
     private fun translateTryStatement(statement: TmpL.TryStatement, out: MutableList<Blimp.Statement>) {
         val pos = statement.pos
+        val boundBefore = scopes.flatten().toSet()
         if (statement.recover is TmpL.ThrowStatement) {
             translateStatementInto(statement.tried, out)
             return
@@ -1814,10 +1822,48 @@ internal class BlimpTranslator(
             out.add(Blimp.ExprStatement(pos, tryCatch))
             return
         }
+        bindPayloadNames(pos, assigned, boundBefore, out)
         val resultId = Blimp.Id(pos, names.gensym("recovered"))
         out.add(Blimp.Assign(pos, target = resultId.deepCopy(), value = tryCatch))
         ids.forEachIndexed { index, id ->
             out.add(Blimp.Assign(pos, target = id.deepCopy(), value = elemOf(pos, resultId, index)))
+        }
+    }
+
+    /**
+     * Binds every payload name that only one arm would have bound.
+     *
+     * Both arms end in the same list of names, and a name a single arm
+     * *declares* is in scope by the time that list is built -- but Blimp binds
+     * at the assignment, so the other arm packages a name nothing has set:
+     *
+     *     blimp_branch_8 = case t___72 do
+     *       true -> t___74 = nil
+     *              ...
+     *              [t___74, t___75]
+     *       _ -> t___75 = temper_parse_int32(string__33)
+     *              [t___74, t___75]      # t___74 was never assigned here
+     *     end
+     *
+     * A `nil` ahead of the case gives every path something to package. Names
+     * already bound before the branches keep their values: the list is what
+     * puts them back.
+     */
+    private fun bindPayloadNames(
+        pos: Position,
+        assigned: List<ResolvedName>,
+        boundBefore: Set<ResolvedName>,
+        out: MutableList<Blimp.Statement>,
+    ) {
+        for (name in assigned) {
+            if (name in boundBefore) continue
+            out.add(
+                Blimp.Assign(
+                    pos,
+                    target = Blimp.Id(pos, names.outName(name)),
+                    value = Blimp.NilLit(pos),
+                ),
+            )
         }
     }
 

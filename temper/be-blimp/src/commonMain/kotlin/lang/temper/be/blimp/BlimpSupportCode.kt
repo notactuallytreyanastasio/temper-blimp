@@ -219,8 +219,20 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         ConsoleLog,
         GetConsole,
         // Blimp's to_string covers Int, Int64, Boolean and String directly.
-        BlimpConnectedCall("core.type Int32.toString()", "to_string"),
-        BlimpConnectedCall("core.type Int64.toString()", "to_string"),
+        // With a radix it is a different function: Blimp's to_string has no
+        // second parameter, and `cp.toString(16)` is how a code point prints.
+        BlimpConnectedCall(
+            "core.type Int32.toString()",
+            "to_string",
+            needsCore,
+            byArity = mapOf(2 to "temper_int_to_string_radix"),
+        ),
+        BlimpConnectedCall(
+            "core.type Int64.toString()",
+            "to_string",
+            needsCore,
+            byArity = mapOf(2 to "temper_int_to_string_radix"),
+        ),
         BlimpConnectedCall("core.type Boolean.toString()", "to_string"),
         BlimpConnectedCall("core.type String.toString()", "to_string"),
         // Float needs the helper: Blimp prints a whole float as "1", Temper as "1.0".
@@ -251,6 +263,11 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Float64.cosh()", "cosh"),
         BlimpConnectedCall("core.type Float64.tanh()", "tanh"),
         BlimpConnectedCall("core.type Float64.abs()", "abs"),
+        // Truncating toward zero, checked and saturating.
+        BlimpConnectedCall("core.type Float64.toInt32()", "temper_float_to_int32", needsCore),
+        BlimpConnectedCall("core.type Float64.toInt32Unsafe()", "temper_float_to_int32_unsafe", needsCore),
+        BlimpConnectedCall("core.type Float64.toInt64()", "temper_float_to_int64", needsCore),
+        BlimpConnectedCall("core.type Float64.toInt64Unsafe()", "temper_float_to_int64_unsafe", needsCore),
         BlimpConnectedCall("core.type Float64.atan2()", "atan2"),
         // These four answer an Int in Blimp and a Float in Temper, and Blimp's
         // min and max take Ints only -- the checker rejects a Float before the
@@ -286,18 +303,9 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // .toInt32(16)` needs a real parser. It also answers 0 for text that is
         // not a number at all, where Temper bubbles, so even the no-radix form
         // goes through temper-core.
-        BlimpConnectedCall(
-            "core.type String.toInt32()",
-            TEMPER_PARSE_INT32,
-            needsCore,
-            byArity = mapOf(2 to TEMPER_PARSE_INT32),
-        ),
-        BlimpConnectedCall(
-            "core.type String.toInt64()",
-            TEMPER_PARSE_INT64,
-            needsCore,
-            byArity = mapOf(2 to TEMPER_PARSE_INT64),
-        ),
+        // One helper at both arities: the radix is nil when left out.
+        BlimpConnectedCall("core.type String.toInt32()", TEMPER_PARSE_INT32, needsCore, padTo = 2),
+        BlimpConnectedCall("core.type String.toInt64()", TEMPER_PARSE_INT64, needsCore, padTo = 2),
         // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
         // on both strings and lists.
         BlimpConnectedCall("core.type Listed.get isEmpty()", "temper_is_empty", needsCore),
@@ -315,13 +323,24 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type String.split()", "temper_string_split", utf8Helpers + needsCore),
         BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
         BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
+        BlimpConnectedCall(
+            "core.type String.indexOf()",
+            "temper_string_index_of",
+            needsCore,
+            padTo = 3,
+        ),
         BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
         BlimpConnectedCall("core.type String.next()", "temper_string_next", utf8Helpers),
         BlimpConnectedCall("core.type String.prev()", "temper_string_prev", needsCore),
         BlimpConnectedCall("core.type String.step()", "temper_string_step", needsCore),
         BlimpConnectedCall("core.type String.countBetween()", "temper_string_count_between", needsCore),
         BlimpConnectedCall("core.type String.hasAtLeast()", "temper_string_has_at_least", needsCore),
-        BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode", utf8Helpers),
+        BlimpConnectedCall("core.type String.fromCodePoint()", "u8_encode_checked", utf8Helpers + needsCore),
+        BlimpConnectedCall(
+            "core.type String.fromCodePoints()",
+            "temper_string_from_code_points",
+            utf8Helpers + needsCore,
+        ),
         // Blimp's slice takes a length; Temper's takes an exclusive end.
         BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
         BlimpConnectedCall("core.type Listed.slice()", "temper_list_slice", needsCore),
