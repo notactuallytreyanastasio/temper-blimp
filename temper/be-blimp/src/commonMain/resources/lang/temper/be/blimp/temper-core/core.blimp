@@ -1516,20 +1516,25 @@ end
 
 # ── Promises ────────────────────────────────
 #
-# Single-threaded, which is what be-rust does too: there is no scheduler and
-# no queue. A promise holds the one generator waiting on it, and completing it
-# resumes that generator right there.
+# Single-threaded: there is no scheduler and no queue, and completing a promise
+# resumes whatever was waiting on it right there.
 #
-# The waiting generator is *replied* rather than resumed inside the handler.
-# Resuming it there would re-enter the actor while it is still in the middle
-# of a `become`, and the state the handler was about to commit would be the
-# state the resumed code sees.
+# Waiters are a list. be-rust keeps one slot and says so -- "Provide only one
+# bonus listener for now. TODO Do we need more?" -- and copying that meant a
+# second generator awaiting the same unsettled promise silently replaced the
+# first, which then never woke. be-cpp had already moved to a vector. Two
+# `await`s on one promise is ordinary Temper.
+#
+# The waiting generators are *replied* rather than resumed inside the handler.
+# Resuming there would re-enter the actor while it is still in the middle of a
+# `become`, and the state the handler was about to commit would be the state
+# the resumed code sees.
 
 actor TemperPromise do
   state settled: Bool :: false
   state broken: Bool :: false
   state held: Any :: nil
-  state waiting: Any :: nil
+  state waiting: List :: []
 
   # "The API doesn't prevent multiple resolution, but the first one wins",
   # says the test, and be-cpp's `breakpromise` guards the same way. A second
@@ -1537,20 +1542,20 @@ actor TemperPromise do
   # first one already did.
   on :settle(v: Any, brk: Bool) do
     case settled do
-      true -> reply nil
+      true -> reply []
       _ ->
         w = waiting
-        become settled: true, broken: brk, held: v, waiting: nil
+        become settled: true, broken: brk, held: v, waiting: []
         reply w
     end
   end
 
   on :onReady(task: Any) do
     case settled do
-      true -> reply task
+      true -> reply [task]
       _ ->
-        become waiting: task
-        reply nil
+        become waiting: append(waiting, task)
+        reply []
     end
   end
 
@@ -1578,10 +1583,12 @@ def temper_promise_break(b: Any) -> Any do
   temper_promise_resume(b <- :settle(nil, true))
 end
 
-def temper_promise_resume(task: Any) -> Any do
-  case nil?(task) do
+def temper_promise_resume(tasks: List) -> Any do
+  case empty?(tasks) do
     true -> nil
-    _ -> temper_generator_next(task)
+    _ ->
+      temper_generator_next(head(tasks))
+      temper_promise_resume(tail(tasks))
   end
 end
 
@@ -1618,6 +1625,18 @@ end
 #   [:seq, nodes]  [:alt, branches]
 #   [:rep, node, min, max]  max -1 is unbounded
 #   [:cap, name, node]
+
+# Every read of the pattern that is not already bounds-checked goes through
+# this. `elem` past the end of a list answers nil, and nil compares unequal to
+# every code point, so an unterminated pattern walked off the end: `[abc`
+# looped until the heap ceiling and `a\` died with a bare TypeError. A pattern
+# that stops in the middle of something now says so.
+def temper_rx_at(p: List, i: Int) -> Int do
+  case i >= length(p) do
+    true -> bubble "regex: the pattern ends in the middle of something"
+    _ -> elem(p, i)
+  end
+end
 
 def temper_rx_parse(pattern: String) -> Any do
   p = u8_code_points(pattern)
@@ -1754,7 +1773,7 @@ def temper_rx_rep_num(p: List, i: Int, acc: Int) -> List do
 end
 
 def temper_rx_rep_after_lo(p: List, i: Int, node: Any, lo: Int) -> List do
-  r = case elem(p, i) == 125 do
+  r = case temper_rx_at(p, i) == 125 do
     true -> temper_rx_rep_loop(p, i + 1, [:rep, node, lo, lo])
     _ -> temper_rx_rep_comma(p, i + 1, node, lo)
   end
@@ -1762,7 +1781,7 @@ def temper_rx_rep_after_lo(p: List, i: Int, node: Any, lo: Int) -> List do
 end
 
 def temper_rx_rep_comma(p: List, i: Int, node: Any, lo: Int) -> List do
-  r = case elem(p, i) == 125 do
+  r = case temper_rx_at(p, i) == 125 do
     true -> temper_rx_rep_loop(p, i + 1, [:rep, node, lo, 0 - 1])
     _ -> temper_rx_rep_hi(p, i, node, lo)
   end
@@ -1782,7 +1801,7 @@ def temper_rx_rep_hi(p: List, i: Int, node: Any, lo: Int) -> List do
 end
 
 def temper_rx_atom(p: List, i: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 40 do
     true -> temper_rx_group(p, i + 1)
     _ -> temper_rx_atom_set(p, i, c)
@@ -1831,7 +1850,7 @@ def temper_rx_atom_eol(p: List, i: Int, c: Int) -> List do
 end
 
 def temper_rx_group(p: List, i: Int) -> List do
-  r = case elem(p, i) == 63 do
+  r = case temper_rx_at(p, i) == 63 do
     true -> temper_rx_group_q(p, i + 1)
     _ -> temper_rx_group_body(p, i, "")
   end
@@ -1839,7 +1858,7 @@ def temper_rx_group(p: List, i: Int) -> List do
 end
 
 def temper_rx_group_q(p: List, i: Int) -> List do
-  r = case elem(p, i) == 58 do
+  r = case temper_rx_at(p, i) == 58 do
     true -> temper_rx_group_body(p, i + 1, "")
     _ -> temper_rx_group_name(p, i + 1, "")
   end
@@ -1847,9 +1866,9 @@ def temper_rx_group_q(p: List, i: Int) -> List do
 end
 
 def temper_rx_group_name(p: List, i: Int, name: String) -> List do
-  r = case elem(p, i) == 62 do
+  r = case temper_rx_at(p, i) == 62 do
     true -> temper_rx_group_body(p, i + 1, name)
-    _ -> temper_rx_group_name(p, i + 1, concat(name, u8_encode_checked(elem(p, i))))
+    _ -> temper_rx_group_name(p, i + 1, concat(name, u8_encode_checked(temper_rx_at(p, i))))
   end
   r
 end
@@ -1860,11 +1879,16 @@ def temper_rx_group_body(p: List, i: Int, name: String) -> List do
     true -> elem(inner, 0)
     _ -> [:cap, name, elem(inner, 0)]
   end
-  [node, elem(inner, 1) + 1]
+  # `temper_rx_alt` stops at `)` or at the end of the pattern, and skipping a
+  # closing paren that is not there is how `(?:a` compiled to `a`.
+  case temper_rx_at(p, elem(inner, 1)) == 41 do
+    true -> [node, elem(inner, 1) + 1]
+    _ -> bubble "regex: a group is never closed"
+  end
 end
 
 def temper_rx_escape(p: List, i: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 117 do
     true -> temper_rx_ucode(p, i + 2, 0)
     _ -> temper_rx_escape_named(p, i, c)
@@ -1875,7 +1899,7 @@ end
 # `\u{N}` with N in decimal, because temper_regex_push_code writes it in
 # decimal: this file is both ends of that escape.
 def temper_rx_ucode(p: List, i: Int, acc: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 125 do
     true -> [[:lit, acc], i + 1]
     _ -> temper_rx_ucode(p, i + 1, acc * 10 + (c - 48))
@@ -1973,7 +1997,7 @@ def temper_rx_unescape_r(c: Int) -> Int do
 end
 
 def temper_rx_set(p: List, i: Int) -> List do
-  neg = elem(p, i) == 94
+  neg = temper_rx_at(p, i) == 94
   j = case neg do
     true -> i + 1
     _ -> i
@@ -1982,7 +2006,7 @@ def temper_rx_set(p: List, i: Int) -> List do
 end
 
 def temper_rx_set_loop(p: List, i: Int, acc: List, neg: Bool) -> List do
-  case elem(p, i) == 93 do
+  case temper_rx_at(p, i) == 93 do
     true -> [[:set, neg, acc], i + 1]
     _ -> temper_rx_set_item(p, i, acc, neg)
   end
@@ -1992,7 +2016,7 @@ end
 # `[\s\-]` is a class and a literal side by side, and a range endpoint is not
 # the only thing that can appear between the brackets.
 def temper_rx_set_item(p: List, i: Int, acc: List, neg: Bool) -> List do
-  case elem(p, i) == 92 do
+  case temper_rx_at(p, i) == 92 do
     true -> temper_rx_set_backslash(p, i + 1, acc, neg)
     _ -> temper_rx_set_range(p, i, acc, neg)
   end
@@ -2002,7 +2026,7 @@ end
 # because Blimp's `and` evaluates both sides: `false and elem(nil, 0)` raises.
 # A `case` arm is the only thing here that does not run until it is chosen.
 def temper_rx_set_backslash(p: List, i: Int, acc: List, neg: Bool) -> List do
-  cls = temper_rx_class_of(elem(p, i))
+  cls = temper_rx_class_of(temper_rx_at(p, i))
   r = case nil?(cls) do
     true -> temper_rx_set_range(p, i - 1, acc, neg)
     _ -> temper_rx_set_class(p, i, acc, neg, cls)
@@ -2032,7 +2056,7 @@ def temper_rx_set_range(p: List, i: Int, acc: List, neg: Bool) -> List do
 end
 
 def temper_rx_set_code(p: List, i: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 92 do
     true -> temper_rx_set_escape(p, i + 1)
     _ -> [c, i + 1]
@@ -2041,7 +2065,7 @@ def temper_rx_set_code(p: List, i: Int) -> List do
 end
 
 def temper_rx_set_escape(p: List, i: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 117 do
     true -> temper_rx_set_ucode(p, i + 2, 0)
     _ -> temper_rx_set_plain(p, i, c)
@@ -2050,7 +2074,7 @@ def temper_rx_set_escape(p: List, i: Int) -> List do
 end
 
 def temper_rx_set_ucode(p: List, i: Int, acc: Int) -> List do
-  c = elem(p, i)
+  c = temper_rx_at(p, i)
   r = case c == 125 do
     true -> [acc, i + 1]
     _ -> temper_rx_set_ucode(p, i + 1, acc * 10 + (c - 48))

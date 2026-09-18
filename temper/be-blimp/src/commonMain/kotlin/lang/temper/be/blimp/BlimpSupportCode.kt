@@ -766,8 +766,11 @@ internal object AwakeUpon : BlimpInlineSupportCode("awakeUpon") {
 /**
  * The value an awaited promise settled with.
  *
- * A handler scope cannot span a suspension point, so a broken promise reaches
- * the state machine's failure branch rather than unwinding through it.
+ * A broken promise bubbles. That is the opposite of what be-cpp's comment two
+ * lines above `throw TemperBubble()` says, and copying it here was wrong: this
+ * backend declares [BubbleBranchStrategy.Exceptions], so the `orelse` the
+ * coroutine lowering writes *is* a try/catch, and the bubble is what it
+ * catches.
  */
 internal object GetPromiseResultSync : BlimpInlineSupportCode("getPromiseResultSync") {
     override val preludeHelpers: Set<String> get() = needsCore
