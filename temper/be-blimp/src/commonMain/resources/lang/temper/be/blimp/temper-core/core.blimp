@@ -1495,6 +1495,94 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── Promises ────────────────────────────────
+#
+# Single-threaded, which is what be-rust does too: there is no scheduler and
+# no queue. A promise holds the one generator waiting on it, and completing it
+# resumes that generator right there.
+#
+# The waiting generator is *replied* rather than resumed inside the handler.
+# Resuming it there would re-enter the actor while it is still in the middle
+# of a `become`, and the state the handler was about to commit would be the
+# state the resumed code sees.
+
+actor TemperPromise do
+  state settled: Bool :: false
+  state broken: Bool :: false
+  state held: Any :: nil
+  state waiting: Any :: nil
+
+  # "The API doesn't prevent multiple resolution, but the first one wins",
+  # says the test, and be-cpp's `breakpromise` guards the same way. A second
+  # settle is not an error; it is ignored, and it wakes nothing, because the
+  # first one already did.
+  on :settle(v: Any, brk: Bool) do
+    case settled do
+      true -> reply nil
+      _ ->
+        w = waiting
+        become settled: true, broken: brk, held: v, waiting: nil
+        reply w
+    end
+  end
+
+  on :onReady(task: Any) do
+    case settled do
+      true -> reply task
+      _ ->
+        become waiting: task
+        reply nil
+    end
+  end
+
+  on :isBroken do reply broken end
+  on :held do reply held end
+end
+
+def temper_new_promise() -> Any do
+  spawn TemperPromise
+end
+
+# The builder and the promise are the same actor. Temper keeps them apart so
+# that handing out a promise does not hand out the right to complete it; Blimp
+# has no way to express that, and pretending otherwise with a wrapper would
+# cost an actor per promise and protect nothing.
+def temper_promise_of(b: Any) -> Any do
+  b
+end
+
+def temper_promise_complete(b: Any, v: Any) -> Any do
+  temper_promise_resume(b <- :settle(v, false))
+end
+
+def temper_promise_break(b: Any) -> Any do
+  temper_promise_resume(b <- :settle(nil, true))
+end
+
+def temper_promise_resume(task: Any) -> Any do
+  case nil?(task) do
+    true -> nil
+    _ -> temper_generator_next(task)
+  end
+end
+
+def temper_awake_upon(p: Any, gen: Any) -> Any do
+  temper_promise_resume(p <- :onReady(gen))
+end
+
+def temper_promise_result(p: Any) -> Any do
+  case p <- :isBroken do
+    true -> temper_bubble()
+    _ -> p <- :held
+  end
+end
+
+# `async { ... }` builds a generator and drives it. Whatever it awaits arranges
+# its own resumption through `temper_awake_upon`.
+def temper_async(factory: Any) -> Any do
+  temper_generator_next(factory())
+end
+
 # ── Regex: the pattern parser ────────────────────────
 #
 # Temper's RegexFormatter renders a RegexNode tree into a pattern string in

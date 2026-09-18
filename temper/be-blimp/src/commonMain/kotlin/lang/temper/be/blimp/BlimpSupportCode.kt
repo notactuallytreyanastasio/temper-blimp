@@ -452,6 +452,13 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type SafeGenerator.nextSafe()", "temper_generator_next", needsCore),
         BlimpConnectedSend("core.type Generator.get done()", "done"),
         BlimpConnectedSend("core.type Generator.close()", "close"),
+        // Promises. The builder and the promise it hands out are one actor:
+        // nothing distinguishes them but which methods a caller knows about,
+        // and a caller with the builder can always reach the promise anyway.
+        BlimpConnectedCall("core.type PromiseBuilder.constructor()", "temper_new_promise", needsCore),
+        BlimpConnectedCall("core.type PromiseBuilder.get promise()", "temper_promise_of", needsCore),
+        BlimpConnectedCall("core.type PromiseBuilder.complete()", "temper_promise_complete", needsCore),
+        BlimpConnectedCall("core.type PromiseBuilder.breakPromise()", "temper_promise_break", needsCore),
         // Regex. The formatter builds a pattern string in whatever dialect the
         // backend asks for, and then hands it back to be compiled; these are
         // the two ends of that.
@@ -729,6 +736,7 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     // The coroutine lowering removes every `yield`, but what it leaves is a
     // step function with no memory, so it still asks the backend to adapt one
     // into a generator.
+    call(BuiltinOperatorId.Async, "temper_async", needsCore),
     call(BuiltinOperatorId.AdaptGeneratorFn, "temper_adapt_generator_fn", needsCore),
     call(BuiltinOperatorId.SafeAdaptGeneratorFn, "temper_adapt_generator_fn", needsCore),
 ).associateBy { it.builtinOperatorId!! }
@@ -741,6 +749,33 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
  * has not been taught about one says so at build time; Blimp has a real typed
  * gap that carries the directive to whoever fills it.
  */
+/**
+ * `await p` becomes "resume this generator when p settles".
+ *
+ * Matched by name rather than by [BuiltinOperatorId] because the coroutine
+ * lowering invents it: it is a [CoroHelperSpecials] function, not a builtin
+ * operator, and be-rust matches it the same way.
+ */
+internal object AwakeUpon : BlimpInlineSupportCode("awakeUpon") {
+    override val preludeHelpers: Set<String> get() = needsCore
+
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName("temper_awake_upon", null)), args = args)
+}
+
+/**
+ * The value an awaited promise settled with.
+ *
+ * A handler scope cannot span a suspension point, so a broken promise reaches
+ * the state machine's failure branch rather than unwinding through it.
+ */
+internal object GetPromiseResultSync : BlimpInlineSupportCode("getPromiseResultSync") {
+    override val preludeHelpers: Set<String> get() = needsCore
+
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
+        Blimp.Call(pos, callee = Blimp.Id(pos, OutName("temper_promise_result", null)), args = args)
+}
+
 internal object Hole : BlimpInlineSupportCode("hole") {
     override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
         Blimp.Hole(pos, directive = (args.firstOrNull() as? Blimp.StringLit)?.value ?: "fill this in")
