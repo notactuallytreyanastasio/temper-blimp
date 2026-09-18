@@ -1504,34 +1504,72 @@ end
 actor TemperBitVector do
   state bits: List :: []
 
-  on :init(n: Int) do
-    bits = temper_falses(n, [])
-    become bits: bits
-    reply nil
+  # A bit the vector has never stored reads as false, which core.temper spells
+  # out: "if a bit has not previously been set then it is assumed to be false".
+  on :get(i: Int) do
+    b = case i >= 0 and i < length(bits) do
+      true -> elem(bits, i)
+      _ -> false
+    end
+    reply b
   end
 
   on :set(i: Int, b: Bool) do
-    bits = set_at(bits, i, b)
+    bits = temper_bits_set(bits, i, b)
     become bits: bits
     reply nil
   end
+end
 
-  on :get(i: Int) do
-    reply elem(bits, i)
+def temper_bits_set(bits: List, i: Int, b: Bool) -> List do
+  case i < length(bits) do
+    true -> set_at(bits, i, b)
+    _ -> temper_bits_set_past_end(bits, i, b)
+  end
+end
+
+# Storage only has to grow for a true bit, since everything past the end is
+# already false.
+def temper_bits_set_past_end(bits: List, i: Int, b: Bool) -> List do
+  case b do
+    true -> set_at(temper_falses(i + 1 - length(bits), bits), i, true)
+    _ -> bits
   end
 end
 
 def temper_falses(n: Int, acc: List) -> List do
+  acc ++ temper_falses_n(n)
+end
+
+# Appending one false at a time copies the whole list each time, which makes
+# filling n bits quadratic -- 50,000 of them exhausted a 2 GB heap. Building
+# half and joining it to itself costs n + n/2 + n/4 + ... slots, so it is
+# linear, and the same list object is read twice rather than walked twice.
+def temper_falses_n(n: Int) -> List do
   case n <= 0 do
-    true -> acc
-    _ -> temper_falses(n - 1, append(acc, false))
+    true -> []
+    _ -> temper_falses_halves(n)
   end
 end
 
-def temper_new_bit_vector(n: Int) -> Any do
-  v = spawn TemperBitVector
-  v <- :init(n)
-  v
+def temper_falses_halves(n: Int) -> List do
+  half = temper_falses_n(n / 2)
+  joined = half ++ half
+  case rem(n, 2) == 0 do
+    true -> joined
+    _ -> append(joined, false)
+  end
+end
+
+# The capacity is discarded. It is a promise about memory, and Blimp has no
+# packed representation to spend it on -- but the reason not to honour it
+# anyway is that `append` copies the list, so pre-filling n bits one at a time
+# is quadratic and `new DenseBitVector(50000)` exhausts a 2 GB heap before the
+# program starts. Since `get` past the end already answers false and `set`
+# grows on demand, an empty list is observationally identical and O(1).
+def temper_new_bit_vector(capacity: Int) -> Any do
+  ignore = capacity
+  spawn TemperBitVector
 end
 
 # ── Deque ────────────────────────────────────────────
@@ -1548,12 +1586,6 @@ actor TemperDeque do
     reply nil
   end
 
-  on :addFirst(x: Any) do
-    items = [x] ++ items
-    become items: items
-    reply nil
-  end
-
   on :removeFirst do
     first = head(items)
     items = tail(items)
@@ -1561,19 +1593,8 @@ actor TemperDeque do
     reply first
   end
 
-  on :removeLast do
-    last = elem(items, length(items) - 1)
-    items = temper_list_slice(items, 0, length(items) - 1)
-    become items: items
-    reply last
-  end
-
   on :isEmpty do
     reply empty?(items)
-  end
-
-  on :length do
-    reply length(items)
   end
 
   on :items do
