@@ -107,6 +107,49 @@ class BlimpBackendTest {
     }
 
     /**
+     * A setter and a method named after it answer different messages.
+     *
+     * They did not. Both came out `on :set_value`, in one actor, and Blimp
+     * takes the first handler whose name matches -- so the method was
+     * unreachable and nothing said so.
+     */
+    @Test
+    fun setterAndAMethodThatLooksLikeOne() {
+        assertGeneratedBlimp(
+            temper = """
+                |export class Box(public var inner: Int) {
+                |  public set_inner(v: Int): Int { v }
+                |}
+            """.trimMargin(),
+            blimp = """
+                |actor Box do
+                |  state inner__0: Any :: nil
+                |  on :__temper_types do
+                |    reply[:Box]
+                |  end
+                |  on :set_inner(v__0: Any) do
+                |    reply v__0
+                |  end
+                |  on :__new(inner__1: Any) do
+                |    inner__0 = inner__1
+                |    become inner__0: inner__0
+                |    reply nil
+                |  end
+                |  on :inner do
+                |    reply inner__0
+                |  end
+                |  on :__set_inner(newInner__0: Any) do
+                |    inner__0 = newInner__0
+                |    become inner__0: inner__0
+                |    reply nil
+                |  end
+                |end
+                |
+            """.trimMargin(),
+        )
+    }
+
+    /**
      * A Blimp actor stands alone: there is no super to call, so a subclass
      * carries its parent's handlers rather than inheriting them. `Animal`
      * emits nothing of its own -- an interface is not an actor -- and its
