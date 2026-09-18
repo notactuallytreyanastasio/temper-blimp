@@ -1660,12 +1660,32 @@ def temper_date_today() -> List do
   temper_civil_from_days(now() / 86400)
 end
 
+# A leading minus is a negative year, not a fourth field, so it comes off
+# before the split. Going through the constructor is what makes "2023-02-30"
+# bubble; splitting straight into a triple accepted it.
 def temper_date_from_iso(s: String) -> List do
+  r = case temper_leading_minus(s) do
+    true -> temper_date_from_iso_parts(slice(s, 1, length(s)), 0 - 1)
+    _ -> temper_date_from_iso_parts(s, 1)
+  end
+  r
+end
+
+def temper_date_from_iso_parts(s: String, sign: Int) -> List do
   parts = split(s, "-")
-  case length(parts) == 3 do
-    true -> [to_int(elem(parts, 0)), to_int(elem(parts, 1)), to_int(elem(parts, 2))]
+  r = case length(parts) == 3 do
+    true -> temper_new_date(
+      sign * to_int(elem(parts, 0)),
+      to_int(elem(parts, 1)),
+      to_int(elem(parts, 2)),
+    )
     _ -> temper_bubble()
   end
+  r
+end
+
+def temper_leading_minus(s: String) -> Bool do
+  length(s) > 0 and char_at(s, 0) == "-"
 end
 
 # Four digits for the year even when it is 12, which is the case that catches
@@ -1677,10 +1697,21 @@ def temper_date_to_string(d: List) -> String do
   )
 end
 
+# `padTo` puts the sign outside the zeros, so year -1 is "-0001". Padding the
+# whole string instead gives "00-1", which is the shape of the two-digit-year
+# bug this test exists to catch, only at the other end of the range.
 def temper_pad(s: String, width: Int) -> String do
+  r = case temper_leading_minus(s) do
+    true -> concat("-", temper_pad_digits(slice(s, 1, length(s)), width))
+    _ -> temper_pad_digits(s, width)
+  end
+  r
+end
+
+def temper_pad_digits(s: String, width: Int) -> String do
   case length(s) >= width do
     true -> s
-    _ -> temper_pad(concat("0", s), width)
+    _ -> temper_pad_digits(concat("0", s), width)
   end
 end
 
