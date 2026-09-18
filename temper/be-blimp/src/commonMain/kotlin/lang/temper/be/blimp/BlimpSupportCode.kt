@@ -443,6 +443,16 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("core.type StringBuilder.clear()", "clear"),
         BlimpConnectedSend("core.type StringBuilder.toString()", "toString"),
         BlimpConnectedSend("core.type StringBuilder.get end()", "end"),
+        // Date, which is a list rather than an actor: nothing mutates one.
+        BlimpConnectedCall("std/temporal.type Date.constructor()", "temper_new_date", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.year", "temper_date_year", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.month", "temper_date_month", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.day", "temper_date_day", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.get dayOfWeek()", "temper_date_day_of_week", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.toString()", "temper_date_to_string", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.today()", "temper_date_today", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.fromIsoString()", "temper_date_from_iso", needsCore),
+        BlimpConnectedCall("std/temporal.type Date.yearsBetween()", "temper_date_years_between", needsCore),
         // Same shape for a bit vector: an actor over a list of booleans.
         BlimpConnectedCall("core.type DenseBitVector.constructor()", "temper_new_bit_vector", needsCore),
         BlimpConnectedSend("core.type DenseBitVector.get()", "get"),
