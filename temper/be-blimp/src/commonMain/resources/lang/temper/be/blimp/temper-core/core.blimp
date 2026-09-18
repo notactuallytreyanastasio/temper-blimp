@@ -444,6 +444,56 @@ def temper_identity(x: Any) -> Any do
   x
 end
 
+# Temper's split, which Blimp's `split` is not: Blimp runs consecutive
+# separators together and counts bytes, while Temper keeps every empty piece
+# and an empty separator cuts between code points.
+#
+#     " g  h i".split(" ")   ["", "g", "", "h", "i"]
+#     "def".split("")        ["d", "e", "f"]
+#     "".split("")           []
+#     "\u{1F30D}".split("")         ["\u{1F30D}"]     -- four bytes, one piece
+def temper_string_split(s: String, sep: String) -> List do
+  case sep == "" do
+    true -> temper_string_code_points(s)
+    _ -> temper_string_split_loop(s, sep, [])
+  end
+end
+
+def temper_string_split_loop(s: String, sep: String, acc: List) -> List do
+  i = temper_index_of_from(s, sep, 0)
+  case i < 0 do
+    true -> acc ++ [s]
+    _ -> temper_string_split_loop(
+      slice(s, i + length(sep), length(s) - i - length(sep)),
+      sep,
+      acc ++ [slice(s, 0, i)]
+    )
+  end
+end
+
+def temper_index_of_from(s: String, sub: String, i: Int) -> Int do
+  case i + length(sub) > length(s) do
+    true -> 0 - 1
+    _ -> case slice(s, i, length(sub)) == sub do
+      true -> i
+      _ -> temper_index_of_from(s, sub, i + 1)
+    end
+  end
+end
+
+def temper_string_code_points(s: String) -> List do
+  temper_code_points_loop(s, 0, [])
+end
+
+def temper_code_points_loop(s: String, i: Int, acc: List) -> List do
+  case i >= length(s) do
+    true -> acc
+    _ ->
+      n = u8_seq_len(char_code(s, i))
+      temper_code_points_loop(s, i + n, acc ++ [slice(s, i, n)])
+  end
+end
+
 # ── List operations ──────────────────────────────────
 #
 # Blimp has map, reduce and sort but no filter or join, and its `reduce` takes
@@ -649,26 +699,35 @@ actor TemperListBuilder do
     reply nil
   end
 
-  on :splice_from(index: Int) do
-    items = temper_list_slice(items, 0, index)
+  # splice answers the items it removed, and takes nil for either bound: no
+  # index means from the start, no count means to the end. The index is
+  # clamped, so `splice(length, nil, xs)` appends.
+  on :splice_from(index: Any) do
+    start = temper_splice_start(index, length(items))
+    removed = temper_list_slice(items, start, length(items))
+    items = temper_list_slice(items, 0, start)
     become items: items
-    reply nil
+    reply removed
   end
 
-  on :splice_range(index: Int, removeCount: Int) do
-    before = temper_list_slice(items, 0, index)
-    after = temper_list_slice(items, index + removeCount, length(items))
-    items = before ++ after
+  on :splice_range(index: Any, removeCount: Any) do
+    start = temper_splice_start(index, length(items))
+    stop = temper_splice_stop(start, removeCount, length(items))
+    removed = temper_list_slice(items, start, stop)
+    items = temper_list_slice(items, 0, start) ++ temper_list_slice(items, stop, length(items))
     become items: items
-    reply nil
+    reply removed
   end
 
-  on :splice(index: Int, removeCount: Int, newValues: Any) do
-    before = temper_list_slice(items, 0, index)
-    after = temper_list_slice(items, index + removeCount, length(items))
+  on :splice(index: Any, removeCount: Any, newValues: Any) do
+    start = temper_splice_start(index, length(items))
+    stop = temper_splice_stop(start, removeCount, length(items))
+    removed = temper_list_slice(items, start, stop)
+    before = temper_list_slice(items, 0, start)
+    after = temper_list_slice(items, stop, length(items))
     items = (before ++ temper_items(newValues)) ++ after
     become items: items
-    reply nil
+    reply removed
   end
 
   on :addAll(xs: Any) do
@@ -720,9 +779,50 @@ end
 # A sequence argument may be a plain list or a builder actor; this is what
 # lets one set of operations serve both.
 def temper_items(x: Any) -> List do
-  case type_of(x) == :actor_ref do
-    true -> x <- :items
-    _ -> x
+  case nil?(x) do
+    true -> []
+    _ -> case type_of(x) == :actor_ref do
+      true -> x <- :items
+      _ -> x
+    end
+  end
+end
+
+# The bounds of a splice, which take nil for "from the start" and "to the end"
+# and clamp to what is there. Negative counts remove nothing, as in every other
+# backend's temper-core.
+def temper_splice_start(index: Any, n: Int) -> Int do
+  case nil?(index) or index < 0 do
+    true -> 0
+    _ -> case index > n do
+      true -> n
+      _ -> index
+    end
+  end
+end
+
+def temper_splice_stop(start: Int, removeCount: Any, n: Int) -> Int do
+  count = case nil?(removeCount) do
+    true -> n
+    _ -> case removeCount < 0 do
+      true -> 0
+      _ -> removeCount
+    end
+  end
+  stop = start + count
+  case stop > n do
+    true -> n
+    _ -> stop
+  end
+end
+
+# `getOr` answers the fallback for an index that is not there, where `get`
+# bubbles.
+def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
+  items = temper_items(source)
+  case index < 0 or index >= length(items) do
+    true -> fallback
+    _ -> elem(items, index)
   end
 end
 
@@ -731,8 +831,15 @@ def temper_new_list_builder() -> Any do
 end
 
 # Blimp's slice is strings only, so lists get their own.
+# A negative start is clamped, not counted from the end: Temper's slice takes
+# an exclusive end and clamps both bounds, so `slice(-2, 0)` is empty rather
+# than whatever `elem` makes of a negative index.
 def temper_list_slice(items: List, start: Int, stop: Int) -> List do
-  temper_list_slice_loop(items, start, stop, start, [])
+  from = case start < 0 do
+    true -> 0
+    _ -> start
+  end
+  temper_list_slice_loop(items, from, stop, from, [])
 end
 
 def temper_list_slice_loop(items: List, start: Int, stop: Int, i: Int, acc: List) -> List do
