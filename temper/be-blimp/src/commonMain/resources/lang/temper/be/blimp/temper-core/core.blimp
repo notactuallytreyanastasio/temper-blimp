@@ -1712,8 +1712,11 @@ end
 # matches a brace -- a wrong answer rather than a crash, which is the shape of
 # bug this project has a rule against.
 #
-# A `{` not followed by a digit is a literal brace, which is what an escaped
-# one would decode to.
+# The digit test after `{` is belt and braces rather than the load-bearing
+# thing an earlier comment here claimed. A literal brace is on both formatters'
+# escape list, so it arrives as `\{` and never reaches this, and
+# `regexCompileFormatted` has exactly one caller. A bare `{` can only be a
+# repeat.
 def temper_rx_rep_brace(p: List, i: Int, node: Any, c: Int) -> List do
   r = case c == 123 do
     true -> temper_rx_rep_maybe_bound(p, i, node)
@@ -1766,9 +1769,16 @@ def temper_rx_rep_comma(p: List, i: Int, node: Any, lo: Int) -> List do
   r
 end
 
+# `Repeat` validates nothing, so `new Repeat(x, 1, 0)` is constructible and
+# formats as `{1,0}`. Compiling it gives a pattern that cannot match anything,
+# ever, and answers false rather than saying why. Node and Python both refuse
+# it where it is written; this refuses it where it is read.
 def temper_rx_rep_hi(p: List, i: Int, node: Any, lo: Int) -> List do
   hi = temper_rx_rep_num(p, i, 0)
-  temper_rx_rep_loop(p, elem(hi, 1) + 1, [:rep, node, lo, elem(hi, 0)])
+  case elem(hi, 0) < lo do
+    true -> bubble concat("regex: a repeat of at least ", concat(to_string(lo), concat(" and at most ", concat(to_string(elem(hi, 0)), " can never match"))))
+    _ -> temper_rx_rep_loop(p, elem(hi, 1) + 1, [:rep, node, lo, elem(hi, 0)])
+  end
 end
 
 def temper_rx_atom(p: List, i: Int) -> List do
@@ -2066,120 +2076,106 @@ end
 
 def temper_rx_match(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
   tag = elem(node, 0)
-  r = case tag == :lit do
+  case tag == :lit do
     true -> temper_rx_m_lit(node, cps, pos, caps, k)
     _ -> temper_rx_m_set(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_lit(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case pos < length(cps) and elem(cps, pos) == elem(node, 1) do
+  case pos < length(cps) and elem(cps, pos) == elem(node, 1) do
     true -> k(pos + 1, caps)
     _ -> nil
   end
-  r
 end
 
 def temper_rx_m_set(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :set do
+  case tag == :set do
     true -> temper_rx_m_test(temper_rx_in_set(node, cps, pos), cps, pos, caps, k)
     _ -> temper_rx_m_cls(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_cls(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :cls do
+  case tag == :cls do
     true -> temper_rx_m_test(temper_rx_in_cls(node, cps, pos), cps, pos, caps, k)
     _ -> temper_rx_m_any(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 # "In default mode, matches any Unicode code point except newline", which
 # std/regex says about Dot and this did not do.
 def temper_rx_m_any(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :any do
+  case tag == :any do
     true -> temper_rx_m_test(pos < length(cps) and elem(cps, pos) != 10, cps, pos, caps, k)
     _ -> temper_rx_m_bol(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 # Consumes one code point when `ok`.
 def temper_rx_m_test(ok: Bool, cps: List, pos: Int, caps: List, k: Any) -> Any do
   ignore = cps
-  r = case ok do
+  case ok do
     true -> k(pos + 1, caps)
     _ -> nil
   end
-  r
 end
 
 # Consumes nothing.
 def temper_rx_m_here(ok: Bool, pos: Int, caps: List, k: Any) -> Any do
-  r = case ok do
+  case ok do
     true -> k(pos, caps)
     _ -> nil
   end
-  r
 end
 
 def temper_rx_m_bol(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :bol do
+  case tag == :bol do
     true -> temper_rx_m_here(pos == 0, pos, caps, k)
     _ -> temper_rx_m_eol(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_eol(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :eol do
+  case tag == :eol do
     true -> temper_rx_m_here(pos == length(cps), pos, caps, k)
     _ -> temper_rx_m_wordb(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_wordb(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :wordb do
+  case tag == :wordb do
     true -> temper_rx_m_here(temper_rx_at_wordb(cps, pos), pos, caps, k)
     _ -> temper_rx_m_seq(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_seq(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :seq do
+  case tag == :seq do
     true -> temper_rx_seq_at(elem(node, 1), 0, cps, pos, caps, k)
     _ -> temper_rx_m_alt(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_alt(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :alt do
+  case tag == :alt do
     true -> temper_rx_alt_at(elem(node, 1), 0, cps, pos, caps, k)
     _ -> temper_rx_m_rep(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_rep(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :rep do
+  case tag == :rep do
     true -> temper_rx_rep_at(elem(node, 1), elem(node, 2), elem(node, 3), 0, cps, pos, caps, k)
     _ -> temper_rx_m_cap(node, tag, cps, pos, caps, k)
   end
-  r
 end
 
 def temper_rx_m_cap(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case tag == :cap do
+  case tag == :cap do
     true -> temper_rx_cap_at(node, cps, pos, caps, k)
     _ -> bubble :regex_unknown_node
   end
-  r
 end
 
 def temper_rx_cap_at(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
