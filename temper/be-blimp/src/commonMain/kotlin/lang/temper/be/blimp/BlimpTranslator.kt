@@ -399,6 +399,11 @@ internal class BlimpTranslator(
                 }
             }
 
+            // The frontend rejected this; see [untranslatable].
+            is TmpL.GarbageStatement -> out.add(
+                Blimp.ExprStatement(statement.pos, untranslatable(statement.pos, statement.diagnostic)),
+            )
+
             else -> TODO("statement: $statement")
         }
     }
@@ -462,6 +467,8 @@ internal class BlimpTranslator(
             right = translateExpression(expression.operand),
         )
         is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
+        is TmpL.GarbageExpression -> untranslatable(expression.pos, expression.diagnostic)
+
         else -> TODO("expression: $expression")
     }
 
@@ -705,8 +712,28 @@ internal class BlimpTranslator(
                 ),
             )
 
-            else -> TODO("callable: $fn")
+            // Every callable arm is covered once garbage is one of them, which
+            // is why there is no `else` here and there is one above.
+            is TmpL.GarbageCallable -> untranslatable(call.pos, fn.diagnostic)
         }
+
+    /**
+     * A node the frontend refused, as a call that raises where it stood.
+     *
+     * semantics/broken exists to push bad Temper at every backend and check it
+     * degrades rather than crashing, so `TODO()` is the wrong answer here: it
+     * takes the translator down and reports nothing. The diagnostic becomes the
+     * argument, so reading the generated file says what was wrong.
+     */
+    private fun untranslatable(pos: Position, diagnostic: TmpL.Diagnostic?): Blimp.Expr {
+        preludeHelpers.add(TEMPER_UNTRANSLATABLE)
+        preludeHelpers.add(TEMPER_BUBBLE)
+        return Blimp.Call(
+            pos,
+            callee = Blimp.Id(pos, OutName(TEMPER_UNTRANSLATABLE, null)),
+            args = listOf(Blimp.StringLit(pos, "untranslatable at " + pos.loc + ":" + pos.left)),
+        )
+    }
 
     private fun translateActual(actual: TmpL.Actual): Blimp.Expr = when (actual) {
         is TmpL.Expression -> translateExpression(actual)
@@ -2311,8 +2338,13 @@ internal class BlimpTranslator(
             // Blimp's nil covers both, and RepresentationOfVoid.ReifyVoid means
             // a void value really does flow around.
             TNull, TVoid -> Blimp.NilLit(pos)
+            // A type used as a value. Blimp has no first-class types and the
+            // programs that produce one do not look at it -- classes/angle-call
+            // returns `Void` from a function and throws the result away -- so
+            // nil stands for it, as it does in be-lua.
+            TType -> Blimp.NilLit(pos)
             is TClass, TClosureRecord, TFunction, TList, TListBuilder, TMap, TMapBuilder,
-            TProblem, TStageRange, TSymbol, TType,
+            TProblem, TStageRange, TSymbol,
             -> TODO("value of type $tag: $expression")
         }
     }

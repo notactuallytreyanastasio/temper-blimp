@@ -675,6 +675,19 @@ def temper_bubble() -> Any do
   end
 end
 
+# Code the frontend refused, translated anyway.
+#
+# semantics/broken pushes deliberately bad Temper through every backend to
+# check it degrades rather than crashing, so a `TODO()` in the translator is
+# the wrong answer: it takes the compiler down and reports nothing. The reason
+# rides along as the argument, where reading main.blimp shows it, and the
+# program stops here if it ever reaches this point.
+def temper_untranslatable(why: String) -> Any do
+  case true do
+    true -> bubble :untranslatable
+  end
+end
+
 def temper_panic() -> Any do
   case true do
     true -> bubble :temper_panic

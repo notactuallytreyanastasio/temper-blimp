@@ -554,6 +554,9 @@ private val bitHelpers = setOf(
 
 /** temper-core helpers that raise from anywhere, including a plain `def` body. */
 internal const val TEMPER_BUBBLE = "temper_bubble"
+
+/** temper-core's stand-in for a node the frontend refused. */
+internal const val TEMPER_UNTRANSLATABLE = "temper_untranslatable"
 internal const val TEMPER_PANIC = "temper_panic"
 
 /** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
