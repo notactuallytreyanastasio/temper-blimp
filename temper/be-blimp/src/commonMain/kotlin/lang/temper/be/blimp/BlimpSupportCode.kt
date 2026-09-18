@@ -491,14 +491,24 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     call(BuiltinOperatorId.CmpStrStr, TEMPER_CMP, cmpHelpers),
     call(BuiltinOperatorId.CmpGeneric, TEMPER_CMP, cmpHelpers),
     call(BuiltinOperatorId.ModFltFlt, "temper_fmod", setOf("temper_fmod")),
-    call(BuiltinOperatorId.PowFltFlt, "temper_pow", setOf("temper_pow", "temper_pow_whole", TEMPER_BUBBLE)),
+    call(BuiltinOperatorId.PowFltFlt, "temper_pow", setOf("temper_pow")),
     infix(BuiltinOperatorId.NeGeneric, BlimpOperator.NotEquals),
     // Boolean negation is `!`; `not` is a builtin function, not an operator.
     prefix(BuiltinOperatorId.BooleanNegation, BlimpOperator.Not),
     // StrCat is variadic -- `"a" ++ b ++ "c"` arrives as one call with three
     // arguments -- and Blimp's `concat` builtin is too, so the operator form
     // would silently drop everything past the second.
-    call(BuiltinOperatorId.StrCat, "concat"),
+    //
+    // One argument is not a concatenation, and `concat(x)` is a TypeError in
+    // Blimp, so a one-piece interpolation -- `"${zero}"`, which the frontend
+    // has already turned into a String -- would stop the program.
+    BlimpOperatorSupportCode("concat", BuiltinOperatorId.StrCat, setOf()) { pos, args ->
+        when (args.size) {
+            0 -> Blimp.StringLit(pos, "")
+            1 -> args[0]
+            else -> Blimp.Call(pos, callee = Blimp.Id(pos, OutName("concat", null)), args = args)
+        }
+    },
     // Blimp has no bitwise operators; temper-core does these arithmetically.
     call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
     call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),
