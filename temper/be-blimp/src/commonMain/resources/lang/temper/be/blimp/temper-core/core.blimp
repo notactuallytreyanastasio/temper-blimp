@@ -1704,71 +1704,98 @@ end
 # questions. myers-diff is the program that leans on it.
 
 actor TemperBitVector do
-  state bits: List :: []
+  # A list of chunks, each a list of `temper_bits_chunk` booleans. One flat
+  # list would be simpler and is what this was: `set_at` copies the list it is
+  # given, so setting n bits one at a time copied n elements n times. Myers
+  # diff sets bits one at a time, and 16,000 of them exhausted a 2 GB heap.
+  # Chunking makes a set copy the chunk list plus one chunk instead of
+  # everything -- about 4,000 elements at a million bits rather than a million.
+  state chunks: List :: []
 
   # A bit the vector has never stored reads as false, which core.temper spells
   # out: "if a bit has not previously been set then it is assumed to be false".
   on :get(i: Int) do
-    b = case i >= 0 and i < length(bits) do
-      true -> elem(bits, i)
+    b = case i >= 0 and i / temper_bits_chunk() < length(chunks) do
+      true -> elem(elem(chunks, i / temper_bits_chunk()), rem(i, temper_bits_chunk()))
       _ -> false
     end
     reply b
   end
 
   on :set(i: Int, b: Bool) do
-    bits = temper_bits_set(bits, i, b)
-    become bits: bits
+    chunks = temper_bits_set(chunks, i, b)
+    become chunks: chunks
     reply nil
   end
 end
 
-def temper_bits_set(bits: List, i: Int, b: Bool) -> List do
-  case i < length(bits) do
-    true -> set_at(bits, i, b)
-    _ -> temper_bits_set_past_end(bits, i, b)
+def temper_bits_chunk() -> Int do
+  256
+end
+
+# A negative index is not "past the end": `core.temper` reaches
+# `ListBuilder.set` with it, which panics, so this bubbles rather than
+# clamping. Blimp's `set_at` clamps, which silently wrote bit 0.
+def temper_bits_set(chunks: List, i: Int, b: Bool) -> List do
+  r = case i < 0 do
+    true -> temper_bubble()
+    _ -> temper_bits_set_at(chunks, i, b)
   end
+  r
+end
+
+def temper_bits_set_at(chunks: List, i: Int, b: Bool) -> List do
+  ci = i / temper_bits_chunk()
+  grown = temper_bits_grow(chunks, ci, b)
+  r = case ci < length(grown) do
+    true -> set_at(grown, ci, set_at(elem(grown, ci), rem(i, temper_bits_chunk()), b))
+    _ -> grown
+  end
+  r
 end
 
 # Storage only has to grow for a true bit, since everything past the end is
 # already false.
-def temper_bits_set_past_end(bits: List, i: Int, b: Bool) -> List do
-  case b do
-    true -> set_at(temper_falses(i + 1 - length(bits), bits), i, true)
-    _ -> bits
+def temper_bits_grow(chunks: List, ci: Int, b: Bool) -> List do
+  r = case ci < length(chunks) or not(b) do
+    true -> chunks
+    _ -> chunks ++ temper_repeat(temper_falses_n(temper_bits_chunk()), ci + 1 - length(chunks))
   end
+  r
 end
 
-def temper_falses(n: Int, acc: List) -> List do
-  acc ++ temper_falses_n(n)
-end
-
-# Appending one false at a time copies the whole list each time, which makes
-# filling n bits quadratic -- 50,000 of them exhausted a 2 GB heap. Building
-# half and joining it to itself costs n + n/2 + n/4 + ... slots, so it is
-# linear, and the same list object is read twice rather than walked twice.
+# Appending one element at a time copies the whole list each time, which makes
+# building n of them quadratic. Building half and joining it to itself costs
+# n + n/2 + n/4 + ... slots, so it is linear, and the same list object is read
+# twice rather than walked twice.
 def temper_falses_n(n: Int) -> List do
-  case n <= 0 do
-    true -> []
-    _ -> temper_falses_halves(n)
-  end
+  temper_repeat(false, n)
 end
 
-def temper_falses_halves(n: Int) -> List do
-  half = temper_falses_n(n / 2)
-  joined = half ++ half
-  case rem(n, 2) == 0 do
-    true -> joined
-    _ -> append(joined, false)
+def temper_repeat(x: Any, n: Int) -> List do
+  r = case n <= 0 do
+    true -> []
+    _ -> temper_repeat_halves(x, n)
   end
+  r
+end
+
+def temper_repeat_halves(x: Any, n: Int) -> List do
+  half = temper_repeat(x, n / 2)
+  joined = half ++ half
+  r = case rem(n, 2) == 0 do
+    true -> joined
+    _ -> append(joined, x)
+  end
+  r
 end
 
 # The capacity is discarded. It is a promise about memory, and Blimp has no
 # packed representation to spend it on -- but the reason not to honour it
-# anyway is that `append` copies the list, so pre-filling n bits one at a time
-# is quadratic and `new DenseBitVector(50000)` exhausts a 2 GB heap before the
-# program starts. Since `get` past the end already answers false and `set`
-# grows on demand, an empty list is observationally identical and O(1).
+# anyway is that pre-filling would allocate every chunk up front for a vector
+# that may only ever touch a few. Since `get` past the end already answers
+# false and `set` grows on demand, an empty list is observationally identical
+# and O(1).
 def temper_new_bit_vector(capacity: Int) -> Any do
   ignore = capacity
   spawn TemperBitVector
