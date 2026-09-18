@@ -443,6 +443,18 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("core.type StringBuilder.clear()", "clear"),
         BlimpConnectedSend("core.type StringBuilder.toString()", "toString"),
         BlimpConnectedSend("core.type StringBuilder.get end()", "end"),
+        // Same shape for a bit vector: an actor over a list of booleans.
+        BlimpConnectedCall("core.type DenseBitVector.constructor()", "temper_new_bit_vector", needsCore),
+        BlimpConnectedSend("core.type DenseBitVector.get()", "get"),
+        BlimpConnectedSend("core.type DenseBitVector.set()", "set"),
+        // A Deque is an actor too.
+        BlimpConnectedCall("core.type Deque.constructor()", "temper_new_deque", needsCore),
+        BlimpConnectedSend("core.type Deque.add()", "add"),
+        BlimpConnectedSend("core.type Deque.addFirst()", "addFirst"),
+        BlimpConnectedSend("core.type Deque.removeFirst()", "removeFirst"),
+        BlimpConnectedSend("core.type Deque.removeLast()", "removeLast"),
+        BlimpConnectedSend("core.type Deque.get isEmpty()", "isEmpty"),
+        BlimpConnectedSend("core.type Deque.get length()", "length"),
         // A ListBuilder is an actor, so its methods are sends.
         BlimpConnectedCall("core.type ListBuilder.constructor()", "temper_new_list_builder", needsCore),
         BlimpConnectedSend("core.type ListBuilder.add()", "add", mapOf(2 to "add_at")),
