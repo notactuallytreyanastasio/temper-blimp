@@ -18,8 +18,8 @@ private val blimpKeywords = setOf(
 )
 
 /**
- * Blimp's builtin functions and actor templates, read off the `reg.register`
- * calls in the interpreter's `builtins.zig`.
+ * Blimp's builtin functions, read off the `reg.register` calls in the
+ * interpreter's `builtins.zig`.
  *
  * These are not keywords, so nothing stops a program from defining one -- and
  * a definition wins. That is what a Temper library exporting `length` did: the
@@ -33,9 +33,13 @@ private val blimpKeywords = setOf(
  * caller's locals, so a local called `length` hides the builtin from anything
  * it calls. Every name goes through [BlimpNames.sanitize], so every name is
  * covered.
+ *
+ * `nil?` and `empty?` are registered too and are deliberately absent:
+ * [notIdentifierChar] rewrites `?` to `_` before this set is consulted, so a
+ * Temper name can never come out spelled like either of them.
  */
 private val blimpBuiltins = setOf(
-    "Counter", "Item", "Timer", "abs", "acos", "actor_name", "append", "asin", "assert",
+    "abs", "acos", "actor_name", "append", "asin", "assert",
     "assert_eq", "assert_ne", "atan", "atan2", "blockquote", "bold", "button", "canvas", "ceil",
     "char_at", "char_code", "code", "code_block", "concat", "contains", "cos", "cosh", "divider",
     "downcase", "elem", "exit", "exp", "expm1", "flat", "floor", "fork", "form", "from_char_code",
