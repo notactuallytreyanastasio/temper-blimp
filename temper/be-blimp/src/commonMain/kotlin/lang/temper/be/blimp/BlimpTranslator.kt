@@ -770,11 +770,12 @@ internal class BlimpTranslator(
      * degrades rather than crashing, so `TODO()` is the wrong answer here: it
      * takes the translator down and reports nothing.
      *
-     * The argument is the position and not the diagnostic. Reading
+     * The argument is the position and not the diagnostic: reading
      * `diagnostic.text` throws NoClassDefFoundError for
      * `ResolutionProblem$ArgumentListSizeMismatch` in the test JVM and takes
      * the whole suite with it, which is unexplained and not this commit's
-     * business. `Position.left` is a character offset, not a line.
+     * business. `Position.left` is a character offset, not a line, and the
+     * bubble carries it to whoever catches it.
      */
     private fun untranslatable(pos: Position): Blimp.Expr {
         preludeHelpers.add(TEMPER_UNTRANSLATABLE)
