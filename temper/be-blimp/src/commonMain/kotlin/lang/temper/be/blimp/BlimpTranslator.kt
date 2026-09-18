@@ -1561,8 +1561,15 @@ internal class BlimpTranslator(
                     message = Blimp.Atom(pos, propertyName),
                 )
             }
-            is TmpL.TypeSubject ->
-                Blimp.Id(pos, OutName(staticName(typeSubjectName(subject), propertyName), null))
+            is TmpL.TypeSubject -> when (
+                val constant = builtinStatics["${typeSubjectName(subject)}.$propertyName"]
+            ) {
+                // `static_Float64__pi` is a name nothing defines: Float64 is
+                // not a type this program declared, so there is no flattened
+                // static to refer to. The value is the value.
+                null -> Blimp.Id(pos, OutName(staticName(typeSubjectName(subject), propertyName), null))
+                else -> Blimp.NumberLit(pos, constant)
+            }
             is TmpL.Expression -> Blimp.Send(
                 pos,
                 target = translateExpression(subject),
@@ -1570,6 +1577,17 @@ internal class BlimpTranslator(
             )
         }
     }
+
+    /**
+     * Constants Temper reads off a builtin type, which Blimp has no name for.
+     *
+     * Every backend spells these out: be-lua reaches for `math.pi`, and Blimp
+     * has no maths module, so the literal is what is left.
+     */
+    private val builtinStatics = mapOf(
+        "Float64.pi" to kotlin.math.PI,
+        "Float64.e" to kotlin.math.E,
+    )
 
     private fun translateSetProperty(statement: TmpL.SetProperty, out: MutableList<Blimp.Statement>) {
         val pos = statement.pos
@@ -2171,11 +2189,37 @@ internal class BlimpTranslator(
 
     private fun freshLocal(pos: Position, hint: String): Blimp.Id = Blimp.Id(pos, names.gensym(hint))
 
+    /**
+     * A float literal, or a call for the three values Blimp cannot write.
+     *
+     * Blimp has no syntax for an infinity or a NaN and refuses to divide by
+     * zero, so `(0.0 / 0.0)` -- which is what a NaN used to be rendered as --
+     * stops the program rather than producing one. temper-core builds them by
+     * overflowing instead.
+     */
+    private fun floatLiteral(pos: Position, value: Double): Blimp.Expr = when {
+        value.isNaN() -> preludeCallTo(pos, "temper_float_nan")
+        value == Double.POSITIVE_INFINITY -> preludeCallTo(pos, "temper_float_inf")
+        value == Double.NEGATIVE_INFINITY -> Blimp.Operation(
+            pos,
+            left = Blimp.NumberLit(pos, 0.0),
+            operator = Blimp.Operator(pos, BlimpOperator.Subtraction),
+            right = preludeCallTo(pos, "temper_float_inf"),
+        )
+        else -> Blimp.NumberLit(pos, value)
+    }
+
+    private fun preludeCallTo(pos: Position, helper: String): Blimp.Expr {
+        preludeHelpers.add(helper)
+        preludeHelpers.add("temper_float_inf")
+        return Blimp.Call(pos, callee = Blimp.Id(pos, OutName(helper, null)), args = listOf())
+    }
+
     private fun translateValueReference(expression: TmpL.ValueReference): Blimp.Expr {
         val pos = expression.pos
         return when (val tag = expression.value.typeTag) {
             TBoolean -> Blimp.BoolLit(pos, TBoolean.unpack(expression.value))
-            TFloat64 -> Blimp.NumberLit(pos, TFloat64.unpack(expression.value))
+            TFloat64 -> floatLiteral(pos, TFloat64.unpack(expression.value))
             TInt -> Blimp.NumberLit(pos, TInt.unpack(expression.value))
             TInt64 -> Blimp.NumberLit(pos, TInt64.unpack(expression.value))
             is TString -> Blimp.StringLit(pos, TString.unpack(expression.value))

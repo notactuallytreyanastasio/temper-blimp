@@ -173,9 +173,23 @@ internal class BlimpConnectedCall(
      * constructor turns up bare and with a list of `Pair`s.
      */
     private val byArity: Map<Int, String> = mapOf(),
+    /**
+     * Arity to fill out with `nil`, for a member with optional parameters.
+     *
+     * Temper drops the optionals the caller left out, so `near` arrives with
+     * two arguments or four, while the helper is one `def` of fixed arity that
+     * tests each optional for nil. This is [BlimpTranslator.padOptional] for
+     * the connected calls, which do not go through it.
+     */
+    private val padTo: Int = 0,
 ) : BlimpInlineSupportCode(connectedKey) {
-    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
-        Blimp.Call(pos, callee = Blimp.Id(pos, OutName(byArity[args.size] ?: fn, null)), args = args)
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree {
+        val padded = when {
+            args.size >= padTo -> args
+            else -> args + List(padTo - args.size) { Blimp.NilLit(pos) }
+        }
+        return Blimp.Call(pos, callee = Blimp.Id(pos, OutName(byArity[args.size] ?: fn, null)), args = padded)
+    }
 }
 
 /** temper-core's checked narrowing from Int64 to Int32: bubbles rather than wrapping. */
@@ -190,6 +204,14 @@ internal const val TEMPER_NEW_MAP_FROM = "temper_new_map_from"
 
 /** The temper-core helper that restores a whole float's decimal point. */
 internal const val TEMPER_FLOAT_TO_STRING = "temper_float_to_string"
+
+/** What an infinity, a NaN and a signed zero need, none of which Blimp writes. */
+internal val floatEdgeHelpers = setOf(
+    "temper_float_div",
+    "temper_float_inf",
+    "temper_float_nan",
+    "temper_float_is_negative",
+)
 
 /** Every `@connected` key be-blimp understands, keyed by the key string. */
 internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
@@ -206,6 +228,44 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             "core.type Float64.toString()",
             TEMPER_FLOAT_TO_STRING,
             preludeHelpers = setOf(TEMPER_FLOAT_TO_STRING),
+        ),
+        // Float maths. The interpreter grew these as builtins; before that a
+        // `.sqrt()` went out as a message send and a Float is not an actor:
+        //
+        //     normSquared__2(x__6, y__7) <- :sqrt()
+        //     -- NOT AN ACTOR ──────────────────────────────────
+        BlimpConnectedCall("core.type Float64.sqrt()", "sqrt"),
+        BlimpConnectedCall("core.type Float64.exp()", "exp"),
+        BlimpConnectedCall("core.type Float64.expm1()", "expm1"),
+        BlimpConnectedCall("core.type Float64.log()", "log"),
+        BlimpConnectedCall("core.type Float64.log1p()", "log1p"),
+        BlimpConnectedCall("core.type Float64.log2()", "log2"),
+        BlimpConnectedCall("core.type Float64.log10()", "log10"),
+        BlimpConnectedCall("core.type Float64.sin()", "sin"),
+        BlimpConnectedCall("core.type Float64.cos()", "cos"),
+        BlimpConnectedCall("core.type Float64.tan()", "tan"),
+        BlimpConnectedCall("core.type Float64.asin()", "asin"),
+        BlimpConnectedCall("core.type Float64.acos()", "acos"),
+        BlimpConnectedCall("core.type Float64.atan()", "atan"),
+        BlimpConnectedCall("core.type Float64.sinh()", "sinh"),
+        BlimpConnectedCall("core.type Float64.cosh()", "cosh"),
+        BlimpConnectedCall("core.type Float64.tanh()", "tanh"),
+        BlimpConnectedCall("core.type Float64.abs()", "abs"),
+        BlimpConnectedCall("core.type Float64.atan2()", "atan2"),
+        // These four answer an Int in Blimp and a Float in Temper, and Blimp's
+        // min and max take Ints only -- the checker rejects a Float before the
+        // program runs -- so they go through temper-core.
+        BlimpConnectedCall("core.type Float64.ceil()", "temper_float_ceil", setOf("temper_float_ceil")),
+        BlimpConnectedCall("core.type Float64.floor()", "temper_float_floor", setOf("temper_float_floor")),
+        BlimpConnectedCall("core.type Float64.round()", "temper_float_round", setOf("temper_float_round")),
+        BlimpConnectedCall("core.type Float64.sign()", "temper_float_sign", setOf("temper_float_sign")),
+        BlimpConnectedCall("core.type Float64.min()", "temper_float_min", setOf("temper_float_min", "temper_float_nan", "temper_float_inf")),
+        BlimpConnectedCall("core.type Float64.max()", "temper_float_max", setOf("temper_float_max", "temper_float_nan", "temper_float_inf")),
+        BlimpConnectedCall(
+            "core.type Float64.near()",
+            "temper_float_near",
+            setOf("temper_float_near", "temper_float_max", "temper_float_nan", "temper_float_inf"),
+            padTo = 4,
         ),
         // Int
         // `ignore(x)` evaluates x for effect and discards it. Blimp has no such
@@ -462,7 +522,8 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.PlusFltFlt, BlimpOperator.Addition),
     infix(BuiltinOperatorId.MinusFltFlt, BlimpOperator.Subtraction),
     infix(BuiltinOperatorId.TimesFltFlt, BlimpOperator.Multiplication),
-    infix(BuiltinOperatorId.DivFltFlt, BlimpOperator.Division),
+    // Not the operator: Blimp raises on a zero divisor and IEEE does not.
+    call(BuiltinOperatorId.DivFltFlt, "temper_float_div", floatEdgeHelpers),
     prefix(BuiltinOperatorId.MinusFlt, BlimpOperator.Negate),
     // Comparisons. Blimp compares Int, Float and String with the same operators.
     infix(BuiltinOperatorId.LtIntInt, BlimpOperator.LessThan),

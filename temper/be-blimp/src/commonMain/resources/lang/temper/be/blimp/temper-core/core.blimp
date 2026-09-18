@@ -30,9 +30,53 @@ end
 # Temper prints a whole float with its decimal point; Blimp does not.
 def temper_float_to_string(f: Float) -> String do
   s = to_string(f)
-  case contains(s, ".") do
-    true -> s
-    _ -> concat(s, ".0")
+  case s == "nan" do
+    true -> "NaN"
+    _ -> case s == "inf" do
+      true -> "Infinity"
+      _ -> case s == "-inf" do
+        true -> "-Infinity"
+        _ -> case contains(s, ".") do
+          true -> s
+          _ -> concat(s, ".0")
+        end
+      end
+    end
+  end
+end
+
+# Blimp has no way to write an infinity, and refuses to divide by zero, so the
+# two values IEEE arithmetic produces at the edges are built by overflowing.
+def temper_float_inf() -> Float do
+  1e308 * 1e10
+end
+
+def temper_float_nan() -> Float do
+  temper_float_inf() - temper_float_inf()
+end
+
+# `f < 0.0` is false for a negative zero, and the sign of a zero decides the
+# sign of the infinity it divides into. The printed form still carries it.
+def temper_float_is_negative(f: Float) -> Bool do
+  case f < 0.0 do
+    true -> true
+    _ -> slice(to_string(f), 0, 1) == "-"
+  end
+end
+
+# Temper's `/` on Floats is IEEE: by zero it gives an infinity, and 0.0 / 0.0
+# gives a NaN. Blimp's `/` raises on a zero divisor, which is a reasonable
+# thing for a language to do and not what Temper means.
+def temper_float_div(a: Float, b: Float) -> Float do
+  case b == 0.0 do
+    true -> case a == 0.0 or a != a do
+      true -> temper_float_nan()
+      _ -> case temper_float_is_negative(a) != temper_float_is_negative(b) do
+        true -> 0.0 - temper_float_inf()
+        _ -> temper_float_inf()
+      end
+    end
+    _ -> a / b
   end
 end
 
@@ -503,6 +547,72 @@ def temper_fmod(a: Float, b: Float) -> Float do
     _ -> floor(q)
   end
   a - (b * t)
+end
+
+# Temper's Float64.near, which is Python's math.isclose: within a relative
+# tolerance of the larger magnitude, or within an absolute one. A nil argument
+# is one the caller left out, so the defaults live here.
+def temper_float_near(x: Float, y: Float, rel_tol: Any, abs_tol: Any) -> Bool do
+  r = case nil?(rel_tol) do
+    true -> 1e-9
+    _ -> rel_tol
+  end
+  a = case nil?(abs_tol) do
+    true -> 0.0
+    _ -> abs_tol
+  end
+  margin = temper_float_max(temper_float_max(abs(x), abs(y)) * r, a)
+  abs(x - y) <= margin
+end
+
+# Temper's ceil, floor and round answer a Float; Blimp's answer an Int, and
+# adding 0.0 is how an Int becomes one.
+def temper_float_ceil(f: Float) -> Float do
+  ceil(f) + 0.0
+end
+
+def temper_float_floor(f: Float) -> Float do
+  floor(f) + 0.0
+end
+
+def temper_float_round(f: Float) -> Float do
+  round(f) + 0.0
+end
+
+# Blimp's min and max are Int-only, and its checker says so before the program
+# runs.
+# A NaN in either position wins, which is what Temper says and what a plain
+# comparison does not do: every comparison with a NaN is false.
+def temper_float_min(a: Float, b: Float) -> Float do
+  case a != a or b != b do
+    true -> temper_float_nan()
+    _ -> case a < b do
+      true -> a
+      _ -> b
+    end
+  end
+end
+
+def temper_float_max(a: Float, b: Float) -> Float do
+  case a != a or b != b do
+    true -> temper_float_nan()
+    _ -> case a > b do
+      true -> a
+      _ -> b
+    end
+  end
+end
+
+# -1.0, 1.0, or the zero itself: Temper keeps the sign of a signed zero, so
+# `(-0.0).sign()` is -0.0 and not 0.0.
+def temper_float_sign(f: Float) -> Float do
+  case f > 0.0 do
+    true -> 1.0
+    _ -> case f < 0.0 do
+      true -> 0.0 - 1.0
+      _ -> f
+    end
+  end
 end
 
 # `**`. Blimp's pow takes a fractional exponent, so this is a rename; it used
