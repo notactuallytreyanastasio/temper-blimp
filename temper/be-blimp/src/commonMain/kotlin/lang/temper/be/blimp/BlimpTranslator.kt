@@ -1675,18 +1675,23 @@ internal class BlimpTranslator(
      * and Blimp accepts it without complaint -- the first wins and the rest
      * are unreachable. [setterMessage] removes the case that turned up in
      * practice; this catches whatever is left, including two methods whose
-     * names sanitize to the same atom.
+     * names sanitize to the same atom, and `__set_value` written out as a
+     * method name beside a `var value`.
+     *
+     * It aborts the translation rather than emitting a marker. The first
+     * version of this called [untranslatable], which is a *runtime* bubble --
+     * so the colliding handlers still went into the actor and the program
+     * only complained if it happened to run that line. This is the shape the
+     * rest of the file already uses for a case it cannot translate.
      */
     private fun reportDuplicateHandlers(decl: TmpL.TypeDeclaration, handlers: List<Blimp.Handler>) {
         val seen = mutableSetOf<String>()
         for (handler in handlers) {
             val name = handler.message.text
             if (!seen.add(name)) {
-                mainStatements.add(
-                    Blimp.ExprStatement(
-                        decl.pos,
-                        untranslatable(handler.pos),
-                    ),
+                TODO(
+                    "two handlers answering :$name in actor ${nameText(decl.name)}" +
+                        " at ${handler.pos.loc} offset ${handler.pos.left}",
                 )
             }
         }
