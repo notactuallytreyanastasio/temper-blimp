@@ -58,6 +58,8 @@ object BlimpSupportNetwork : SupportNetwork {
         // correct behaviour, so match the name first to catch it here.
         builtin.name == "hole" -> Hole
         builtin.name == PureVirtual.connectedKey -> PureVirtual
+        builtin.name == AwakeUpon.connectedKey -> AwakeUpon
+        builtin.name == GetPromiseResultSync.connectedKey -> GetPromiseResultSync
         else -> builtin.builtinOperatorId?.let { blimpOperators[it] }
     }
 
