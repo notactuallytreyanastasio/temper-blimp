@@ -713,8 +713,15 @@ end
 # from anywhere. Both are catchable with try/catch.
 
 def temper_bubble() -> Any do
+  temper_raise(:temper_bubble)
+end
+
+# `bubble` only parses as an arm's body or inside a handler, never as a bare
+# statement in a `def`, so everything that wants to raise a value from
+# somewhere else goes through this arm.
+def temper_raise(why: Any) -> Any do
   case true do
-    true -> bubble :temper_bubble
+    true -> bubble why
   end
 end
 
@@ -1532,7 +1539,7 @@ def temper_net_send(url: String, method: String, body: Any, mime: Any) -> Any do
   try do
     temper_net_send_or_bubble(url, method, body, mime)
   catch e do
-    temper_net_broken()
+    temper_net_broken_because(e)
   end
 end
 
@@ -1546,8 +1553,12 @@ def temper_net_send_or_bubble(url: String, method: String, body: Any, mime: Any)
 end
 
 def temper_net_broken() -> Any do
+  temper_net_broken_because("net: the host could not be reached")
+end
+
+def temper_net_broken_because(why: Any) -> Any do
   p = temper_new_promise()
-  temper_promise_break(p)
+  temper_promise_break_with(p, why)
   p
 end
 
@@ -1618,7 +1629,11 @@ def temper_url_scheme(scheme: String, rest: String) -> List do
   end
 end
 
-def temper_url_authority(rest: String) -> List do
+# A `#fragment` never goes on the wire -- it is for whoever opened the URL --
+# and sending it as part of the request target asks the server for a path that
+# does not exist. A `?query` does go, and has to survive the split.
+def temper_url_authority(whole: String) -> List do
+  rest = elem(split(whole, "#"), 0)
   cut = split(rest, "/")
   hostport = elem(cut, 0)
   path = case length(cut) > 1 do
@@ -1642,12 +1657,27 @@ end
 def temper_url_split_port(hostport: String, path: String) -> List do
   hp = split(hostport, ":")
   port = case length(hp) > 1 do
-    true -> temper_parse_int32(elem(hp, 1), 10)
+    true -> temper_url_port(elem(hp, 1))
     _ -> 80
   end
   case empty?(elem(hp, 0)) do
     true -> bubble "net: the URL has no host"
     _ -> [elem(hp, 0), port, path, hostport]
+  end
+end
+
+# `temper_parse_int32` bubbles a bare `:temper_bubble` on anything that is not
+# a number, so `http://host:port` said nothing about which part was wrong. And
+# a port outside 1..65535 is not a port.
+def temper_url_port(text: String) -> Int do
+  n = try do
+    temper_parse_int32(text, 10)
+  catch e do
+    temper_raise(concat("net: the port is not a number: ", text))
+  end
+  case n >= 1 and n <= 65535 do
+    true -> n
+    _ -> bubble concat("net: the port is out of range: ", text)
   end
 end
 
@@ -1823,7 +1853,16 @@ def temper_promise_complete(b: Any, v: Any) -> Any do
 end
 
 def temper_promise_break(b: Any) -> Any do
-  temper_promise_resume(b <- :settle(nil, true))
+  temper_promise_break_with(b, nil)
+end
+
+# A broken promise can carry why it broke. `breakPromise()` from Temper has no
+# argument and so carries nothing, but temper-core breaks promises of its own
+# -- a URL it cannot parse, a host it cannot reach -- and those reasons went
+# nowhere: every message written for them was unreachable, because the only
+# thing reading a broken promise raised a bare `:temper_bubble`.
+def temper_promise_break_with(b: Any, why: Any) -> Any do
+  temper_promise_resume(b <- :settle(why, true))
 end
 
 def temper_promise_resume(tasks: List) -> Any do
@@ -1841,8 +1880,15 @@ end
 
 def temper_promise_result(p: Any) -> Any do
   case p <- :isBroken do
-    true -> temper_bubble()
+    true -> temper_promise_raise(p <- :held)
     _ -> p <- :held
+  end
+end
+
+def temper_promise_raise(why: Any) -> Any do
+  case nil?(why) do
+    true -> temper_bubble()
+    _ -> bubble why
   end
 end
 
