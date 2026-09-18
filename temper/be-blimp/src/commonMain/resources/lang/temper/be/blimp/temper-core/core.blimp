@@ -1525,13 +1525,12 @@ end
 
 def temper_rx_alt_more(p: List, i: Int, acc: List) -> List do
   more = i < length(p) and elem(p, i) == 124
-  r = case more do
+  case more do
     true ->
       nxt = temper_rx_seq(p, i + 1)
       temper_rx_alt_more(p, elem(nxt, 1), append(acc, elem(nxt, 0)))
     _ -> temper_rx_one_or(acc, i, :alt)
   end
-  r
 end
 
 # A sequence or alternation of one is that one, so the common pattern does not
@@ -1550,13 +1549,12 @@ end
 
 def temper_rx_seq_loop(p: List, i: Int, acc: List) -> List do
   stop = i >= length(p) or elem(p, i) == 124 or elem(p, i) == 41
-  r = case stop do
+  case stop do
     true -> temper_rx_seq_end(acc, i)
     _ ->
       one = temper_rx_rep(p, i)
       temper_rx_seq_loop(p, elem(one, 1), append(acc, elem(one, 0)))
   end
-  r
 end
 
 # An empty branch matches the empty string, which `(^|,)` needs when neither
@@ -1639,11 +1637,10 @@ def temper_rx_rep_bound(p: List, i: Int, node: Any) -> List do
 end
 
 def temper_rx_rep_num(p: List, i: Int, acc: Int) -> List do
-  r = case temper_rx_digit_at(p, i) do
+  case temper_rx_digit_at(p, i) do
     true -> temper_rx_rep_num(p, i + 1, acc * 10 + (elem(p, i) - 48))
     _ -> [acc, i]
   end
-  r
 end
 
 def temper_rx_rep_after_lo(p: List, i: Int, node: Any, lo: Int) -> List do
@@ -1868,22 +1865,20 @@ def temper_rx_set(p: List, i: Int) -> List do
 end
 
 def temper_rx_set_loop(p: List, i: Int, acc: List, neg: Bool) -> List do
-  r = case elem(p, i) == 93 do
+  case elem(p, i) == 93 do
     true -> [[:set, neg, acc], i + 1]
     _ -> temper_rx_set_item(p, i, acc, neg)
   end
-  r
 end
 
 # A set item is either [:range, lo, hi] or a whole [:cls, kind, negated]:
 # `[\s\-]` is a class and a literal side by side, and a range endpoint is not
 # the only thing that can appear between the brackets.
 def temper_rx_set_item(p: List, i: Int, acc: List, neg: Bool) -> List do
-  r = case elem(p, i) == 92 do
+  case elem(p, i) == 92 do
     true -> temper_rx_set_backslash(p, i + 1, acc, neg)
     _ -> temper_rx_set_range(p, i, acc, neg)
   end
-  r
 end
 
 # Split in two rather than written as `not(nil?(cls)) and elem(cls, 0) == :cls`,
@@ -1911,13 +1906,12 @@ def temper_rx_set_range(p: List, i: Int, acc: List, neg: Bool) -> List do
   lo = elem(first, 0)
   j = elem(first, 1)
   ranged = j + 1 < length(p) and elem(p, j) == 45 and elem(p, j + 1) != 93
-  r = case ranged do
+  case ranged do
     true ->
       second = temper_rx_set_code(p, j + 1)
       temper_rx_set_loop(p, elem(second, 1), append(acc, [:range, lo, elem(second, 0)]), neg)
     _ -> temper_rx_set_loop(p, j, append(acc, [:range, lo, lo]), neg)
   end
-  r
 end
 
 def temper_rx_set_code(p: List, i: Int) -> List do
@@ -2090,17 +2084,16 @@ def temper_rx_cap_at(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any 
 end
 
 def temper_rx_seq_at(nodes: List, idx: Int, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case idx >= length(nodes) do
+  case idx >= length(nodes) do
     true -> k(pos, caps)
     _ -> temper_rx_match(elem(nodes, idx), cps, pos, caps, fn (p2: Int, c2: List) -> Any do
       temper_rx_seq_at(nodes, idx + 1, cps, p2, c2, k)
     end)
   end
-  r
 end
 
 def temper_rx_alt_at(branches: List, idx: Int, cps: List, pos: Int, caps: List, k: Any) -> Any do
-  r = case idx >= length(branches) do
+  case idx >= length(branches) do
     true -> nil
     _ ->
       got = temper_rx_match(elem(branches, idx), cps, pos, caps, k)
@@ -2109,7 +2102,6 @@ def temper_rx_alt_at(branches: List, idx: Int, cps: List, pos: Int, caps: List, 
         _ -> got
       end
   end
-  r
 end
 
 # Greedy: take one more if the body still can, and fall back to stopping.
@@ -2127,19 +2119,17 @@ def temper_rx_rep_at(node: Any, lo: Int, hi: Int, n: Int, cps: List, pos: Int, c
     end)
     _ -> nil
   end
-  r = case nil?(more) do
+  case nil?(more) do
     true -> temper_rx_m_here(n >= lo, pos, caps, k)
     _ -> more
   end
-  r
 end
 
 def temper_rx_rep_step(node: Any, lo: Int, hi: Int, n: Int, pos: Int, p2: Int, cps: List, c2: List, k: Any) -> Any do
-  r = case p2 == pos do
+  case p2 == pos do
     true -> temper_rx_m_here(n + 1 >= lo, p2, c2, k)
     _ -> temper_rx_rep_at(node, lo, hi, n + 1, cps, p2, c2, k)
   end
-  r
 end
 
 def temper_rx_in_set(node: Any, cps: List, pos: Int) -> Bool do
@@ -2151,19 +2141,17 @@ def temper_rx_in_set(node: Any, cps: List, pos: Int) -> Bool do
 end
 
 def temper_rx_ranges_hit(pairs: List, i: Int, c: Int) -> Bool do
-  r = case i >= length(pairs) do
+  case i >= length(pairs) do
     true -> false
     _ -> temper_rx_range_or_next(pairs, i, c)
   end
-  r
 end
 
 def temper_rx_range_or_next(pairs: List, i: Int, c: Int) -> Bool do
-  r = case temper_rx_item_hit(elem(pairs, i), c) do
+  case temper_rx_item_hit(elem(pairs, i), c) do
     true -> true
     _ -> temper_rx_ranges_hit(pairs, i + 1, c)
   end
-  r
 end
 
 def temper_rx_item_hit(item: List, c: Int) -> Bool do
@@ -2221,22 +2209,20 @@ end
 
 # The leftmost match at or after `at`, as [begin, end, captures], or nil.
 def temper_rx_search(node: Any, cps: List, at: Int) -> Any do
-  r = case at > length(cps) do
+  case at > length(cps) do
     true -> nil
     _ -> temper_rx_search_here(node, cps, at)
   end
-  r
 end
 
 def temper_rx_search_here(node: Any, cps: List, at: Int) -> Any do
   got = temper_rx_match(node, cps, at, [], fn (p2: Int, c2: List) -> Any do
     [p2, c2]
   end)
-  r = case nil?(got) do
+  case nil?(got) do
     true -> temper_rx_search(node, cps, at + 1)
     _ -> [at, elem(got, 0), elem(got, 1)]
   end
-  r
 end
 
 # ── Regex: what Temper asks for ──────────────────────
@@ -2277,11 +2263,10 @@ def temper_rx_offsets(s: String) -> List do
 end
 
 def temper_rx_offsets_loop(s: String, i: Int, acc: List) -> List do
-  r = case i >= length(s) do
+  case i >= length(s) do
     true -> append(acc, length(s))
     _ -> temper_rx_offsets_loop(s, i + u8_seq_len(char_code(s, i)), append(acc, i))
   end
-  r
 end
 
 def temper_rx_cp_index(offs: List, byte_at: Int) -> Int do
@@ -2289,11 +2274,10 @@ def temper_rx_cp_index(offs: List, byte_at: Int) -> Int do
 end
 
 def temper_rx_cp_index_loop(offs: List, i: Int, byte_at: Int) -> Int do
-  r = case i >= length(offs) or elem(offs, i) >= byte_at do
+  case i >= length(offs) or elem(offs, i) >= byte_at do
     true -> i
     _ -> temper_rx_cp_index_loop(offs, i + 1, byte_at)
   end
-  r
 end
 
 def temper_rx_slice(s: String, offs: List, from: Int, to: Int) -> String do
@@ -2391,33 +2375,30 @@ end
 
 def temper_rx_replace_loop(node: Any, text: String, cps: List, offs: List, fmt: Any, pos: Int, acc: String) -> String do
   m = temper_rx_search(node, cps, pos)
-  r = case nil?(m) do
+  case nil?(m) do
     true -> concat(acc, temper_rx_slice(text, offs, pos, length(cps)))
     _ -> temper_rx_replace_one(node, text, cps, offs, fmt, pos, acc, m)
   end
-  r
 end
 
 def temper_rx_replace_one(node: Any, text: String, cps: List, offs: List, fmt: Any, pos: Int, acc: String, m: List) -> String do
   before = temper_rx_slice(text, offs, pos, elem(m, 0))
   piece = fmt(temper_rx_build_match(text, offs, m))
   so_far = concat(acc, concat(before, piece))
-  r = case elem(m, 1) == elem(m, 0) do
+  case elem(m, 1) == elem(m, 0) do
     true -> temper_rx_replace_empty(node, text, cps, offs, fmt, elem(m, 0), so_far)
     _ -> temper_rx_replace_loop(node, text, cps, offs, fmt, elem(m, 1), so_far)
   end
-  r
 end
 
 # A zero-length match has to be stepped over by hand, or the next search finds
 # the same one and the loop never ends. `(^|,)\s*` matches the empty string at
 # the start of every list this is used on.
 def temper_rx_replace_empty(node: Any, text: String, cps: List, offs: List, fmt: Any, at: Int, acc: String) -> String do
-  r = case at >= length(cps) do
+  case at >= length(cps) do
     true -> acc
     _ -> temper_rx_replace_loop(node, text, cps, offs, fmt, at + 1, concat(acc, temper_rx_slice(text, offs, at, at + 1)))
   end
-  r
 end
 
 def temper_regex_split(me: Any, compiled: Any, text: String, refs: Any) -> List do
@@ -2433,19 +2414,17 @@ end
 # `split("(?:x)*", "abc")` answered [""] instead of ["a", "b", "c"].
 def temper_rx_split_loop(node: Any, text: String, cps: List, offs: List, at: Int, from: Int, acc: List) -> List do
   m = temper_rx_search(node, cps, from)
-  r = case nil?(m) do
+  case nil?(m) do
     true -> append(acc, temper_rx_slice(text, offs, at, length(cps)))
     _ -> temper_rx_split_one(node, text, cps, offs, at, acc, m)
   end
-  r
 end
 
 def temper_rx_split_one(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, m: List) -> List do
-  r = case elem(m, 1) == elem(m, 0) do
+  case elem(m, 1) == elem(m, 0) do
     true -> temper_rx_split_empty(node, text, cps, offs, at, acc, elem(m, 0))
     _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 1), elem(m, 1), append(acc, temper_rx_slice(text, offs, at, elem(m, 0))))
   end
-  r
 end
 
 # An empty separator at the start of the piece splits nothing, so it is looked
@@ -2453,19 +2432,17 @@ end
 # ["abc"] rather than ["", "abc"], which is what every other backend's split
 # does with a zero-length match at the beginning.
 def temper_rx_split_empty(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, b: Int) -> List do
-  r = case b >= length(cps) do
+  case b >= length(cps) do
     true -> append(acc, temper_rx_slice(text, offs, at, length(cps)))
     _ -> temper_rx_split_empty_at(node, text, cps, offs, at, acc, b)
   end
-  r
 end
 
 def temper_rx_split_empty_at(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, b: Int) -> List do
-  r = case b == at do
+  case b == at do
     true -> temper_rx_split_loop(node, text, cps, offs, at, b + 1, acc)
     _ -> temper_rx_split_loop(node, text, cps, offs, b, b + 1, append(acc, temper_rx_slice(text, offs, at, b)))
   end
-  r
 end
 
 # ── Generators ──────────────────────────────────
