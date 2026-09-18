@@ -703,9 +703,11 @@ end
 #
 # semantics/broken pushes deliberately bad Temper through every backend to
 # check it degrades rather than crashing, so a `TODO()` in the translator is
-# the wrong answer: it takes the compiler down and reports nothing. The reason
-# rides along as the argument, where reading main.blimp shows it, and the
-# program stops here if it ever reaches this point.
+# the wrong answer: it takes the compiler down and reports nothing.
+#
+# `why` is never read. Blimp's `bubble` takes an atom, so nothing can carry the
+# string at runtime; it is an argument so that reading main.blimp says which
+# position stopped.
 def temper_untranslatable(why: String) -> Any do
   case true do
     true -> bubble :untranslatable

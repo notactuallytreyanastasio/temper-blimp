@@ -401,7 +401,7 @@ internal class BlimpTranslator(
 
             // The frontend rejected this; see [untranslatable].
             is TmpL.GarbageStatement -> out.add(
-                Blimp.ExprStatement(statement.pos, untranslatable(statement.pos, statement.diagnostic)),
+                Blimp.ExprStatement(statement.pos, untranslatable(statement.pos)),
             )
 
             else -> TODO("statement: $statement")
@@ -467,7 +467,7 @@ internal class BlimpTranslator(
             right = translateExpression(expression.operand),
         )
         is TmpL.UncheckedNotNullExpression -> translateExpression(expression.expression)
-        is TmpL.GarbageExpression -> untranslatable(expression.pos, expression.diagnostic)
+        is TmpL.GarbageExpression -> untranslatable(expression.pos)
 
         else -> TODO("expression: $expression")
     }
@@ -714,7 +714,7 @@ internal class BlimpTranslator(
 
             // Every callable arm is covered once garbage is one of them, which
             // is why there is no `else` here and there is one above.
-            is TmpL.GarbageCallable -> untranslatable(call.pos, fn.diagnostic)
+            is TmpL.GarbageCallable -> untranslatable(call.pos)
         }
 
     /**
@@ -722,16 +722,21 @@ internal class BlimpTranslator(
      *
      * semantics/broken exists to push bad Temper at every backend and check it
      * degrades rather than crashing, so `TODO()` is the wrong answer here: it
-     * takes the translator down and reports nothing. The diagnostic becomes the
-     * argument, so reading the generated file says what was wrong.
+     * takes the translator down and reports nothing.
+     *
+     * The argument is the position and not the diagnostic. Reading
+     * `diagnostic.text` throws NoClassDefFoundError for
+     * `ResolutionProblem$ArgumentListSizeMismatch` in the test JVM and takes
+     * the whole suite with it, which is unexplained and not this commit's
+     * business. `Position.left` is a character offset, not a line.
      */
-    private fun untranslatable(pos: Position, diagnostic: TmpL.Diagnostic?): Blimp.Expr {
+    private fun untranslatable(pos: Position): Blimp.Expr {
         preludeHelpers.add(TEMPER_UNTRANSLATABLE)
         preludeHelpers.add(TEMPER_BUBBLE)
         return Blimp.Call(
             pos,
             callee = Blimp.Id(pos, OutName(TEMPER_UNTRANSLATABLE, null)),
-            args = listOf(Blimp.StringLit(pos, "untranslatable at " + pos.loc + ":" + pos.left)),
+            args = listOf(Blimp.StringLit(pos, "untranslatable at " + pos.loc + " offset " + pos.left)),
         )
     }
 
