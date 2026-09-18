@@ -232,10 +232,22 @@ internal val floatEdgeHelpers = setOf(
 )
 
 /** Every `@connected` key be-blimp understands, keyed by the key string. */
+/**
+ * `core.empty()`, the value with nothing in it.
+ *
+ * be-rust and be-py both answer an empty tuple. Blimp has tuples -- `{a, b}` --
+ * but `{}` is a type error, so nil stands in, which is already what a void
+ * value translates to here.
+ */
+internal object Empty : BlimpInlineSupportCode("core.empty()") {
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree = Blimp.NilLit(pos)
+}
+
 internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
     listOf(
         ConsoleLog,
         GetConsole,
+        Empty,
         // Blimp's to_string covers Int, Int64, Boolean and String directly.
         // With a radix it is a different function: Blimp's to_string has no
         // second parameter, and `cp.toString(16)` is how a code point prints.
