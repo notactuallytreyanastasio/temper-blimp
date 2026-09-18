@@ -705,12 +705,12 @@ end
 # check it degrades rather than crashing, so a `TODO()` in the translator is
 # the wrong answer: it takes the compiler down and reports nothing.
 #
-# `why` is never read. Blimp's `bubble` takes an atom, so nothing can carry the
-# string at runtime; it is an argument so that reading main.blimp says which
-# position stopped.
+# The reason is what the bubble carries: `bubble` takes any value, and the
+# earlier parse error that suggested otherwise was `bubble` needing to be an
+# arm's body rather than a bare statement in a `def`.
 def temper_untranslatable(why: String) -> Any do
   case true do
-    true -> bubble :untranslatable
+    true -> bubble why
   end
 end
 
