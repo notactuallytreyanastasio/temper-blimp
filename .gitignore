@@ -16,3 +16,6 @@ node_modules/
 
 # PR bodies, used with gh pr create --body-file
 .prs/
+
+# Zig package cache, fetched not vendored
+zig-pkg/
