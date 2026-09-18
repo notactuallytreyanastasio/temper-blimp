@@ -246,13 +246,23 @@ end
 # Blimp's to_string takes no radix, and `cp.toString(16)` is how the string
 # tests print a code point.
 
+# The digits come off the negative side, because `0 - n` for the most negative
+# Int is itself: negating first turned `(-2^63).toString(16)` into digits of a
+# number that was still negative.
 def temper_int_to_string_radix(n: Int, radix: Int) -> String do
   case n == 0 do
     true -> "0"
     _ -> case n < 0 do
-      true -> concat("-", temper_radix_digits(0 - n, radix, ""))
+      true -> concat("-", temper_radix_digits_neg(n, radix, ""))
       _ -> temper_radix_digits(n, radix, "")
     end
+  end
+end
+
+def temper_radix_digits_neg(n: Int, radix: Int, acc: String) -> String do
+  case n == 0 do
+    true -> acc
+    _ -> temper_radix_digits_neg(n / radix, radix, concat(temper_radix_digit(0 - rem(n, radix)), acc))
   end
 end
 
@@ -464,21 +474,27 @@ def temper_bitop(which: Atom, a: Int, b: Int) -> Int do
   temper_int32(temper_bitop_loop(which, temper_u32(a), temper_u32(b), 0, 1))
 end
 
+def temper_bit_rule(which: Atom, x: Int, y: Int) -> Int do
+  case which do
+    :and -> x * y
+    :or -> case x + y > 0 do
+      true -> 1
+      _ -> 0
+    end
+    _ -> rem(x + y, 2)
+  end
+end
+
 def temper_bitop_loop(which: Atom, a: Int, b: Int, acc: Int, place: Int) -> Int do
   case a == 0 and b == 0 do
     true -> acc
-    _ ->
-      x = rem(a, 2)
-      y = rem(b, 2)
-      bit = case which do
-        :and -> x * y
-        :or -> case x + y > 0 do
-          true -> 1
-          _ -> 0
-        end
-        _ -> rem(x + y, 2)
-      end
-      temper_bitop_loop(which, a / 2, b / 2, acc + (bit * place), place * 2)
+    _ -> temper_bitop_loop(
+      which,
+      a / 2,
+      b / 2,
+      acc + (temper_bit_rule(which, rem(a, 2), rem(b, 2)) * place),
+      place * 2
+    )
   end
 end
 
@@ -487,6 +503,64 @@ def temper_bit_or(a: Int, b: Int) -> Int do temper_bitop(:or, a, b) end
 def temper_bit_xor(a: Int, b: Int) -> Int do temper_bitop(:xor, a, b) end
 def temper_bit_not(a: Int) -> Int do temper_int32(0 - a - 1) end
 
+# ── Int64 bit operations ─────────────────────────────
+#
+# The 32-bit helpers above work on the unsigned image of a value, which needs
+# 2^32 and fits. 2^64 does not, so these split the sign bit off and put it
+# back: `temper_low63` is the value with that bit cleared, which for a negative
+# number is what subtracting the minimum computes.
+
+def temper_low63(n: Int) -> Int do
+  case n < 0 do
+    true -> n - temper_int64_min()
+    _ -> n
+  end
+end
+
+def temper_sign_bit(n: Int) -> Int do
+  case n < 0 do
+    true -> 1
+    _ -> 0
+  end
+end
+
+def temper_bitop64(which: Atom, a: Int, b: Int) -> Int do
+  low = temper_bitop_loop(which, temper_low63(a), temper_low63(b), 0, 1)
+  case temper_bit_rule(which, temper_sign_bit(a), temper_sign_bit(b)) == 1 do
+    true -> low + temper_int64_min()
+    _ -> low
+  end
+end
+
+def temper_bit_and64(a: Int, b: Int) -> Int do temper_bitop64(:and, a, b) end
+def temper_bit_or64(a: Int, b: Int) -> Int do temper_bitop64(:or, a, b) end
+def temper_bit_xor64(a: Int, b: Int) -> Int do temper_bitop64(:xor, a, b) end
+def temper_bit_not64(a: Int) -> Int do 0 - a - 1 end
+
+# The multiply wraps, which is what a left shift past the top bit means.
+def temper_shl64(a: Int, n: Int) -> Int do
+  a * temper_pow2(temper_shift_count(n, 64))
+end
+
+def temper_shr64(a: Int, n: Int) -> Int do
+  d = temper_pow2(temper_shift_count(n, 64))
+  q = a / d
+  case a < 0 and rem(a, d) != 0 do
+    true -> q - 1
+    _ -> q
+  end
+end
+
+# Logical: shift a negative right by one arithmetically, clear the sign bit the
+# copy left behind, then shift the rest of the way on a non-negative number.
+def temper_ushr64(a: Int, n: Int) -> Int do
+  k = temper_shift_count(n, 64)
+  case k == 0 or a >= 0 do
+    true -> temper_shr64(a, k)
+    _ -> temper_low63(temper_shr64(a, 1)) / temper_pow2(k - 1)
+  end
+end
+
 def temper_pow2(n: Int) -> Int do
   case n <= 0 do
     true -> 1
@@ -494,14 +568,25 @@ def temper_pow2(n: Int) -> Int do
   end
 end
 
+# A shift count is its low bits, so `x << -1` is `x << 31` at 32 bits and
+# `x << 63` at 64. Blimp's rem keeps the sign, so -1 stays -1 and 2^-1 is 1:
+# the shift quietly did nothing.
+def temper_shift_count(n: Int, width: Int) -> Int do
+  k = rem(n, width)
+  case k < 0 do
+    true -> k + width
+    _ -> k
+  end
+end
+
 def temper_shl32(a: Int, n: Int) -> Int do
-  temper_int32(a * temper_pow2(rem(n, 32)))
+  temper_int32(a * temper_pow2(temper_shift_count(n, 32)))
 end
 
 # Arithmetic shift right: Blimp's `/` truncates toward zero, so a negative
 # value needs the floor, which is what a shift means.
 def temper_shr32(a: Int, n: Int) -> Int do
-  d = temper_pow2(rem(n, 32))
+  d = temper_pow2(temper_shift_count(n, 32))
   q = a / d
   case a < 0 and rem(a, d) != 0 do
     true -> q - 1
@@ -510,7 +595,7 @@ def temper_shr32(a: Int, n: Int) -> Int do
 end
 
 def temper_ushr32(a: Int, n: Int) -> Int do
-  temper_int32(temper_u32(a) / temper_pow2(rem(n, 32)))
+  temper_int32(temper_u32(a) / temper_pow2(temper_shift_count(n, 32)))
 end
 
 # ── Runtime type tests ───────────────────────────────
