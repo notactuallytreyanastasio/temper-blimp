@@ -228,13 +228,16 @@ def temper_float_to_int64(f: Float) -> Int do
   end
 end
 
+# The checked form above stops at 2^53-1, where a Float stops counting integers
+# exactly. The unchecked one saturates at Int64's own ends instead: it is not
+# claiming the answer is exact, only that it is in range.
 def temper_float_to_int64_unsafe(f: Float) -> Int do
   case f != f do
     true -> 0
-    _ -> case f > 9007199254740991.0 do
-      true -> 9007199254740991
-      _ -> case f < 0.0 - 9007199254740991.0 do
-        true -> 0 - 9007199254740991
+    _ -> case f >= 9223372036854775808.0 do
+      true -> 9223372036854775807
+      _ -> case f < 0.0 - 9223372036854775808.0 do
+        true -> temper_int64_min()
         _ -> temper_float_trunc(f)
       end
     end

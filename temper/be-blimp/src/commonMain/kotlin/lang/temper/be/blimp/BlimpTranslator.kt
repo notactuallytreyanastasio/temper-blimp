@@ -613,10 +613,14 @@ internal class BlimpTranslator(
                     call.pos,
                     OutName(staticName(typeSubjectName(fn.subject as TmpL.TypeSubject), fn.methodName), null),
                 ),
-                args = padOptional(
+                args = packRest(
                     call.pos,
-                    call.parameters.map { translateActual(it) },
-                    declaredArity(fn.type),
+                    fn.type,
+                    padOptional(
+                        call.pos,
+                        call.parameters.map { translateActual(it) },
+                        declaredArity(fn.type),
+                    ),
                 ),
             )
 
@@ -626,10 +630,14 @@ internal class BlimpTranslator(
                 message = Blimp.MessageCall(
                     call.pos,
                     name = Blimp.Atom(call.pos, fn.methodName.dotNameText),
-                    args = padOptional(
+                    args = packRest(
                         call.pos,
-                        call.parameters.map { translateActual(it) },
-                        declaredArity(fn.type),
+                        fn.type,
+                        padOptional(
+                            call.pos,
+                            call.parameters.map { translateActual(it) },
+                            declaredArity(fn.type),
+                        ),
                     ),
                 ),
             )
