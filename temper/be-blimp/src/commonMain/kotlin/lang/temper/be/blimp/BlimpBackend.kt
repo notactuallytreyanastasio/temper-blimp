@@ -1,6 +1,7 @@
 package lang.temper.be.blimp
 
 import lang.temper.be.Backend
+import lang.temper.be.SiblingData
 import lang.temper.be.BackendSetup
 import lang.temper.be.storeDescriptorsForDeclarations
 import lang.temper.be.tmpl.TmpL
@@ -15,6 +16,7 @@ import lang.temper.log.dirPath
 import lang.temper.log.filePath
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
+import lang.temper.name.DashedIdentifier
 import lang.temper.name.FileType
 import lang.temper.name.LanguageLabel
 
@@ -55,22 +57,33 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
     /**
      * Folds every module into one `main.blimp`.
      *
-     * Blimp has no module system and a top-level forward reference to a `def`
-     * is an error, so all declarations are emitted before any code that runs
-     * them.
+     * Blimp has no module system, and the order within the file matters: a
+     * `def` body resolves its calls when it runs, so two `def`s may refer to
+     * each other in any order, but a top-level *statement* resolves as it is
+     * reached. `y = z` above `def z` is an undefined variable. Declarations
+     * therefore come before any code that runs them, which is also why a
+     * pasted-in library has to come before the library that uses it.
      */
     override fun translate(finished: TmpL.ModuleSet): List<OutputFileSpecification> {
+        // Everything that ends up in the file, dependencies first: a library's
+        // top-level statements run where they stand, and
+        // `int32JsonAdapter__11 = int32JsonAdapter` is one of those.
+        val moduleSets = dependencyLibrariesInOrder().mapNotNull { siblingModuleSets[it] } + finished
         val declarations = mutableListOf<Blimp.Item>()
         val mainStatements = mutableListOf<Blimp.Statement>()
         val preludeHelpers = mutableSetOf<String>()
         // A Blimp actor stands alone -- there is no super to call -- so a
         // subclass is flattened, which means every class has to be reachable
-        // before any of them is translated.
+        // before any of them is translated. A subclass in one library of a
+        // class in another is why this spans every module set, not just this
+        // library's.
         val types = buildMap {
-            for (module in finished.modules) {
-                for (topLevel in module.topLevels) {
-                    if (topLevel is TmpL.TypeDeclaration) {
-                        typeKeyOf(topLevel)?.let { put(it, topLevel) }
+            for (moduleSet in moduleSets) {
+                for (module in moduleSet.modules) {
+                    for (topLevel in module.topLevels) {
+                        if (topLevel is TmpL.TypeDeclaration) {
+                            typeKeyOf(topLevel)?.let { put(it, topLevel) }
+                        }
                     }
                 }
             }
@@ -80,21 +93,23 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         // source is spliced in and its `connected_<name>` functions are what a
         // @connected declaration calls.
         val connectedSources = mutableListOf<String>()
-        for (module in finished.modules) {
-            val connectedPath = module.codeLocation.codeLocation.sourceFile.resolveFile(CONNECTED_FILE)
-            rawBackendFiles[connectedPath]?.let(connectedSources::add)
-            val translated = BlimpTranslator(module, types).translateModule()
-            declarations.addAll(translated.declarations)
-            mainStatements.addAll(translated.mainStatements)
-            preludeHelpers.addAll(translated.preludeHelpers)
+        for (moduleSet in moduleSets) {
+            for (module in moduleSet.modules) {
+                val connectedPath = module.codeLocation.codeLocation.sourceFile.resolveFile(CONNECTED_FILE)
+                rawBackendFiles[connectedPath]?.let(connectedSources::add)
+                val translated = BlimpTranslator(module, types).translateModule()
+                declarations.addAll(translated.declarations)
+                mainStatements.addAll(translated.mainStatements)
+                preludeHelpers.addAll(translated.preludeHelpers)
+            }
         }
+        val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
         // The prelude is spliced in rather than imported, because Blimp has no
         // module system, and only when something actually called into it.
         val prelude = when {
             preludeHelpers.isEmpty() -> listOf()
             else -> listOf(Blimp.Prelude(finished.pos, preludeResource.load()))
         }
-        val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
         return listOf(
             TranslatedFileSpecification(
                 path = filePath(MAIN_FILE),
@@ -105,6 +120,58 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 mimeType = mimeType,
             ),
         )
+    }
+
+    /**
+     * Every sibling library's TmpL, by library root.
+     *
+     * Every other backend hands the dependency problem to the target language:
+     * be-lua writes `require`, be-py writes `import`. Blimp has neither and no
+     * way to build one -- `blimp_eval(read_file(...))` runs the text in a scope
+     * of its own, so a `def` inside it is gone by the time the caller looks:
+     *
+     * ```
+     * $ blimp inc_main.blimp
+     * -- UNKNOWN FUNCTION ──────────────────────────────
+     *   I don't know a function called `lib_add`.
+     * ```
+     *
+     * So a dependency is translated again, into the dependent's own file. Not
+     * taken from the dependency's own [BlimpBackend], which would be the
+     * obvious way: a library is translated *before* the libraries it depends
+     * on, so by the time `std` has produced anything, `work` is already
+     * written. [finishTmpL] is early enough, and hands every sibling's TmpL
+     * over at once.
+     */
+    private var siblingModuleSets: Map<FilePath, TmpL.ModuleSet> = mapOf()
+
+    override fun finishTmpL(tentative: TmpL.ModuleSet, siblings: SiblingData<TmpL.ModuleSet>): TmpL.ModuleSet {
+        siblingModuleSets = siblings.dataByLibraryRoot.filterKeys {
+            it != libraryConfigurations.currentLibraryConfiguration.libraryRoot
+        }
+        return super.finishTmpL(tentative, siblings)
+    }
+
+    /**
+     * The roots of the libraries this one depends on, transitively, in an order
+     * where a library follows everything it depends on.
+     *
+     * A cycle would have no such order. The frontend rejects those before a
+     * backend sees them, and if one ever arrives the visited set turns it into
+     * a missing declaration rather than a hang.
+     */
+    private fun dependencyLibrariesInOrder(): List<FilePath> {
+        val current = libraryConfigurations.currentLibraryConfiguration.libraryName
+        val shallow = dependenciesBuilder.build().shallowDependencies
+        val order = mutableListOf<FilePath>()
+        val visited = mutableSetOf(current)
+        fun visit(name: DashedIdentifier) {
+            if (!visited.add(name)) return
+            shallow[name].orEmpty().sorted().forEach(::visit)
+            libraryConfigurations.byLibraryName[name]?.libraryRoot?.let(order::add)
+        }
+        shallow[current].orEmpty().sorted().forEach(::visit)
+        return order
     }
 
     override val supportNetwork = BlimpSupportNetwork
