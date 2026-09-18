@@ -303,6 +303,7 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Listed.get isEmpty()", "temper_is_empty", needsCore),
         BlimpConnectedCall("core.type Listed.get length()", "temper_len", needsCore),
         BlimpConnectedCall("core.type Listed.get()", "temper_get", needsCore),
+        BlimpConnectedCall("core.type Listed.getOr()", "temper_get_or", needsCore),
         BlimpConnectedCall("core.type List.get length()", "temper_len", needsCore),
         BlimpConnectedCall("core.type List.get()", "temper_get", needsCore),
         BlimpConnectedCall("core.type ListBuilder.get length()", "length"),
@@ -311,7 +312,7 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // String. Its indices are byte offsets, which is what Blimp uses too.
         BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
         BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
-        BlimpConnectedCall("core.type String.split()", "split"),
+        BlimpConnectedCall("core.type String.split()", "temper_string_split", utf8Helpers + needsCore),
         BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
         BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
         BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
@@ -391,7 +392,9 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // Reading a builder back out, and sorting with a comparator, which
         // Blimp's own sort does not take.
         BlimpConnectedCall("core.type ListBuilder.toList()", "temper_to_list", needsCore),
-        BlimpConnectedCall("core.type ListBuilder.toListBuilder()", "temper_identity", setOf(TEMPER_IDENTITY)),
+        // A copy, not the same builder: the test that caught this modifies the
+        // original after taking one and expects the copy not to follow.
+        BlimpConnectedCall("core.type ListBuilder.toListBuilder()", "temper_new_list_builder_from", needsCore),
         BlimpConnectedCall("core.type Listed.toListBuilder()", "temper_new_list_builder_from", needsCore),
         BlimpConnectedCall("core.type List.toListBuilder()", "temper_new_list_builder_from", needsCore),
     ).associateBy { it.connectedKey }
