@@ -220,7 +220,7 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
     }
 
     @PluginBackendId(BACKEND_ID)
-    @BackendSupportLevel(isSupported = true, isDefaultSupported = false, isTested = false)
+    @BackendSupportLevel(isSupported = true, isDefaultSupported = false, isTested = true)
     object Factory : Backend.Factory<BlimpBackend> {
         override val backendId = BackendId(BACKEND_ID)
 
