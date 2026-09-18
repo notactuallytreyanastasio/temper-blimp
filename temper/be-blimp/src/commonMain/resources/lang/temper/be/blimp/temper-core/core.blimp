@@ -36,12 +36,94 @@ def temper_float_to_string(f: Float) -> String do
       true -> "Infinity"
       _ -> case s == "-inf" do
         true -> "-Infinity"
-        _ -> case contains(s, ".") do
-          true -> s
-          _ -> concat(s, ".0")
+        _ -> case slice(s, 0, 1) == "-" do
+          true -> concat("-", temper_float_body(slice(s, 1, length(s) - 1)))
+          _ -> temper_float_body(s)
         end
       end
     end
+  end
+end
+
+# Temper writes a float the way JavaScript does: plainly until the exponent
+# reaches 21 or falls to -7, and in exponent form past that, with a mantissa
+# that always has a decimal point. Blimp's to_string expands instead --
+# 1e25 comes out as twenty-six digits and 1e207 as two hundred and eight -- so
+# the exponent has to be counted back out of the digits.
+def temper_float_body(s: String) -> String do
+  dot = temper_index_of_from(s, ".", 0)
+  whole = case dot < 0 do
+    true -> s
+    _ -> slice(s, 0, dot)
+  end
+  frac = case dot < 0 do
+    true -> ""
+    _ -> slice(s, dot + 1, length(s) - dot - 1)
+  end
+  case whole == "0" do
+    true -> temper_float_small(frac, s)
+    _ -> temper_float_large(whole, frac, s)
+  end
+end
+
+def temper_float_large(whole: String, frac: String, s: String) -> String do
+  exponent = length(whole) - 1
+  case exponent >= 21 do
+    true -> temper_float_exp(concat(whole, frac), exponent)
+    _ -> case empty?(frac) do
+      true -> concat(s, ".0")
+      _ -> s
+    end
+  end
+end
+
+def temper_float_small(frac: String, s: String) -> String do
+  z = temper_leading_zeros(frac, 0)
+  case z >= length(frac) do
+    true -> "0.0"
+    _ -> case z >= 6 do
+      true -> temper_float_exp(slice(frac, z, length(frac) - z), 0 - z - 1)
+      _ -> s
+    end
+  end
+end
+
+def temper_float_exp(digits: String, exponent: Int) -> String do
+  sign = case exponent < 0 do
+    true -> "-"
+    _ -> "+"
+  end
+  mag = case exponent < 0 do
+    true -> 0 - exponent
+    _ -> exponent
+  end
+  concat(temper_float_mantissa(digits), concat("e", concat(sign, to_string(mag))))
+end
+
+# The point goes after the first digit, trailing zeros go, and one digit stays
+# behind it: Temper writes 1e25 as 1.0e+25, not 1e+25.
+def temper_float_mantissa(digits: String) -> String do
+  rest = temper_strip_trailing_zeros(slice(digits, 1, length(digits) - 1))
+  case empty?(rest) do
+    true -> concat(slice(digits, 0, 1), ".0")
+    _ -> concat(slice(digits, 0, 1), concat(".", rest))
+  end
+end
+
+def temper_strip_trailing_zeros(s: String) -> String do
+  case length(s) <= 1 do
+    true -> s
+    _ -> case slice(s, length(s) - 1, 1) == "0" do
+      true -> temper_strip_trailing_zeros(slice(s, 0, length(s) - 1))
+      _ -> s
+    end
+  end
+end
+
+def temper_leading_zeros(s: String, i: Int) -> Int do
+  case i >= length(s) or slice(s, i, 1) != "0" do
+    true -> i
+    _ -> temper_leading_zeros(s, i + 1)
   end
 end
 
@@ -61,6 +143,147 @@ def temper_float_is_negative(f: Float) -> Bool do
   case f < 0.0 do
     true -> true
     _ -> slice(to_string(f), 0, 1) == "-"
+  end
+end
+
+# Temper's Floats are totally ordered, and IEEE's are not: a negative zero sits
+# below a positive one, a NaN equals itself, and a NaN is above everything.
+# All three are false with Blimp's operators, so every Float comparison goes
+# through these. `min` and `max` are not comparisons -- they answer NaN either
+# way, which is what types/float/ops asks for.
+def temper_float_eq(a: Float, b: Float) -> Bool do
+  case a != a do
+    true -> b != b
+    _ -> case b != b do
+      true -> false
+      _ -> case a == b do
+        true -> temper_float_is_negative(a) == temper_float_is_negative(b)
+        _ -> false
+      end
+    end
+  end
+end
+
+def temper_float_ne(a: Float, b: Float) -> Bool do
+  not(temper_float_eq(a, b))
+end
+
+def temper_float_lt(a: Float, b: Float) -> Bool do
+  case a != a do
+    true -> false
+    _ -> case b != b do
+      true -> true
+      _ -> case a == b do
+        true -> temper_float_is_negative(a) and not(temper_float_is_negative(b))
+        _ -> a < b
+      end
+    end
+  end
+end
+
+def temper_float_gt(a: Float, b: Float) -> Bool do
+  temper_float_lt(b, a)
+end
+
+def temper_float_le(a: Float, b: Float) -> Bool do
+  temper_float_lt(a, b) or temper_float_eq(a, b)
+end
+
+def temper_float_ge(a: Float, b: Float) -> Bool do
+  temper_float_le(b, a)
+end
+
+# An Int is a Float the moment it is added to one.
+def temper_int_to_float(n: Int) -> Float do
+  n + 0.0
+end
+
+# The checked form refuses an Int64 a Float64 cannot hold exactly, which is
+# anything past 2^53-1. The unchecked one above does not ask.
+def temper_int_to_float_checked(n: Int) -> Float do
+  case n > 9007199254740991 or n < 0 - 9007199254740991 do
+    true -> temper_bubble()
+    _ -> n + 0.0
+  end
+end
+
+# ── Parsing floats ───────────────────────────────────
+#
+# Blimp has to_int and no to_float, so this is the whole grammar: an optional
+# sign, digits with at most one point, an optional exponent. Anything else
+# bubbles, which is what `"totally".toFloat64()` has to do.
+
+def temper_parse_float(s: String) -> Float do
+  t = temper_trim(s)
+  case t == "NaN" do
+    true -> temper_float_nan()
+    _ -> case t == "Infinity" do
+      true -> temper_float_inf()
+      _ -> case t == "-Infinity" do
+        true -> 0.0 - temper_float_inf()
+        _ -> case empty?(t) do
+          true -> temper_bubble()
+          _ -> temper_parse_float_sign(t)
+        end
+      end
+    end
+  end
+end
+
+def temper_parse_float_sign(t: String) -> Float do
+  case slice(t, 0, 1) == "-" do
+    # Not `0.0 - x`: that answers 0.0 for a zero, and "-0" has to parse to the
+    # negative one Temper orders below it.
+    true -> temper_parse_float_unsigned(slice(t, 1, length(t) - 1)) * (0.0 - 1.0)
+    _ -> case slice(t, 0, 1) == "+" do
+      true -> temper_parse_float_unsigned(slice(t, 1, length(t) - 1))
+      _ -> temper_parse_float_unsigned(t)
+    end
+  end
+end
+
+def temper_parse_float_unsigned(t: String) -> Float do
+  e = temper_find_exp(t, 0)
+  case e < 0 do
+    true -> temper_parse_decimal(t)
+    _ ->
+      mantissa = temper_parse_decimal(slice(t, 0, e))
+      exponent = temper_parse_int64(slice(t, e + 1, length(t) - e - 1), 10)
+      mantissa * pow(10.0, exponent + 0.0)
+  end
+end
+
+def temper_find_exp(t: String, i: Int) -> Int do
+  case i >= length(t) do
+    true -> 0 - 1
+    _ -> case slice(t, i, 1) == "e" or slice(t, i, 1) == "E" do
+      true -> i
+      _ -> temper_find_exp(t, i + 1)
+    end
+  end
+end
+
+def temper_parse_decimal(t: String) -> Float do
+  dot = temper_index_of_from(t, ".", 0)
+  case dot < 0 do
+    true -> temper_digits_value(t) + 0.0
+    _ -> temper_parse_frac(slice(t, 0, dot), slice(t, dot + 1, length(t) - dot - 1))
+  end
+end
+
+# Digits are required on both sides of the point: Temper reads neither "2."
+# nor ".2".
+def temper_parse_frac(whole: String, frac: String) -> Float do
+  case empty?(whole) or empty?(frac) do
+    true -> temper_bubble()
+    _ -> (temper_digits_value(concat(whole, frac)) + 0.0) / pow(10.0, length(frac) + 0.0)
+  end
+end
+
+def temper_digits_value(s: String) -> Int do
+  case empty?(s) do
+    true -> 0
+    _ -> temper_parse_int64(s, 10)
   end
 end
 
