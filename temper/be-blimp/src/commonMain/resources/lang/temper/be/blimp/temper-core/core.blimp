@@ -1495,6 +1495,145 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── Date ─────────────────────────────────────────────
+#
+# A Date is [year, month, day] and nothing mutates one, so unlike the builders
+# it needs no actor. The two conversions are Howard Hinnant's days_from_civil
+# and civil_from_days: the calendar is shifted to start in March so that a leap
+# day falls at the end of a year and the arithmetic stops having a special
+# case.
+
+# The constructor bubbles on a day the month does not have, which is the one
+# piece of Date behaviour that is not arithmetic. February is the whole reason:
+# `daysInMonth[2]` is 28 and the 29th is legal only in a leap year.
+def temper_new_date(y: Int, m: Int, d: Int) -> List do
+  ok = m >= 1 and m <= 12 and d >= 1 and d <= temper_days_in_month(y, m)
+  r = case ok do
+    true -> [y, m, d]
+    _ -> temper_bubble()
+  end
+  r
+end
+
+def temper_days_in_month(y: Int, m: Int) -> Int do
+  n = case m == 2 do
+    true -> temper_february_days(y)
+    _ -> elem([31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], m - 1)
+  end
+  n
+end
+
+def temper_february_days(y: Int) -> Int do
+  n = case temper_is_leap_year(y) do
+    true -> 29
+    _ -> 28
+  end
+  n
+end
+
+def temper_is_leap_year(y: Int) -> Bool do
+  rem(y, 4) == 0 and (rem(y, 100) != 0 or rem(y, 400) == 0)
+end
+
+def temper_date_year(d: List) -> Int do
+  elem(d, 0)
+end
+
+def temper_date_month(d: List) -> Int do
+  elem(d, 1)
+end
+
+def temper_date_day(d: List) -> Int do
+  elem(d, 2)
+end
+
+def temper_days_from_civil(y0: Int, m: Int, d: Int) -> Int do
+  y = case m <= 2 do
+    true -> y0 - 1
+    _ -> y0
+  end
+  era = case y >= 0 do
+    true -> y / 400
+    _ -> (y - 399) / 400
+  end
+  yoe = y - era * 400
+  mp = rem(m + 9, 12)
+  doy = (153 * mp + 2) / 5 + d - 1
+  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  era * 146097 + doe - 719468
+end
+
+def temper_civil_from_days(z0: Int) -> List do
+  z = z0 + 719468
+  era = case z >= 0 do
+    true -> z / 146097
+    _ -> (z - 146096) / 146097
+  end
+  doe = z - era * 146097
+  yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  y = yoe + era * 400
+  doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  mp = (5 * doy + 2) / 153
+  d = doy - (153 * mp + 2) / 5 + 1
+  m = case mp < 10 do
+    true -> mp + 3
+    _ -> mp - 9
+  end
+  year = case m <= 2 do
+    true -> y + 1
+    _ -> y
+  end
+  [year, m, d]
+end
+
+# 1970-01-01 was a Thursday, and Temper counts Monday as 1.
+def temper_date_day_of_week(date: List) -> Int do
+  days = temper_days_from_civil(elem(date, 0), elem(date, 1), elem(date, 2))
+  rem(rem(days + 3, 7) + 7, 7) + 1
+end
+
+# `now()` counts seconds since the epoch, and a Date is the day it lands in.
+def temper_date_today() -> List do
+  temper_civil_from_days(now() / 86400)
+end
+
+def temper_date_from_iso(s: String) -> List do
+  parts = split(s, "-")
+  case length(parts) == 3 do
+    true -> [to_int(elem(parts, 0)), to_int(elem(parts, 1)), to_int(elem(parts, 2))]
+    _ -> temper_bubble()
+  end
+end
+
+# Four digits for the year even when it is 12, which is the case that catches
+# a backend adding 1900 or 2000 to a two-digit year.
+def temper_date_to_string(d: List) -> String do
+  concat(
+    temper_pad(to_string(elem(d, 0)), 4),
+    concat("-", concat(temper_pad(to_string(elem(d, 1)), 2), concat("-", temper_pad(to_string(elem(d, 2)), 2))))
+  )
+end
+
+def temper_pad(s: String, width: Int) -> String do
+  case length(s) >= width do
+    true -> s
+    _ -> temper_pad(concat("0", s), width)
+  end
+end
+
+# Whole years: the anniversary has to have arrived.
+def temper_date_years_between(a: List, b: List) -> Int do
+  years = elem(b, 0) - elem(a, 0)
+  before = case elem(b, 1) < elem(a, 1) do
+    true -> true
+    _ -> elem(b, 1) == elem(a, 1) and elem(b, 2) < elem(a, 2)
+  end
+  case before do
+    true -> years - 1
+    _ -> years
+  end
+end
+
 # ── DenseBitVector ───────────────────────────────────
 #
 # Dense is a promise about memory, not about behaviour, and Blimp has no packed
