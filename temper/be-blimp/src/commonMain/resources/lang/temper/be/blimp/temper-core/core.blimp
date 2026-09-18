@@ -2356,31 +2356,47 @@ end
 def temper_regex_split(me: Any, compiled: Any, text: String, refs: Any) -> List do
   ignore = me
   ignore2 = refs
-  temper_rx_split_loop(compiled, text, u8_code_points(text), temper_rx_offsets(text), 0, [])
+  temper_rx_split_loop(compiled, text, u8_code_points(text), temper_rx_offsets(text), 0, 0, [])
 end
 
-def temper_rx_split_loop(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List) -> List do
-  m = temper_rx_search(node, cps, pos)
+# Two positions, not one. `at` is where the next piece starts; `from` is where
+# to look for the next separator. They come apart on a zero-length match,
+# which has to be stepped over or the same one is found forever -- and the
+# first version stepped over the code point as well as the match, so
+# `split("(?:x)*", "abc")` answered [""] instead of ["a", "b", "c"].
+def temper_rx_split_loop(node: Any, text: String, cps: List, offs: List, at: Int, from: Int, acc: List) -> List do
+  m = temper_rx_search(node, cps, from)
   r = case nil?(m) do
-    true -> append(acc, temper_rx_slice(text, offs, pos, length(cps)))
-    _ -> temper_rx_split_one(node, text, cps, offs, pos, acc, m)
+    true -> append(acc, temper_rx_slice(text, offs, at, length(cps)))
+    _ -> temper_rx_split_one(node, text, cps, offs, at, acc, m)
   end
   r
 end
 
-def temper_rx_split_one(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List, m: List) -> List do
-  empty_hit = elem(m, 1) == elem(m, 0)
-  r = case empty_hit do
-    true -> temper_rx_split_skip(node, text, cps, offs, pos, acc, m)
-    _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 1), append(acc, temper_rx_slice(text, offs, pos, elem(m, 0))))
+def temper_rx_split_one(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, m: List) -> List do
+  r = case elem(m, 1) == elem(m, 0) do
+    true -> temper_rx_split_empty(node, text, cps, offs, at, acc, elem(m, 0))
+    _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 1), elem(m, 1), append(acc, temper_rx_slice(text, offs, at, elem(m, 0))))
   end
   r
 end
 
-def temper_rx_split_skip(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List, m: List) -> List do
-  r = case elem(m, 0) >= length(cps) do
-    true -> append(acc, temper_rx_slice(text, offs, pos, length(cps)))
-    _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 0) + 1, acc)
+# An empty separator at the start of the piece splits nothing, so it is looked
+# past rather than acted on. That is what makes `split("^", "abc")` answer
+# ["abc"] rather than ["", "abc"], which is what every other backend's split
+# does with a zero-length match at the beginning.
+def temper_rx_split_empty(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, b: Int) -> List do
+  r = case b >= length(cps) do
+    true -> append(acc, temper_rx_slice(text, offs, at, length(cps)))
+    _ -> temper_rx_split_empty_at(node, text, cps, offs, at, acc, b)
+  end
+  r
+end
+
+def temper_rx_split_empty_at(node: Any, text: String, cps: List, offs: List, at: Int, acc: List, b: Int) -> List do
+  r = case b == at do
+    true -> temper_rx_split_loop(node, text, cps, offs, at, b + 1, acc)
+    _ -> temper_rx_split_loop(node, text, cps, offs, b, b + 1, append(acc, temper_rx_slice(text, offs, at, b)))
   end
   r
 end
