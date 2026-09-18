@@ -505,23 +505,11 @@ def temper_fmod(a: Float, b: Float) -> Float do
   a - (b * t)
 end
 
-# Exponentiation by squaring. Only whole exponents; anything else bubbles,
-# because Blimp has no general pow to fall back on.
+# `**`. Blimp's pow takes a fractional exponent, so this is a rename; it used
+# to be exponentiation by squaring and bubbled on anything but a whole number,
+# which made `4.0 ** -0.5` an error rather than 0.5.
 def temper_pow(base: Float, exponent: Float) -> Float do
-  case exponent - floor(exponent) != 0.0 do
-    true -> temper_bubble()
-    _ -> case exponent < 0.0 do
-      true -> 1.0 / temper_pow_whole(base, 0.0 - exponent)
-      _ -> temper_pow_whole(base, exponent)
-    end
-  end
-end
-
-def temper_pow_whole(base: Float, exponent: Float) -> Float do
-  case exponent <= 0.0 do
-    true -> 1.0
-    _ -> base * temper_pow_whole(base, exponent - 1.0)
-  end
+  pow(base, exponent)
 end
 
 # ── Mutable lists ────────────────────────────────────
