@@ -205,6 +205,24 @@ internal const val TEMPER_NEW_MAP_FROM = "temper_new_map_from"
 /** The temper-core helper that restores a whole float's decimal point. */
 internal const val TEMPER_FLOAT_TO_STRING = "temper_float_to_string"
 
+/** What the 64-bit bit operations need: the shared loop, the sign split, 2^n. */
+internal val bit64Helpers = setOf(
+    "temper_bitop64",
+    "temper_bitop_loop",
+    "temper_bit_rule",
+    "temper_low63",
+    "temper_sign_bit",
+    "temper_int64_min",
+    "temper_pow2",
+    "temper_bit_and64",
+    "temper_bit_or64",
+    "temper_bit_xor64",
+    "temper_shl64",
+    "temper_shr64",
+    "temper_ushr64",
+    "temper_shift_count",
+)
+
 /** What an infinity, a NaN and a signed zero need, none of which Blimp writes. */
 internal val floatEdgeHelpers = setOf(
     "temper_float_div",
@@ -502,7 +520,8 @@ internal const val TEMPER_USHR32 = "temper_ushr32"
 
 /** Everything a bit operation leans on: the loop, the unsigned view and the wrap. */
 private val bitHelpers = setOf(
-    "temper_bitop", "temper_bitop_loop", "temper_u32", TEMPER_INT32, "temper_pow2",
+    "temper_bitop", "temper_bitop_loop", "temper_bit_rule", "temper_u32", TEMPER_INT32,
+    "temper_pow2", "temper_shift_count",
 )
 
 /** temper-core helpers that raise from anywhere, including a plain `def` body. */
@@ -592,6 +611,14 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
             else -> Blimp.Call(pos, callee = Blimp.Id(pos, OutName("concat", null)), args = args)
         }
     },
+    // The 64-bit family. Blimp's Int is 64-bit, so these do not wrap to 32.
+    call(BuiltinOperatorId.BitwiseAnd64, "temper_bit_and64", bit64Helpers),
+    call(BuiltinOperatorId.BitwiseOr64, "temper_bit_or64", bit64Helpers),
+    call(BuiltinOperatorId.BitwiseXor64, "temper_bit_xor64", bit64Helpers),
+    call(BuiltinOperatorId.BitwiseNegation64, "temper_bit_not64", setOf("temper_bit_not64")),
+    call(BuiltinOperatorId.BitwiseShl64, "temper_shl64", bit64Helpers),
+    call(BuiltinOperatorId.BitwiseShr64, "temper_shr64", bit64Helpers),
+    call(BuiltinOperatorId.BitwiseShrUnsigned64, "temper_ushr64", bit64Helpers),
     // Blimp has no bitwise operators; temper-core does these arithmetically.
     call(BuiltinOperatorId.BitwiseAnd32, TEMPER_BIT_AND, bitHelpers + TEMPER_BIT_AND),
     call(BuiltinOperatorId.BitwiseOr32, TEMPER_BIT_OR, bitHelpers + TEMPER_BIT_OR),

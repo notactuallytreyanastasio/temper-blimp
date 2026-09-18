@@ -71,6 +71,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.SemanticsTypeCheckedLocals,
         Ft.TypesFloatOps,
         Ft.TypesIntBasics,
+        Ft.TypesIntShifty,
         Ft.TypesListEmpty,
         Ft.TypesListOperations,
         Ft.TypesListReduce,
@@ -91,6 +92,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.ClassesDirectGetter,
         Ft.TypesFloatOps,
         Ft.TypesIntBasics,
+        Ft.TypesIntShifty,
         Ft.TypesIntLimits,
         Ft.TypesListEmpty,
     )
