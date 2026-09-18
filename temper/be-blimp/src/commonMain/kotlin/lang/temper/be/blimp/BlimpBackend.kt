@@ -93,14 +93,26 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         // source is spliced in and its `connected_<name>` functions are what a
         // @connected declaration calls.
         val connectedSources = mutableListOf<String>()
+        val libraryName = libraryConfigurations.currentLibraryConfiguration.libraryName
         for (moduleSet in moduleSets) {
+            val own = moduleSet === finished
             for (module in moduleSet.modules) {
                 val connectedPath = module.codeLocation.codeLocation.sourceFile.resolveFile(CONNECTED_FILE)
                 rawBackendFiles[connectedPath]?.let(connectedSources::add)
-                val translated = BlimpTranslator(module, types).translateModule()
+                val translated = BlimpTranslator(module, types, emitTests = own).translateModule()
                 declarations.addAll(translated.declarations)
                 mainStatements.addAll(translated.mainStatements)
                 preludeHelpers.addAll(translated.preludeHelpers)
+                // Only this library's, and under the Blimp name: the harness
+                // matches what it finds in the XML against what is registered
+                // here, and the XML carries `aTestCase__53`, not the sentence
+                // the test was declared with. A dependency's tests belong to
+                // the dependency, which registers them itself.
+                if (own) {
+                    for ((test, blimpName) in translated.tests) {
+                        dependenciesBuilder.addTest(libraryName, test, blimpName)
+                    }
+                }
             }
         }
         val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
