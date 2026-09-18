@@ -223,6 +223,17 @@ internal val bit64Helpers = setOf(
     "temper_shift_count",
 )
 
+/** The signed-zero-aware Float comparisons, which need the sign test. */
+internal val floatCmpHelpers = setOf(
+    "temper_float_eq",
+    "temper_float_ne",
+    "temper_float_lt",
+    "temper_float_le",
+    "temper_float_gt",
+    "temper_float_ge",
+    "temper_float_is_negative",
+)
+
 /** What an infinity, a NaN and a signed zero need, none of which Blimp writes. */
 internal val floatEdgeHelpers = setOf(
     "temper_float_div",
@@ -293,6 +304,10 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Float64.cosh()", "cosh"),
         BlimpConnectedCall("core.type Float64.tanh()", "tanh"),
         BlimpConnectedCall("core.type Float64.abs()", "abs"),
+        BlimpConnectedCall("core.type Int32.toFloat64()", "temper_int_to_float", needsCore),
+        BlimpConnectedCall("core.type Int64.toFloat64()", "temper_int_to_float_checked", needsCore),
+        BlimpConnectedCall("core.type Int32.toFloat64Unsafe()", "temper_int_to_float", needsCore),
+        BlimpConnectedCall("core.type Int64.toFloat64Unsafe()", "temper_int_to_float", needsCore),
         // Truncating toward zero, checked and saturating.
         BlimpConnectedCall("core.type Float64.toInt32()", "temper_float_to_int32", needsCore),
         BlimpConnectedCall("core.type Float64.toInt32Unsafe()", "temper_float_to_int32_unsafe", needsCore),
@@ -334,6 +349,7 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // not a number at all, where Temper bubbles, so even the no-radix form
         // goes through temper-core.
         // One helper at both arities: the radix is nil when left out.
+        BlimpConnectedCall("core.type String.toFloat64()", "temper_parse_float", needsCore),
         BlimpConnectedCall("core.type String.toInt32()", TEMPER_PARSE_INT32, needsCore, padTo = 2),
         BlimpConnectedCall("core.type String.toInt64()", TEMPER_PARSE_INT64, needsCore, padTo = 2),
         // Sequences. `empty?`, `length` and `elem` are Blimp builtins and work
@@ -585,12 +601,14 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     infix(BuiltinOperatorId.GeIntInt, BlimpOperator.GreaterEquals),
     infix(BuiltinOperatorId.EqIntInt, BlimpOperator.Equals),
     infix(BuiltinOperatorId.NeIntInt, BlimpOperator.NotEquals),
-    infix(BuiltinOperatorId.LtFltFlt, BlimpOperator.LessThan),
-    infix(BuiltinOperatorId.LeFltFlt, BlimpOperator.LessEquals),
-    infix(BuiltinOperatorId.GtFltFlt, BlimpOperator.GreaterThan),
-    infix(BuiltinOperatorId.GeFltFlt, BlimpOperator.GreaterEquals),
-    infix(BuiltinOperatorId.EqFltFlt, BlimpOperator.Equals),
-    infix(BuiltinOperatorId.NeFltFlt, BlimpOperator.NotEquals),
+    // Not the operators: Temper orders a negative zero below a positive one and
+    // IEEE calls them equal, so every Float comparison goes through a helper.
+    call(BuiltinOperatorId.LtFltFlt, "temper_float_lt", floatCmpHelpers),
+    call(BuiltinOperatorId.LeFltFlt, "temper_float_le", floatCmpHelpers),
+    call(BuiltinOperatorId.GtFltFlt, "temper_float_gt", floatCmpHelpers),
+    call(BuiltinOperatorId.GeFltFlt, "temper_float_ge", floatCmpHelpers),
+    call(BuiltinOperatorId.EqFltFlt, "temper_float_eq", floatCmpHelpers),
+    call(BuiltinOperatorId.NeFltFlt, "temper_float_ne", floatCmpHelpers),
     // Blimp's < and > are a type error on strings, so these go through
     // temper-core, which compares byte by byte.
     call(BuiltinOperatorId.LtStrStr, "temper_str_lt", strCmpHelpers),

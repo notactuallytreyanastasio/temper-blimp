@@ -36,6 +36,10 @@ internal fun blimpNumberText(value: Number): String = when (value) {
         value.isNaN() -> "(0.0 / 0.0)"
         value == Double.POSITIVE_INFINITY -> "(1.0 / 0.0)"
         value == Double.NEGATIVE_INFINITY -> "(0.0 - 1.0 / 0.0)"
+        // A negative zero is `== 0.0`, so the whole-number branch below would
+        // print it as "0.0" and lose the sign Temper compares on. Blimp has no
+        // literal for it either; multiplying is how you get one.
+        value == 0.0 && 1.0 / value < 0.0 -> "(0.0 * (0.0 - 1.0))"
         value == value.toLong().toDouble() -> "${value.toLong()}.0"
         else -> value.toString()
     }

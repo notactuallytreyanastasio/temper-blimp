@@ -70,6 +70,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.SemanticsConstness,
         Ft.SemanticsMutuallyReferencingTypes,
         Ft.SemanticsTypeCheckedLocals,
+        Ft.TypesFloatBasics,
         Ft.TypesFloatOps,
         Ft.TypesIntBasics,
         Ft.TypesIntShifty,
