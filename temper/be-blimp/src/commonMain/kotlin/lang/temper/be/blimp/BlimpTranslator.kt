@@ -87,6 +87,15 @@ internal class BlimpTranslator(
     private val module: TmpL.Module,
     /** Every class in the module set, so a subclass can be flattened. */
     private val types: Map<String, TmpL.TypeDeclaration> = mapOf(),
+    /**
+     * False for a module pasted in from a dependency library.
+     *
+     * Its `test` declarations still translate -- something may call one -- but
+     * the runner that would execute them and write `test-results.xml` does
+     * not, because running a dependency's tests is not what the program asked
+     * for, and the report it wrote would be the one the harness reads.
+     */
+    private val emitTests: Boolean = true,
 ) {
 
     /** `actor` and `def` items, which must precede any code that runs them. */
@@ -164,6 +173,7 @@ internal class BlimpTranslator(
             declarations = declarations.toList(),
             mainStatements = mainStatements.toList(),
             preludeHelpers = preludeHelpers.toSet(),
+            tests = tests.map { it to names.outName(it.name.name).outputNameText },
         )
     }
 
@@ -180,7 +190,7 @@ internal class BlimpTranslator(
      * camelCase back to the sentence the test was declared with.
      */
     private fun emitTestRunner() {
-        if (tests.isEmpty()) return
+        if (tests.isEmpty() || !emitTests) return
         preludeHelpers.addAll(needsCore)
         val pos = module.pos
         val entries = tests.map { test ->
@@ -211,6 +221,11 @@ internal class BlimpTranslator(
         val declarations: List<Blimp.Item>,
         val mainStatements: List<Blimp.Statement>,
         val preludeHelpers: Set<String>,
+        /**
+         * Each test with the name it answers to in the JUnit XML, which is the
+         * Blimp one rather than the sentence the test was declared with.
+         */
+        val tests: List<Pair<TmpL.Test, String>>,
     )
 
     /** Records that [helper] from temper-core is needed, and returns a call to it. */
