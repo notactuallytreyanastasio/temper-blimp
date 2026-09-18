@@ -1524,7 +1524,19 @@ end
 # `sendRequest` answers, and the promise it answers is already settled. Temper
 # code still awaits it, which costs one resumption and reads the same.
 
+# std/net says "Backends may or may not support all request features in which
+# case, send should return a broken promise". A bubble out of the URL parser or
+# the response parser is one of those cases, and it was reaching the caller as
+# a bubble instead -- past the `orelse` that a broken promise would have fed.
 def temper_net_send(url: String, method: String, body: Any, mime: Any) -> Any do
+  try do
+    temper_net_send_or_bubble(url, method, body, mime)
+  catch e do
+    temper_net_broken()
+  end
+end
+
+def temper_net_send_or_bubble(url: String, method: String, body: Any, mime: Any) -> Any do
   where = temper_url_parts(url)
   fd = tcp_connect(elem(where, 0), elem(where, 1))
   case nil?(fd) do
@@ -1556,7 +1568,10 @@ end
 # only thing that tells this where the body ends is the server hanging up.
 def temper_http_request(where: List, method: String, body: String, mime: Any) -> String do
   head = concat(method, concat(" ", concat(elem(where, 2), " HTTP/1.1\r\n")))
-  host = concat("Host: ", concat(elem(where, 0), "\r\n"))
+  # The authority as written, port and all: a server behind a non-default port
+  # matches on what the client asked for, and dropping the port is how a
+  # virtual host serves the wrong site.
+  host = concat("Host: ", concat(elem(where, 3), "\r\n"))
   ctype = case nil?(mime) do
     true -> ""
     _ -> concat("Content-Type: ", concat(mime, "\r\n"))
@@ -1582,26 +1597,58 @@ def temper_http_more(fd: Int, acc: String, chunk: String) -> String do
   end
 end
 
-# [host, port, path]. A URL with no port is the scheme's default, and the only
-# scheme here is http.
+# [host, port, path, hostheader]
+#
+# The scheme is checked rather than discarded. Discarding it meant `https://`
+# went out in cleartext on port 80 and came back 200, which is a wrong answer
+# dressed as a right one -- the caller has no way to find out it was not
+# encrypted.
 def temper_url_parts(url: String) -> List do
   after = split(url, "://")
-  rest = case length(after) > 1 do
-    true -> elem(after, 1)
-    _ -> url
+  case length(after) > 1 do
+    true -> temper_url_scheme(downcase(elem(after, 0)), elem(after, 1))
+    _ -> temper_url_authority(url)
   end
+end
+
+def temper_url_scheme(scheme: String, rest: String) -> List do
+  case scheme == "http" do
+    true -> temper_url_authority(rest)
+    _ -> bubble concat("net: no support for the scheme ", scheme)
+  end
+end
+
+def temper_url_authority(rest: String) -> List do
   cut = split(rest, "/")
   hostport = elem(cut, 0)
   path = case length(cut) > 1 do
     true -> concat("/", temper_join_rest(cut, 1, ""))
     _ -> "/"
   end
+  temper_url_hostport(hostport, path)
+end
+
+# An IPv6 literal is bracketed and full of colons, and userinfo puts an `@`
+# before the host. Splitting on `:` gets both wrong, so both are refused by
+# name rather than mis-parsed into a connection somewhere else.
+def temper_url_hostport(hostport: String, path: String) -> List do
+  bad = contains(hostport, "@") or contains(hostport, "[")
+  case bad do
+    true -> bubble concat("net: no support for this authority: ", hostport)
+    _ -> temper_url_split_port(hostport, path)
+  end
+end
+
+def temper_url_split_port(hostport: String, path: String) -> List do
   hp = split(hostport, ":")
   port = case length(hp) > 1 do
     true -> temper_parse_int32(elem(hp, 1), 10)
     _ -> 80
   end
-  [elem(hp, 0), port, path]
+  case empty?(elem(hp, 0)) do
+    true -> bubble "net: the URL has no host"
+    _ -> [elem(hp, 0), port, path, hostport]
+  end
 end
 
 def temper_join_rest(parts: List, i: Int, acc: String) -> String do
