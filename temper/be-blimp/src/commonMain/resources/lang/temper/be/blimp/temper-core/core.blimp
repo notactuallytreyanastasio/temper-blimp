@@ -592,17 +592,36 @@ def temper_trim(s: String) -> String do
   temper_trim_end(temper_trim_start(s))
 end
 
+# `or` evaluates both sides, so an empty string still reaches `char_code`,
+# which answers nil past the end -- and a nil handed to `temper_is_space`,
+# whose parameter is declared `Int`, is a type error rather than a false. The
+# emptiness test has to be a `case`, which is the only thing here that does
+# not evaluate the branch it does not take.
 def temper_trim_start(s: String) -> String do
-  case empty?(s) or not(temper_is_space(char_code(s, 0))) do
+  case empty?(s) do
     true -> s
-    _ -> temper_trim_start(slice(s, 1, length(s) - 1))
+    _ -> temper_trim_start_at(s)
+  end
+end
+
+def temper_trim_start_at(s: String) -> String do
+  case temper_is_space(char_code(s, 0)) do
+    true -> temper_trim_start(slice(s, 1, length(s) - 1))
+    _ -> s
   end
 end
 
 def temper_trim_end(s: String) -> String do
-  case empty?(s) or not(temper_is_space(char_code(s, length(s) - 1))) do
+  case empty?(s) do
     true -> s
-    _ -> temper_trim_end(slice(s, 0, length(s) - 1))
+    _ -> temper_trim_end_at(s)
+  end
+end
+
+def temper_trim_end_at(s: String) -> String do
+  case temper_is_space(char_code(s, length(s) - 1)) do
+    true -> temper_trim_end(slice(s, 0, length(s) - 1))
+    _ -> s
   end
 end
 
@@ -2288,9 +2307,18 @@ def temper_rx_is_word(c: Int) -> Bool do
 end
 
 def temper_rx_at_wordb(cps: List, pos: Int) -> Bool do
-  before = pos > 0 and temper_rx_is_word(elem(cps, pos - 1))
-  after = pos < length(cps) and temper_rx_is_word(elem(cps, pos))
-  before != after
+  temper_rx_word_at(cps, pos - 1) != temper_rx_word_at(cps, pos)
+end
+
+# Out of range is not a word character. Asked as `i >= 0 and is_word(elem(...))`
+# this crashed instead: `and` evaluates both sides, `elem` past the end answers
+# nil, and `temper_rx_is_word` declares its parameter `Int`, so the nil is a
+# type error rather than a false.
+def temper_rx_word_at(cps: List, i: Int) -> Bool do
+  case i >= 0 and i < length(cps) do
+    true -> temper_rx_is_word(elem(cps, i))
+    _ -> false
+  end
 end
 
 # ── Regex: search ────────────────────────────────────
