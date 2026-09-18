@@ -443,6 +443,15 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("core.type StringBuilder.clear()", "clear"),
         BlimpConnectedSend("core.type StringBuilder.toString()", "toString"),
         BlimpConnectedSend("core.type StringBuilder.get end()", "end"),
+        // Generators. See temper-core's Generators section for why a backend
+        // that never sees a `yield` still needs these.
+        BlimpConnectedCall("core.doneResult()", "temper_done_result", needsCore),
+        BlimpConnectedCall("core.type ValueResult.constructor()", "temper_value_result", needsCore),
+        BlimpConnectedCall("core.type Generator.next()", "temper_generator_next", needsCore),
+        BlimpConnectedCall("core.type SafeGenerator.next()", "temper_generator_next", needsCore),
+        BlimpConnectedCall("core.type SafeGenerator.nextSafe()", "temper_generator_next", needsCore),
+        BlimpConnectedSend("core.type Generator.get done()", "done"),
+        BlimpConnectedSend("core.type Generator.close()", "close"),
         // Date, which is a list rather than an actor: nothing mutates one.
         BlimpConnectedCall("std/temporal.type Date.constructor()", "temper_new_date", needsCore),
         BlimpConnectedCall("std/temporal.type Date.year", "temper_date_year", needsCore),
@@ -704,6 +713,11 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     // try/catch, which is what BubbleBranchStrategy.Exceptions expects.
     call(BuiltinOperatorId.Bubble, TEMPER_BUBBLE, setOf(TEMPER_BUBBLE)),
     call(BuiltinOperatorId.Panic, TEMPER_PANIC, setOf(TEMPER_PANIC)),
+    // The coroutine lowering removes every `yield`, but what it leaves is a
+    // step function with no memory, so it still asks the backend to adapt one
+    // into a generator.
+    call(BuiltinOperatorId.AdaptGeneratorFn, "temper_adapt_generator_fn", needsCore),
+    call(BuiltinOperatorId.SafeAdaptGeneratorFn, "temper_adapt_generator_fn", needsCore),
 ).associateBy { it.builtinOperatorId!! }
 
 /**
