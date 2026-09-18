@@ -1821,10 +1821,20 @@ def temper_rx_set_item(p: List, i: Int, acc: List, neg: Bool) -> List do
   r
 end
 
+# Split in two rather than written as `not(nil?(cls)) and elem(cls, 0) == :cls`,
+# because Blimp's `and` evaluates both sides: `false and elem(nil, 0)` raises.
+# A `case` arm is the only thing here that does not run until it is chosen.
 def temper_rx_set_backslash(p: List, i: Int, acc: List, neg: Bool) -> List do
   cls = temper_rx_class_of(elem(p, i))
-  is_cls = not(nil?(cls)) and elem(cls, 0) == :cls
-  r = case is_cls do
+  r = case nil?(cls) do
+    true -> temper_rx_set_range(p, i - 1, acc, neg)
+    _ -> temper_rx_set_class(p, i, acc, neg, cls)
+  end
+  r
+end
+
+def temper_rx_set_class(p: List, i: Int, acc: List, neg: Bool, cls: List) -> List do
+  r = case elem(cls, 0) == :cls do
     true -> temper_rx_set_loop(p, i + 1, append(acc, cls), neg)
     _ -> temper_rx_set_range(p, i - 1, acc, neg)
   end
@@ -2556,10 +2566,19 @@ end
 # "2023-2-3" and "999-01-01" are rejected there, and were accepted here.
 def temper_date_from_iso_parts(s: String, sign: Int) -> List do
   parts = split(s, "-")
-  # Blimp has no line continuation, so the three width checks are named rather
-  # than written as one `and` chain across four lines.
-  shaped = length(parts) == 3
-  wide = shaped and length(elem(parts, 0)) + temper_sign_width(sign) >= 4
+  # Blimp has no line continuation, so the width checks are named rather than
+  # written as one `and` chain across four lines -- and `and` evaluates both
+  # sides, so a `parts` that is not three long has to stop the chain in a
+  # `case` rather than by being false.
+  r = case length(parts) == 3 do
+    true -> temper_date_from_iso_wide(parts, sign)
+    _ -> temper_bubble()
+  end
+  r
+end
+
+def temper_date_from_iso_wide(parts: List, sign: Int) -> List do
+  wide = length(elem(parts, 0)) + temper_sign_width(sign) >= 4
   ok = wide and length(elem(parts, 1)) == 2 and length(elem(parts, 2)) == 2
   r = case ok do
     true -> temper_new_date(
