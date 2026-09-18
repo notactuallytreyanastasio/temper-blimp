@@ -452,6 +452,12 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type SafeGenerator.nextSafe()", "temper_generator_next", needsCore),
         BlimpConnectedSend("core.type Generator.get done()", "done"),
         BlimpConnectedSend("core.type Generator.close()", "close"),
+        // HTTP. `sendRequest` is the only one that does anything; the three
+        // NetResponse members are reads on what it built.
+        BlimpConnectedCall("std/net.sendRequest()", "temper_net_send", needsCore),
+        BlimpConnectedSend("std/net.type NetResponse.get status()", "status"),
+        BlimpConnectedSend("std/net.type NetResponse.get contentType()", "contentType"),
+        BlimpConnectedSend("std/net.type NetResponse.get bodyContent()", "bodyContent"),
         // Promises. The builder and the promise it hands out are one actor:
         // nothing distinguishes them but which methods a caller knows about,
         // and a caller with the builder can always reach the promise anyway.

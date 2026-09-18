@@ -1514,6 +1514,202 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── HTTP ─────────────────────────────────────────────
+#
+# std/net leaves `sendRequest` and the three NetResponse members with no body.
+# Every other backend hands them to a library -- be-py to `requests`, be-js to
+# `fetch`. Blimp has `tcp_connect` and a socket, so this is the client.
+#
+# Synchronous: the request is made and read to completion before
+# `sendRequest` answers, and the promise it answers is already settled. Temper
+# code still awaits it, which costs one resumption and reads the same.
+
+def temper_net_send(url: String, method: String, body: Any, mime: Any) -> Any do
+  where = temper_url_parts(url)
+  fd = tcp_connect(elem(where, 0), elem(where, 1))
+  case nil?(fd) do
+    true -> temper_net_broken()
+    _ -> temper_net_exchange(fd, where, method, body, mime)
+  end
+end
+
+def temper_net_broken() -> Any do
+  p = temper_new_promise()
+  temper_promise_break(p)
+  p
+end
+
+def temper_net_exchange(fd: Int, where: List, method: String, body: Any, mime: Any) -> Any do
+  text = case nil?(body) do
+    true -> ""
+    _ -> body
+  end
+  tcp_write(fd, temper_http_request(where, method, text, mime))
+  raw = temper_http_drain(fd, "")
+  tcp_close(fd)
+  p = temper_new_promise()
+  temper_promise_complete(p, temper_http_response(raw))
+  p
+end
+
+# `Connection: close` is not politeness, it is the read loop's terminator: the
+# only thing that tells this where the body ends is the server hanging up.
+def temper_http_request(where: List, method: String, body: String, mime: Any) -> String do
+  head = concat(method, concat(" ", concat(elem(where, 2), " HTTP/1.1\r\n")))
+  host = concat("Host: ", concat(elem(where, 0), "\r\n"))
+  ctype = case nil?(mime) do
+    true -> ""
+    _ -> concat("Content-Type: ", concat(mime, "\r\n"))
+  end
+  clen = concat("Content-Length: ", concat(to_string(length(body)), "\r\n"))
+  concat(head, concat(host, concat(ctype, concat(clen, concat("Connection: close\r\n\r\n", body)))))
+end
+
+# `tcp_read` answers nil for "would block" and the empty string at end of
+# stream, so both have to stop the loop.
+def temper_http_drain(fd: Int, acc: String) -> String do
+  chunk = tcp_read(fd)
+  case nil?(chunk) do
+    true -> acc
+    _ -> temper_http_more(fd, acc, chunk)
+  end
+end
+
+def temper_http_more(fd: Int, acc: String, chunk: String) -> String do
+  case empty?(chunk) do
+    true -> acc
+    _ -> temper_http_drain(fd, concat(acc, chunk))
+  end
+end
+
+# [host, port, path]. A URL with no port is the scheme's default, and the only
+# scheme here is http.
+def temper_url_parts(url: String) -> List do
+  after = split(url, "://")
+  rest = case length(after) > 1 do
+    true -> elem(after, 1)
+    _ -> url
+  end
+  cut = split(rest, "/")
+  hostport = elem(cut, 0)
+  path = case length(cut) > 1 do
+    true -> concat("/", temper_join_rest(cut, 1, ""))
+    _ -> "/"
+  end
+  hp = split(hostport, ":")
+  port = case length(hp) > 1 do
+    true -> temper_parse_int32(elem(hp, 1), 10)
+    _ -> 80
+  end
+  [elem(hp, 0), port, path]
+end
+
+def temper_join_rest(parts: List, i: Int, acc: String) -> String do
+  case i >= length(parts) do
+    true -> acc
+    _ -> temper_join_rest(parts, i + 1, temper_join_piece(acc, elem(parts, i)))
+  end
+end
+
+def temper_join_piece(acc: String, piece: String) -> String do
+  case empty?(acc) do
+    true -> piece
+    _ -> concat(acc, concat("/", piece))
+  end
+end
+
+actor TemperNetResponse do
+  state code: Int :: 0
+  state ctype: Any :: nil
+  state text: String :: ""
+
+  on :__init(c: Int, t: Any, b: String) do
+    become code: c, ctype: t, text: b
+    reply nil
+  end
+
+  on :status do reply code end
+  on :contentType do reply ctype end
+
+  # A Promise, because that is what std/net declares, even though the body was
+  # read before this object existed.
+  on :bodyContent do
+    p = temper_new_promise()
+    temper_promise_complete(p, text)
+    reply p
+  end
+end
+
+def temper_http_response(raw: String) -> Any do
+  split_at = split(raw, "\r\n\r\n")
+  head = elem(split_at, 0)
+  body = case length(split_at) > 1 do
+    true -> temper_join_body(split_at, 1, "")
+    _ -> ""
+  end
+  lines = split(head, "\r\n")
+  r = spawn TemperNetResponse
+  r <- :__init(temper_http_status(lines), temper_http_content_type(lines, 1), body)
+  r
+end
+
+# A body can contain a blank line, so re-joining everything after the first one
+# is not the same as taking the second piece.
+def temper_join_body(parts: List, i: Int, acc: String) -> String do
+  case i >= length(parts) do
+    true -> acc
+    _ -> temper_join_body(parts, i + 1, temper_join_body_piece(acc, elem(parts, i)))
+  end
+end
+
+def temper_join_body_piece(acc: String, piece: String) -> String do
+  case empty?(acc) do
+    true -> piece
+    _ -> concat(acc, concat("\r\n\r\n", piece))
+  end
+end
+
+def temper_http_status(lines: List) -> Int do
+  fields = split(elem(lines, 0), " ")
+  case length(fields) > 1 do
+    true -> temper_parse_int32(elem(fields, 1), 10)
+    _ -> 0
+  end
+end
+
+def temper_http_content_type(lines: List, i: Int) -> Any do
+  case i >= length(lines) do
+    true -> nil
+    _ -> temper_http_ct_line(lines, i)
+  end
+end
+
+def temper_http_ct_line(lines: List, i: Int) -> Any do
+  line = elem(lines, i)
+  colon = split(line, ":")
+  hit = length(colon) > 1 and downcase(elem(colon, 0)) == "content-type"
+  case hit do
+    true -> temper_trim(temper_join_rest_colon(colon, 1, ""))
+    _ -> temper_http_content_type(lines, i + 1)
+  end
+end
+
+# A content type can contain a colon in its parameters, so the value is
+# everything after the first one.
+def temper_join_rest_colon(parts: List, i: Int, acc: String) -> String do
+  case i >= length(parts) do
+    true -> acc
+    _ -> temper_join_rest_colon(parts, i + 1, temper_join_colon_piece(acc, elem(parts, i)))
+  end
+end
+
+def temper_join_colon_piece(acc: String, piece: String) -> String do
+  case empty?(acc) do
+    true -> piece
+    _ -> concat(acc, concat(":", piece))
+  end
+end
+
 # ── Promises ────────────────────────────────
 #
 # Single-threaded: there is no scheduler and no queue, and completing a promise
