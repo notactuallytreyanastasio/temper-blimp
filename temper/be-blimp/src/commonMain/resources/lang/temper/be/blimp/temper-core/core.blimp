@@ -1597,9 +1597,74 @@ end
 def temper_rx_rep_opt(p: List, i: Int, node: Any, c: Int) -> List do
   r = case c == 63 do
     true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 0, 1])
+    _ -> temper_rx_rep_brace(p, i, node, c)
+  end
+  r
+end
+
+# `pushRepeat` writes `{min}`, `{min,}` or `{min,max}` for every bound that is
+# not one of `? * +`. Reading `{` as a literal instead does not fail, it
+# matches a brace -- a wrong answer rather than a crash, which is the shape of
+# bug this project has a rule against.
+#
+# A `{` not followed by a digit is a literal brace, which is what an escaped
+# one would decode to.
+def temper_rx_rep_brace(p: List, i: Int, node: Any, c: Int) -> List do
+  r = case c == 123 do
+    true -> temper_rx_rep_maybe_bound(p, i, node)
     _ -> [node, i]
   end
   r
+end
+
+def temper_rx_rep_maybe_bound(p: List, i: Int, node: Any) -> List do
+  r = case temper_rx_digit_at(p, i + 1) do
+    true -> temper_rx_rep_bound(p, i + 1, node)
+    _ -> [node, i]
+  end
+  r
+end
+
+def temper_rx_digit_at(p: List, i: Int) -> Bool do
+  r = case i >= length(p) do
+    true -> false
+    _ -> temper_rx_is_digit(elem(p, i))
+  end
+  r
+end
+
+def temper_rx_rep_bound(p: List, i: Int, node: Any) -> List do
+  lo = temper_rx_rep_num(p, i, 0)
+  temper_rx_rep_after_lo(p, elem(lo, 1), node, elem(lo, 0))
+end
+
+def temper_rx_rep_num(p: List, i: Int, acc: Int) -> List do
+  r = case temper_rx_digit_at(p, i) do
+    true -> temper_rx_rep_num(p, i + 1, acc * 10 + (elem(p, i) - 48))
+    _ -> [acc, i]
+  end
+  r
+end
+
+def temper_rx_rep_after_lo(p: List, i: Int, node: Any, lo: Int) -> List do
+  r = case elem(p, i) == 125 do
+    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, lo, lo])
+    _ -> temper_rx_rep_comma(p, i + 1, node, lo)
+  end
+  r
+end
+
+def temper_rx_rep_comma(p: List, i: Int, node: Any, lo: Int) -> List do
+  r = case elem(p, i) == 125 do
+    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, lo, 0 - 1])
+    _ -> temper_rx_rep_hi(p, i, node, lo)
+  end
+  r
+end
+
+def temper_rx_rep_hi(p: List, i: Int, node: Any, lo: Int) -> List do
+  hi = temper_rx_rep_num(p, i, 0)
+  temper_rx_rep_loop(p, elem(hi, 1) + 1, [:rep, node, lo, elem(hi, 0)])
 end
 
 def temper_rx_atom(p: List, i: Int) -> List do
@@ -1931,9 +1996,11 @@ def temper_rx_m_cls(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: An
   r
 end
 
+# "In default mode, matches any Unicode code point except newline", which
+# std/regex says about Dot and this did not do.
 def temper_rx_m_any(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
   r = case tag == :any do
-    true -> temper_rx_m_test(pos < length(cps), cps, pos, caps, k)
+    true -> temper_rx_m_test(pos < length(cps) and elem(cps, pos) != 10, cps, pos, caps, k)
     _ -> temper_rx_m_bol(node, tag, cps, pos, caps, k)
   end
   r
