@@ -106,6 +106,9 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         /** Blimp has no module system, so a library is entered through one file. */
         const val MAIN_FILE = "main.blimp"
 
+        /** Where a translated test module writes its JUnit XML. */
+        const val TEST_RESULTS_FILE = "test-results.xml"
+
         val mimeType = MimeType("text", "blimp")
 
         /** temper-core, written in Blimp, spliced into output that needs it. */

@@ -85,7 +85,14 @@ private fun CliEnv.runMain(libraryName: DashedIdentifier): ToolchainResult {
     val blimp = this[BlimpCommand]
     val command = Command(
         args = listOf(BlimpBackend.MAIN_FILE),
-        aux = mapOf(Aux.Stderr to runDir.resolveFile("stderr.txt")),
+        // A translated test module writes its own JUnit XML here -- Blimp has no
+        // test runner to ask for one, the way be-lua asks busted for `-o junit`.
+        // Declaring it always is harmless: a module with no tests never writes
+        // the file and the harness only reads it for a test run.
+        aux = mapOf(
+            Aux.Stderr to runDir.resolveFile("stderr.txt"),
+            Aux.JunitXml to runDir.resolveFile(BlimpBackend.TEST_RESULTS_FILE),
+        ),
         cwd = runDir,
     )
     command.maybeLogBeforeRunning(blimp, shellPreferences)
