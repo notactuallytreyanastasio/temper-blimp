@@ -72,6 +72,8 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.InterfacesPropertyMembers,
         Ft.InterfacesPureVirtual,
         Ft.NamesNonascii,
+        Ft.RegexMatch,
+        Ft.RegexZeroAdvance,
         Ft.RegressionMinimalRepro,
         Ft.SemanticsBroken,
         Ft.SemanticsConstness,

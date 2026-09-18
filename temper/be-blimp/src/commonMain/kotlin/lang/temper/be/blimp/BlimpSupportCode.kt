@@ -452,6 +452,19 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type SafeGenerator.nextSafe()", "temper_generator_next", needsCore),
         BlimpConnectedSend("core.type Generator.get done()", "done"),
         BlimpConnectedSend("core.type Generator.close()", "close"),
+        // Regex. The formatter builds a pattern string in whatever dialect the
+        // backend asks for, and then hands it back to be compiled; these are
+        // the two ends of that.
+        BlimpConnectedCall("std/regex.type RegexFormatter.pushCodeTo()", "temper_regex_push_code", needsCore),
+        BlimpConnectedCall(
+            "std/regex.type RegexFormatter.regexCompileFormatted()",
+            "temper_regex_compile",
+            needsCore,
+        ),
+        BlimpConnectedCall("std/regex.type Regex.compiledFound()", "temper_regex_found", needsCore),
+        BlimpConnectedCall("std/regex.type Regex.compiledFind()", "temper_regex_find", needsCore),
+        BlimpConnectedCall("std/regex.type Regex.compiledReplace()", "temper_regex_replace", needsCore),
+        BlimpConnectedCall("std/regex.type Regex.compiledSplit()", "temper_regex_split", needsCore),
         // Date, which is a list rather than an actor: nothing mutates one.
         BlimpConnectedCall("std/temporal.type Date.constructor()", "temper_new_date", needsCore),
         BlimpConnectedCall("std/temporal.type Date.year", "temper_date_year", needsCore),

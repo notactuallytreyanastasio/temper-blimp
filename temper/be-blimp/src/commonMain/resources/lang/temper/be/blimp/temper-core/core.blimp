@@ -1495,6 +1495,886 @@ def temper_get_or(source: Any, index: Int, fallback: Any) -> Any do
   end
 end
 
+# ── Regex: the pattern parser ────────────────────────
+#
+# Temper's RegexFormatter renders a RegexNode tree into a pattern string in
+# whatever dialect the backend asked for, then hands it back to be compiled.
+# The dialect is narrow because the formatter is the only thing writing it:
+# `(?:...)`, `(?<name>...)`, `[a-z]`, `|`, `+ * ?`, `^ $ . \b \d \s \w`, and
+# `\u{N}` decimal, which is what temper_regex_push_code writes.
+#
+# A node is a list tagged with an atom:
+#   [:lit, code]            one code point
+#   [:set, negated, pairs]  pairs are [lo, hi]
+#   [:cls, kind, negated]   kind is :d, :s or :w
+#   [:any] [:bol] [:eol] [:wordb]
+#   [:seq, nodes]  [:alt, branches]
+#   [:rep, node, min, max]  max -1 is unbounded
+#   [:cap, name, node]
+
+def temper_rx_parse(pattern: String) -> Any do
+  p = u8_code_points(pattern)
+  r = temper_rx_alt(p, 0)
+  elem(r, 0)
+end
+
+def temper_rx_alt(p: List, i: Int) -> List do
+  first = temper_rx_seq(p, i)
+  temper_rx_alt_more(p, elem(first, 1), [elem(first, 0)])
+end
+
+def temper_rx_alt_more(p: List, i: Int, acc: List) -> List do
+  more = i < length(p) and elem(p, i) == 124
+  r = case more do
+    true ->
+      nxt = temper_rx_seq(p, i + 1)
+      temper_rx_alt_more(p, elem(nxt, 1), append(acc, elem(nxt, 0)))
+    _ -> temper_rx_one_or(acc, i, :alt)
+  end
+  r
+end
+
+# A sequence or alternation of one is that one, so the common pattern does not
+# pay for a wrapper the matcher would have to walk through.
+def temper_rx_one_or(acc: List, i: Int, tag: Atom) -> List do
+  n = case length(acc) == 1 do
+    true -> elem(acc, 0)
+    _ -> [tag, acc]
+  end
+  [n, i]
+end
+
+def temper_rx_seq(p: List, i: Int) -> List do
+  temper_rx_seq_loop(p, i, [])
+end
+
+def temper_rx_seq_loop(p: List, i: Int, acc: List) -> List do
+  stop = i >= length(p) or elem(p, i) == 124 or elem(p, i) == 41
+  r = case stop do
+    true -> temper_rx_seq_end(acc, i)
+    _ ->
+      one = temper_rx_rep(p, i)
+      temper_rx_seq_loop(p, elem(one, 1), append(acc, elem(one, 0)))
+  end
+  r
+end
+
+# An empty branch matches the empty string, which `(^|,)` needs when neither
+# side is there.
+def temper_rx_seq_end(acc: List, i: Int) -> List do
+  r = case empty?(acc) do
+    true -> [[:seq, []], i]
+    _ -> temper_rx_one_or(acc, i, :seq)
+  end
+  r
+end
+
+def temper_rx_rep(p: List, i: Int) -> List do
+  a = temper_rx_atom(p, i)
+  temper_rx_rep_loop(p, elem(a, 1), elem(a, 0))
+end
+
+def temper_rx_rep_loop(p: List, i: Int, node: Any) -> List do
+  c = case i < length(p) do
+    true -> elem(p, i)
+    _ -> 0
+  end
+  r = case c == 43 do
+    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 1, 0 - 1])
+    _ -> temper_rx_rep_star(p, i, node, c)
+  end
+  r
+end
+
+def temper_rx_rep_star(p: List, i: Int, node: Any, c: Int) -> List do
+  r = case c == 42 do
+    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 0, 0 - 1])
+    _ -> temper_rx_rep_opt(p, i, node, c)
+  end
+  r
+end
+
+def temper_rx_rep_opt(p: List, i: Int, node: Any, c: Int) -> List do
+  r = case c == 63 do
+    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 0, 1])
+    _ -> [node, i]
+  end
+  r
+end
+
+def temper_rx_atom(p: List, i: Int) -> List do
+  c = elem(p, i)
+  r = case c == 40 do
+    true -> temper_rx_group(p, i + 1)
+    _ -> temper_rx_atom_set(p, i, c)
+  end
+  r
+end
+
+def temper_rx_atom_set(p: List, i: Int, c: Int) -> List do
+  r = case c == 91 do
+    true -> temper_rx_set(p, i + 1)
+    _ -> temper_rx_atom_esc(p, i, c)
+  end
+  r
+end
+
+def temper_rx_atom_esc(p: List, i: Int, c: Int) -> List do
+  r = case c == 92 do
+    true -> temper_rx_escape(p, i + 1)
+    _ -> temper_rx_atom_special(p, i, c)
+  end
+  r
+end
+
+def temper_rx_atom_special(p: List, i: Int, c: Int) -> List do
+  r = case c == 46 do
+    true -> [[:any], i + 1]
+    _ -> temper_rx_atom_bol(p, i, c)
+  end
+  r
+end
+
+def temper_rx_atom_bol(p: List, i: Int, c: Int) -> List do
+  r = case c == 94 do
+    true -> [[:bol], i + 1]
+    _ -> temper_rx_atom_eol(p, i, c)
+  end
+  r
+end
+
+def temper_rx_atom_eol(p: List, i: Int, c: Int) -> List do
+  r = case c == 36 do
+    true -> [[:eol], i + 1]
+    _ -> [[:lit, c], i + 1]
+  end
+  r
+end
+
+def temper_rx_group(p: List, i: Int) -> List do
+  r = case elem(p, i) == 63 do
+    true -> temper_rx_group_q(p, i + 1)
+    _ -> temper_rx_group_body(p, i, "")
+  end
+  r
+end
+
+def temper_rx_group_q(p: List, i: Int) -> List do
+  r = case elem(p, i) == 58 do
+    true -> temper_rx_group_body(p, i + 1, "")
+    _ -> temper_rx_group_name(p, i + 1, "")
+  end
+  r
+end
+
+def temper_rx_group_name(p: List, i: Int, name: String) -> List do
+  r = case elem(p, i) == 62 do
+    true -> temper_rx_group_body(p, i + 1, name)
+    _ -> temper_rx_group_name(p, i + 1, concat(name, u8_encode_checked(elem(p, i))))
+  end
+  r
+end
+
+def temper_rx_group_body(p: List, i: Int, name: String) -> List do
+  inner = temper_rx_alt(p, i)
+  node = case length(name) == 0 do
+    true -> elem(inner, 0)
+    _ -> [:cap, name, elem(inner, 0)]
+  end
+  [node, elem(inner, 1) + 1]
+end
+
+def temper_rx_escape(p: List, i: Int) -> List do
+  c = elem(p, i)
+  r = case c == 117 do
+    true -> temper_rx_ucode(p, i + 2, 0)
+    _ -> temper_rx_escape_named(p, i, c)
+  end
+  r
+end
+
+# `\u{N}` with N in decimal, because temper_regex_push_code writes it in
+# decimal: this file is both ends of that escape.
+def temper_rx_ucode(p: List, i: Int, acc: Int) -> List do
+  c = elem(p, i)
+  r = case c == 125 do
+    true -> [[:lit, acc], i + 1]
+    _ -> temper_rx_ucode(p, i + 1, acc * 10 + (c - 48))
+  end
+  r
+end
+
+def temper_rx_escape_named(p: List, i: Int, c: Int) -> List do
+  cls = temper_rx_class_of(c)
+  r = case nil?(cls) do
+    true -> [[:lit, temper_rx_unescape(c)], i + 1]
+    _ -> [cls, i + 1]
+  end
+  r
+end
+
+def temper_rx_class_of(c: Int) -> Any do
+  r = case c == 100 do
+    true -> [:cls, :d, false]
+    _ -> temper_rx_class_of_s(c)
+  end
+  r
+end
+
+def temper_rx_class_of_s(c: Int) -> Any do
+  r = case c == 115 do
+    true -> [:cls, :s, false]
+    _ -> temper_rx_class_of_w(c)
+  end
+  r
+end
+
+def temper_rx_class_of_w(c: Int) -> Any do
+  r = case c == 119 do
+    true -> [:cls, :w, false]
+    _ -> temper_rx_class_of_neg(c)
+  end
+  r
+end
+
+def temper_rx_class_of_neg(c: Int) -> Any do
+  r = case c == 68 do
+    true -> [:cls, :d, true]
+    _ -> temper_rx_class_of_neg_s(c)
+  end
+  r
+end
+
+def temper_rx_class_of_neg_s(c: Int) -> Any do
+  r = case c == 83 do
+    true -> [:cls, :s, true]
+    _ -> temper_rx_class_of_neg_w(c)
+  end
+  r
+end
+
+def temper_rx_class_of_neg_w(c: Int) -> Any do
+  r = case c == 87 do
+    true -> [:cls, :w, true]
+    _ -> temper_rx_class_of_b(c)
+  end
+  r
+end
+
+def temper_rx_class_of_b(c: Int) -> Any do
+  r = case c == 98 do
+    true -> [:wordb]
+    _ -> nil
+  end
+  r
+end
+
+def temper_rx_unescape(c: Int) -> Int do
+  r = case c == 110 do
+    true -> 10
+    _ -> temper_rx_unescape_t(c)
+  end
+  r
+end
+
+def temper_rx_unescape_t(c: Int) -> Int do
+  r = case c == 116 do
+    true -> 9
+    _ -> temper_rx_unescape_r(c)
+  end
+  r
+end
+
+def temper_rx_unescape_r(c: Int) -> Int do
+  r = case c == 114 do
+    true -> 13
+    _ -> c
+  end
+  r
+end
+
+def temper_rx_set(p: List, i: Int) -> List do
+  neg = elem(p, i) == 94
+  j = case neg do
+    true -> i + 1
+    _ -> i
+  end
+  temper_rx_set_loop(p, j, [], neg)
+end
+
+def temper_rx_set_loop(p: List, i: Int, acc: List, neg: Bool) -> List do
+  r = case elem(p, i) == 93 do
+    true -> [[:set, neg, acc], i + 1]
+    _ -> temper_rx_set_item(p, i, acc, neg)
+  end
+  r
+end
+
+# A set item is either [:range, lo, hi] or a whole [:cls, kind, negated]:
+# `[\s\-]` is a class and a literal side by side, and a range endpoint is not
+# the only thing that can appear between the brackets.
+def temper_rx_set_item(p: List, i: Int, acc: List, neg: Bool) -> List do
+  r = case elem(p, i) == 92 do
+    true -> temper_rx_set_backslash(p, i + 1, acc, neg)
+    _ -> temper_rx_set_range(p, i, acc, neg)
+  end
+  r
+end
+
+def temper_rx_set_backslash(p: List, i: Int, acc: List, neg: Bool) -> List do
+  cls = temper_rx_class_of(elem(p, i))
+  is_cls = not(nil?(cls)) and elem(cls, 0) == :cls
+  r = case is_cls do
+    true -> temper_rx_set_loop(p, i + 1, append(acc, cls), neg)
+    _ -> temper_rx_set_range(p, i - 1, acc, neg)
+  end
+  r
+end
+
+def temper_rx_set_range(p: List, i: Int, acc: List, neg: Bool) -> List do
+  first = temper_rx_set_code(p, i)
+  lo = elem(first, 0)
+  j = elem(first, 1)
+  ranged = j + 1 < length(p) and elem(p, j) == 45 and elem(p, j + 1) != 93
+  r = case ranged do
+    true ->
+      second = temper_rx_set_code(p, j + 1)
+      temper_rx_set_loop(p, elem(second, 1), append(acc, [:range, lo, elem(second, 0)]), neg)
+    _ -> temper_rx_set_loop(p, j, append(acc, [:range, lo, lo]), neg)
+  end
+  r
+end
+
+def temper_rx_set_code(p: List, i: Int) -> List do
+  c = elem(p, i)
+  r = case c == 92 do
+    true -> temper_rx_set_escape(p, i + 1)
+    _ -> [c, i + 1]
+  end
+  r
+end
+
+def temper_rx_set_escape(p: List, i: Int) -> List do
+  c = elem(p, i)
+  r = case c == 117 do
+    true -> temper_rx_set_ucode(p, i + 2, 0)
+    _ -> temper_rx_set_plain(p, i, c)
+  end
+  r
+end
+
+def temper_rx_set_ucode(p: List, i: Int, acc: Int) -> List do
+  c = elem(p, i)
+  r = case c == 125 do
+    true -> [acc, i + 1]
+    _ -> temper_rx_set_ucode(p, i + 1, acc * 10 + (c - 48))
+  end
+  r
+end
+
+def temper_rx_set_plain(p: List, i: Int, c: Int) -> List do
+  ignore = p
+  [temper_rx_unescape(c), i + 1]
+end
+
+# ── Regex: the matcher ───────────────────────────────
+#
+# Backtracking, in continuation-passing style: every node is handed a `k` to
+# call with the position it reached, and answers nil for "no match from here".
+# The alternative is an explicit backtrack stack, and `k` is the same thing
+# written in the language instead of in a data structure.
+#
+# `cps` is the subject decoded once into code points. Positions are indices
+# into it, not byte offsets -- the byte offsets come back at the very end,
+# because a Temper StringIndex is one.
+
+def temper_rx_match(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  tag = elem(node, 0)
+  r = case tag == :lit do
+    true -> temper_rx_m_lit(node, cps, pos, caps, k)
+    _ -> temper_rx_m_set(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_lit(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case pos < length(cps) and elem(cps, pos) == elem(node, 1) do
+    true -> k(pos + 1, caps)
+    _ -> nil
+  end
+  r
+end
+
+def temper_rx_m_set(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :set do
+    true -> temper_rx_m_test(temper_rx_in_set(node, cps, pos), cps, pos, caps, k)
+    _ -> temper_rx_m_cls(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_cls(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :cls do
+    true -> temper_rx_m_test(temper_rx_in_cls(node, cps, pos), cps, pos, caps, k)
+    _ -> temper_rx_m_any(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_any(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :any do
+    true -> temper_rx_m_test(pos < length(cps), cps, pos, caps, k)
+    _ -> temper_rx_m_bol(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+# Consumes one code point when `ok`.
+def temper_rx_m_test(ok: Bool, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  ignore = cps
+  r = case ok do
+    true -> k(pos + 1, caps)
+    _ -> nil
+  end
+  r
+end
+
+# Consumes nothing.
+def temper_rx_m_here(ok: Bool, pos: Int, caps: List, k: Any) -> Any do
+  r = case ok do
+    true -> k(pos, caps)
+    _ -> nil
+  end
+  r
+end
+
+def temper_rx_m_bol(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :bol do
+    true -> temper_rx_m_here(pos == 0, pos, caps, k)
+    _ -> temper_rx_m_eol(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_eol(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :eol do
+    true -> temper_rx_m_here(pos == length(cps), pos, caps, k)
+    _ -> temper_rx_m_wordb(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_wordb(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :wordb do
+    true -> temper_rx_m_here(temper_rx_at_wordb(cps, pos), pos, caps, k)
+    _ -> temper_rx_m_seq(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_seq(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :seq do
+    true -> temper_rx_seq_at(elem(node, 1), 0, cps, pos, caps, k)
+    _ -> temper_rx_m_alt(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_alt(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :alt do
+    true -> temper_rx_alt_at(elem(node, 1), 0, cps, pos, caps, k)
+    _ -> temper_rx_m_rep(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_rep(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :rep do
+    true -> temper_rx_rep_at(elem(node, 1), elem(node, 2), elem(node, 3), 0, cps, pos, caps, k)
+    _ -> temper_rx_m_cap(node, tag, cps, pos, caps, k)
+  end
+  r
+end
+
+def temper_rx_m_cap(node: Any, tag: Atom, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case tag == :cap do
+    true -> temper_rx_cap_at(node, cps, pos, caps, k)
+    _ -> bubble :regex_unknown_node
+  end
+  r
+end
+
+def temper_rx_cap_at(node: Any, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  name = elem(node, 1)
+  start = pos
+  temper_rx_match(elem(node, 2), cps, pos, caps, fn (p2: Int, c2: List) -> Any do
+    k(p2, append(c2, [name, start, p2]))
+  end)
+end
+
+def temper_rx_seq_at(nodes: List, idx: Int, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case idx >= length(nodes) do
+    true -> k(pos, caps)
+    _ -> temper_rx_match(elem(nodes, idx), cps, pos, caps, fn (p2: Int, c2: List) -> Any do
+      temper_rx_seq_at(nodes, idx + 1, cps, p2, c2, k)
+    end)
+  end
+  r
+end
+
+def temper_rx_alt_at(branches: List, idx: Int, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  r = case idx >= length(branches) do
+    true -> nil
+    _ ->
+      got = temper_rx_match(elem(branches, idx), cps, pos, caps, k)
+      case nil?(got) do
+        true -> temper_rx_alt_at(branches, idx + 1, cps, pos, caps, k)
+        _ -> got
+      end
+  end
+  r
+end
+
+# Greedy: take one more if the body still can, and fall back to stopping.
+#
+# The `p2 == pos` guard is the whole of the zero-advance problem. `(^|,)\s*`
+# against "apples, bananas" matches the empty string at the start, and without
+# this a `*` over something that can match nothing loops until the heap runs
+# out. One empty iteration is allowed, because that is what lets a `+` whose
+# body is empty satisfy its minimum; a second is refused.
+def temper_rx_rep_at(node: Any, lo: Int, hi: Int, n: Int, cps: List, pos: Int, caps: List, k: Any) -> Any do
+  room = hi < 0 or n < hi
+  more = case room do
+    true -> temper_rx_match(node, cps, pos, caps, fn (p2: Int, c2: List) -> Any do
+      temper_rx_rep_step(node, lo, hi, n, pos, p2, cps, c2, k)
+    end)
+    _ -> nil
+  end
+  r = case nil?(more) do
+    true -> temper_rx_m_here(n >= lo, pos, caps, k)
+    _ -> more
+  end
+  r
+end
+
+def temper_rx_rep_step(node: Any, lo: Int, hi: Int, n: Int, pos: Int, p2: Int, cps: List, c2: List, k: Any) -> Any do
+  r = case p2 == pos do
+    true -> temper_rx_m_here(n + 1 >= lo, p2, c2, k)
+    _ -> temper_rx_rep_at(node, lo, hi, n + 1, cps, p2, c2, k)
+  end
+  r
+end
+
+def temper_rx_in_set(node: Any, cps: List, pos: Int) -> Bool do
+  r = case pos >= length(cps) do
+    true -> false
+    _ -> temper_rx_ranges_hit(elem(node, 2), 0, elem(cps, pos)) != elem(node, 1)
+  end
+  r
+end
+
+def temper_rx_ranges_hit(pairs: List, i: Int, c: Int) -> Bool do
+  r = case i >= length(pairs) do
+    true -> false
+    _ -> temper_rx_range_or_next(pairs, i, c)
+  end
+  r
+end
+
+def temper_rx_range_or_next(pairs: List, i: Int, c: Int) -> Bool do
+  r = case temper_rx_item_hit(elem(pairs, i), c) do
+    true -> true
+    _ -> temper_rx_ranges_hit(pairs, i + 1, c)
+  end
+  r
+end
+
+def temper_rx_item_hit(item: List, c: Int) -> Bool do
+  r = case elem(item, 0) == :range do
+    true -> c >= elem(item, 1) and c <= elem(item, 2)
+    _ -> temper_rx_cls_hit(elem(item, 1), c) != elem(item, 2)
+  end
+  r
+end
+
+def temper_rx_in_cls(node: Any, cps: List, pos: Int) -> Bool do
+  r = case pos >= length(cps) do
+    true -> false
+    _ -> temper_rx_cls_hit(elem(node, 1), elem(cps, pos)) != elem(node, 2)
+  end
+  r
+end
+
+def temper_rx_cls_hit(kind: Atom, c: Int) -> Bool do
+  r = case kind == :d do
+    true -> temper_rx_is_digit(c)
+    _ -> temper_rx_cls_hit_s(kind, c)
+  end
+  r
+end
+
+def temper_rx_cls_hit_s(kind: Atom, c: Int) -> Bool do
+  r = case kind == :s do
+    true -> temper_rx_is_space(c)
+    _ -> temper_rx_is_word(c)
+  end
+  r
+end
+
+def temper_rx_is_digit(c: Int) -> Bool do
+  c >= 48 and c <= 57
+end
+
+def temper_rx_is_space(c: Int) -> Bool do
+  c == 32 or c == 9 or c == 10 or c == 13 or c == 11 or c == 12
+end
+
+def temper_rx_is_word(c: Int) -> Bool do
+  alpha = (c >= 97 and c <= 122) or (c >= 65 and c <= 90)
+  alpha or temper_rx_is_digit(c) or c == 95
+end
+
+def temper_rx_at_wordb(cps: List, pos: Int) -> Bool do
+  before = pos > 0 and temper_rx_is_word(elem(cps, pos - 1))
+  after = pos < length(cps) and temper_rx_is_word(elem(cps, pos))
+  before != after
+end
+
+# ── Regex: search ────────────────────────────────────
+
+# The leftmost match at or after `at`, as [begin, end, captures], or nil.
+def temper_rx_search(node: Any, cps: List, at: Int) -> Any do
+  r = case at > length(cps) do
+    true -> nil
+    _ -> temper_rx_search_here(node, cps, at)
+  end
+  r
+end
+
+def temper_rx_search_here(node: Any, cps: List, at: Int) -> Any do
+  got = temper_rx_match(node, cps, at, [], fn (p2: Int, c2: List) -> Any do
+    [p2, c2]
+  end)
+  r = case nil?(got) do
+    true -> temper_rx_search(node, cps, at + 1)
+    _ -> [at, elem(got, 0), elem(got, 1)]
+  end
+  r
+end
+
+# ── Regex: what Temper asks for ──────────────────────
+#
+# A connected instance method is handed its receiver first, which is why
+# everything but the static `regexCompileFormatted` takes a leading `me`. It
+# cannot be called `self`: that is a Blimp keyword, and a parameter named it is
+# a parse error 1500 lines into the spliced prelude, reported against the
+# prelude rather than against anything a reader would connect to it.
+
+# The formatter asks how this dialect spells a numeric code escape. Decimal
+# inside `\u{}`, because temper_rx_ucode is the only thing that reads it back.
+def temper_regex_push_code(me: Any, out: Any, code: Int, inside_set: Bool) -> Any do
+  ignore = me
+  ignore2 = inside_set
+  out <- :append(concat("\\u{", concat(to_string(code), "}")))
+  nil
+end
+
+# The compiled form is the parsed tree, with the subject-independent work done
+# once. `data` is the RegexNode the pattern came from, which nothing here
+# needs: the formatted string says everything the tree does.
+def temper_regex_compile(data: Any, formatted: String) -> Any do
+  ignore = data
+  temper_rx_parse(formatted)
+end
+
+def temper_regex_found(me: Any, compiled: Any, text: String) -> Bool do
+  ignore = me
+  not(nil?(temper_rx_search(compiled, u8_code_points(text), 0)))
+end
+
+# A Temper StringIndex is a byte offset, and the matcher counts code points,
+# so every entry point converts at the boundary. `temper_rx_offsets` is that
+# conversion in one direction and `temper_rx_cp_index` in the other.
+def temper_rx_offsets(s: String) -> List do
+  temper_rx_offsets_loop(s, 0, [])
+end
+
+def temper_rx_offsets_loop(s: String, i: Int, acc: List) -> List do
+  r = case i >= length(s) do
+    true -> append(acc, length(s))
+    _ -> temper_rx_offsets_loop(s, i + u8_seq_len(char_code(s, i)), append(acc, i))
+  end
+  r
+end
+
+def temper_rx_cp_index(offs: List, byte_at: Int) -> Int do
+  temper_rx_cp_index_loop(offs, 0, byte_at)
+end
+
+def temper_rx_cp_index_loop(offs: List, i: Int, byte_at: Int) -> Int do
+  r = case i >= length(offs) or elem(offs, i) >= byte_at do
+    true -> i
+    _ -> temper_rx_cp_index_loop(offs, i + 1, byte_at)
+  end
+  r
+end
+
+def temper_rx_slice(s: String, offs: List, from: Int, to: Int) -> String do
+  slice(s, elem(offs, from), elem(offs, to) - elem(offs, from))
+end
+
+actor TemperGroup do
+  state gname: String :: ""
+  state gvalue: String :: ""
+  state gbegin: Int :: 0
+  state gend: Int :: 0
+
+  on :__init(n: String, v: String, b: Int, e: Int) do
+    gname = n
+    gvalue = v
+    gbegin = b
+    gend = e
+    become gname: gname, gvalue: gvalue, gbegin: gbegin, gend: gend
+    reply nil
+  end
+
+  on :name do reply gname end
+  on :value do reply gvalue end
+  on :begin do reply gbegin end
+  on :end do reply gend end
+end
+
+def temper_rx_group(n: String, v: String, b: Int, e: Int) -> Any do
+  g = spawn TemperGroup
+  g <- :__init(n, v, b, e)
+  g
+end
+
+actor TemperMatch do
+  state mfull: Any :: nil
+  state mgroups: Any :: nil
+
+  on :__init(f: Any, gs: Any) do
+    mfull = f
+    mgroups = gs
+    become mfull: mfull, mgroups: mgroups
+    reply nil
+  end
+
+  on :full do reply mfull end
+  on :groups do reply mgroups end
+end
+
+# A Group the translated program reads is a Group only in the sense that it
+# answers `:name`, `:value`, `:begin` and `:end`. Blimp actors are duck-typed
+# and a Temper property read is a send, so temper-core can make one without
+# naming the translated class -- which it could not do anyway, since the name
+# depends on the translation.
+def temper_rx_build_match(text: String, offs: List, m: List) -> Any do
+  full = temper_rx_group("full", temper_rx_slice(text, offs, elem(m, 0), elem(m, 1)), elem(offs, elem(m, 0)), elem(offs, elem(m, 1)))
+  groups = temper_new_map()
+  groups <- :set("full", full)
+  temper_rx_fill_groups(groups, text, offs, elem(m, 2), 0)
+  match = spawn TemperMatch
+  match <- :__init(full, groups)
+  match
+end
+
+# Later wins: a capture inside a repetition records once per iteration, and
+# `(?<x>d)|(?<y>e)` over "ee" ends with the last `e`, which is what the test
+# asks for.
+def temper_rx_fill_groups(groups: Any, text: String, offs: List, caps: List, i: Int) -> Any do
+  r = case i >= length(caps) do
+    true -> groups
+    _ ->
+      c = elem(caps, i)
+      groups <- :set(elem(c, 0), temper_rx_group(elem(c, 0), temper_rx_slice(text, offs, elem(c, 1), elem(c, 2)), elem(offs, elem(c, 1)), elem(offs, elem(c, 2))))
+      temper_rx_fill_groups(groups, text, offs, caps, i + 1)
+  end
+  r
+end
+
+def temper_regex_find(me: Any, compiled: Any, text: String, begin: Any, refs: Any) -> Any do
+  ignore = me
+  ignore2 = refs
+  offs = temper_rx_offsets(text)
+  m = temper_rx_search(compiled, u8_code_points(text), temper_rx_cp_index(offs, begin))
+  r = case nil?(m) do
+    true -> temper_bubble()
+    _ -> temper_rx_build_match(text, offs, m)
+  end
+  r
+end
+
+def temper_regex_replace(me: Any, compiled: Any, text: String, fmt: Any, refs: Any) -> String do
+  ignore = me
+  ignore2 = refs
+  temper_rx_replace_loop(compiled, text, u8_code_points(text), temper_rx_offsets(text), fmt, 0, "")
+end
+
+def temper_rx_replace_loop(node: Any, text: String, cps: List, offs: List, fmt: Any, pos: Int, acc: String) -> String do
+  m = temper_rx_search(node, cps, pos)
+  r = case nil?(m) do
+    true -> concat(acc, temper_rx_slice(text, offs, pos, length(cps)))
+    _ -> temper_rx_replace_one(node, text, cps, offs, fmt, pos, acc, m)
+  end
+  r
+end
+
+def temper_rx_replace_one(node: Any, text: String, cps: List, offs: List, fmt: Any, pos: Int, acc: String, m: List) -> String do
+  before = temper_rx_slice(text, offs, pos, elem(m, 0))
+  piece = fmt(temper_rx_build_match(text, offs, m))
+  so_far = concat(acc, concat(before, piece))
+  r = case elem(m, 1) == elem(m, 0) do
+    true -> temper_rx_replace_empty(node, text, cps, offs, fmt, elem(m, 0), so_far)
+    _ -> temper_rx_replace_loop(node, text, cps, offs, fmt, elem(m, 1), so_far)
+  end
+  r
+end
+
+# A zero-length match has to be stepped over by hand, or the next search finds
+# the same one and the loop never ends. `(^|,)\s*` matches the empty string at
+# the start of every list this is used on.
+def temper_rx_replace_empty(node: Any, text: String, cps: List, offs: List, fmt: Any, at: Int, acc: String) -> String do
+  r = case at >= length(cps) do
+    true -> acc
+    _ -> temper_rx_replace_loop(node, text, cps, offs, fmt, at + 1, concat(acc, temper_rx_slice(text, offs, at, at + 1)))
+  end
+  r
+end
+
+def temper_regex_split(me: Any, compiled: Any, text: String, refs: Any) -> List do
+  ignore = me
+  ignore2 = refs
+  temper_rx_split_loop(compiled, text, u8_code_points(text), temper_rx_offsets(text), 0, [])
+end
+
+def temper_rx_split_loop(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List) -> List do
+  m = temper_rx_search(node, cps, pos)
+  r = case nil?(m) do
+    true -> append(acc, temper_rx_slice(text, offs, pos, length(cps)))
+    _ -> temper_rx_split_one(node, text, cps, offs, pos, acc, m)
+  end
+  r
+end
+
+def temper_rx_split_one(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List, m: List) -> List do
+  empty_hit = elem(m, 1) == elem(m, 0)
+  r = case empty_hit do
+    true -> temper_rx_split_skip(node, text, cps, offs, pos, acc, m)
+    _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 1), append(acc, temper_rx_slice(text, offs, pos, elem(m, 0))))
+  end
+  r
+end
+
+def temper_rx_split_skip(node: Any, text: String, cps: List, offs: List, pos: Int, acc: List, m: List) -> List do
+  r = case elem(m, 0) >= length(cps) do
+    true -> append(acc, temper_rx_slice(text, offs, pos, length(cps)))
+    _ -> temper_rx_split_loop(node, text, cps, offs, elem(m, 0) + 1, acc)
+  end
+  r
+end
+
 # ── Generators ──────────────────────────────────
 #
 # BlimpSupportNetwork says "Blimp never needs generators", and the state
