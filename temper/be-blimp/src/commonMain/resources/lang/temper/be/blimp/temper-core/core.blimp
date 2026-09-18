@@ -1671,17 +1671,53 @@ def temper_date_from_iso(s: String) -> List do
   r
 end
 
+# Temper's parser walks in from the end -- two characters of day, a dash, two
+# of month, a dash, and at least four characters of year counting the sign. So
+# "2023-2-3" and "999-01-01" are rejected there, and were accepted here.
 def temper_date_from_iso_parts(s: String, sign: Int) -> List do
   parts = split(s, "-")
-  r = case length(parts) == 3 do
+  # Blimp has no line continuation, so the three width checks are named rather
+  # than written as one `and` chain across four lines.
+  shaped = length(parts) == 3
+  wide = shaped and length(elem(parts, 0)) + temper_sign_width(sign) >= 4
+  ok = wide and length(elem(parts, 1)) == 2 and length(elem(parts, 2)) == 2
+  r = case ok do
     true -> temper_new_date(
-      sign * to_int(elem(parts, 0)),
-      to_int(elem(parts, 1)),
-      to_int(elem(parts, 2)),
+      temper_iso_int(concat(temper_sign_text(sign), elem(parts, 0))),
+      temper_iso_int(elem(parts, 1)),
+      temper_iso_int(elem(parts, 2)),
     )
     _ -> temper_bubble()
   end
   r
+end
+
+# The sign goes back onto the field rather than multiplying the result,
+# because `temper_parse_int32` trims: parsing "  23" and negating it accepts
+# "-  23-01-01", which `toInt32` handed the whole field rejects.
+def temper_sign_text(sign: Int) -> String do
+  t = case sign < 0 do
+    true -> "-"
+    _ -> ""
+  end
+  t
+end
+
+def temper_sign_width(sign: Int) -> Int do
+  n = case sign < 0 do
+    true -> 1
+    _ -> 0
+  end
+  n
+end
+
+# `to_int` is Zig's parseInt over an i64, so it takes a leading `+`, takes `_`
+# as a digit separator, takes numbers no Int can hold, and raises rather than
+# bubbling on a field that is not a number at all. `toInt32` is what Temper
+# calls, and `temper_parse_int32` is already that -- sign-strict, trimming and
+# range-checked, and it bubbles. So there is nothing left to catch.
+def temper_iso_int(s: String) -> Int do
+  temper_parse_int32(s, 10)
 end
 
 def temper_leading_minus(s: String) -> Bool do
