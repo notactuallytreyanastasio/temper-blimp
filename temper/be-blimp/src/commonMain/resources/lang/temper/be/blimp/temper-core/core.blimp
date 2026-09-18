@@ -112,7 +112,16 @@ def u8_decode_at(s: String, i: Int) -> Int do
   end
 end
 
-# Encode one code point as UTF-8 bytes.
+# Encode one code point as UTF-8 bytes. Temper bubbles rather than encoding
+# something that is not a code point: past the last one, or a surrogate half,
+# which UTF-8 has no business carrying.
+def u8_encode_checked(cp: Int) -> String do
+  case cp < 0 or cp > 1114111 or (cp >= 55296 and cp <= 57343) do
+    true -> temper_bubble()
+    _ -> u8_encode(cp)
+  end
+end
+
 def u8_encode(cp: Int) -> String do
   case cp < 128 do
     true -> from_char_code(cp)
@@ -143,6 +152,18 @@ def u8_cp_loop(s: String, i: Int, acc: List) -> List do
   end
 end
 
+# String.fromCodePoints: every code point encoded and run together.
+def temper_string_from_code_points(codes: Any) -> String do
+  temper_from_cp_loop(temper_items(codes), "")
+end
+
+def temper_from_cp_loop(codes: List, acc: String) -> String do
+  case empty?(codes) do
+    true -> acc
+    _ -> temper_from_cp_loop(tail(codes), concat(acc, u8_encode_checked(head(codes))))
+  end
+end
+
 # Temper's String.length counts code points, not bytes.
 def temper_string_length(s: String) -> Int do
   length(u8_code_points(s))
@@ -150,12 +171,103 @@ end
 
 # Temper's String indices are byte offsets that must land on a sequence start,
 # so advancing is a byte step of the current sequence's width.
+#
+# The end is as far as it goes: `char_code` past the end answers nil, and
+# u8_seq_len takes an Int, so walking off the end used to stop the program
+# rather than stop at the end. `"foo-bar".step(i, 100)` is the case that
+# found it.
 def temper_string_next(s: String, i: Int) -> Int do
-  i + u8_seq_len(char_code(s, i))
+  case i >= length(s) do
+    true -> length(s)
+    _ -> i + u8_seq_len(char_code(s, i))
+  end
 end
 
 def temper_string_code_point_at(s: String, i: Int) -> Int do
   u8_decode_at(s, i)
+end
+
+# ── Float to Int ─────────────────────────────────────
+#
+# Temper truncates toward zero. Blimp's floor and ceil both answer Ints, and
+# which one truncates depends on the sign.
+
+def temper_float_trunc(f: Float) -> Int do
+  case f < 0.0 do
+    true -> ceil(f)
+    _ -> floor(f)
+  end
+end
+
+# Checked: a NaN or anything outside Int32 bubbles.
+def temper_float_to_int32(f: Float) -> Int do
+  case f != f or f <= 0.0 - 2147483649.0 or f >= 2147483648.0 do
+    true -> temper_bubble()
+    _ -> temper_float_trunc(f)
+  end
+end
+
+# Unchecked: saturates at the ends, and a NaN is zero.
+def temper_float_to_int32_unsafe(f: Float) -> Int do
+  case f != f do
+    true -> 0
+    _ -> case f >= 2147483648.0 do
+      true -> 2147483647
+      _ -> case f <= 0.0 - 2147483649.0 do
+        true -> 0 - 2147483648
+        _ -> temper_float_trunc(f)
+      end
+    end
+  end
+end
+
+def temper_float_to_int64(f: Float) -> Int do
+  case f != f or f < 0.0 - 9007199254740991.0 or f > 9007199254740991.0 do
+    true -> temper_bubble()
+    _ -> temper_float_trunc(f)
+  end
+end
+
+def temper_float_to_int64_unsafe(f: Float) -> Int do
+  case f != f do
+    true -> 0
+    _ -> case f > 9007199254740991.0 do
+      true -> 9007199254740991
+      _ -> case f < 0.0 - 9007199254740991.0 do
+        true -> 0 - 9007199254740991
+        _ -> temper_float_trunc(f)
+      end
+    end
+  end
+end
+
+# ── Int to String with a radix ───────────────────────
+#
+# Blimp's to_string takes no radix, and `cp.toString(16)` is how the string
+# tests print a code point.
+
+def temper_int_to_string_radix(n: Int, radix: Int) -> String do
+  case n == 0 do
+    true -> "0"
+    _ -> case n < 0 do
+      true -> concat("-", temper_radix_digits(0 - n, radix, ""))
+      _ -> temper_radix_digits(n, radix, "")
+    end
+  end
+end
+
+def temper_radix_digits(n: Int, radix: Int, acc: String) -> String do
+  case n == 0 do
+    true -> acc
+    _ -> temper_radix_digits(n / radix, radix, concat(temper_radix_digit(rem(n, radix)), acc))
+  end
+end
+
+def temper_radix_digit(d: Int) -> String do
+  case d < 10 do
+    true -> from_char_code(48 + d)
+    _ -> from_char_code(87 + d)
+  end
 end
 
 # ── Checked division ─────────────────────────────────
@@ -200,12 +312,42 @@ def temper_digit_lower(c: Int) -> Int do
   end
 end
 
-def temper_parse_int64(s: String, radix: Int) -> Int do
-  n = length(s)
-  case n == 0 do
-    true -> temper_bubble()
-    _ -> temper_parse_signed(s, radix, n)
+# The radix is optional in Temper and nil when left out, and the text may be
+# padded: `" 2 ".toInt32()` is 2.
+def temper_parse_int64(s: String, radix: Any) -> Int do
+  t = temper_trim(s)
+  r = case nil?(radix) do
+    true -> 10
+    _ -> radix
   end
+  n = length(t)
+  # Base 36 is as far as the digits go: `"20".toInt32(37)` is an error, not 74.
+  case n == 0 or r < 2 or r > 36 do
+    true -> temper_bubble()
+    _ -> temper_parse_signed(t, r, n)
+  end
+end
+
+def temper_trim(s: String) -> String do
+  temper_trim_end(temper_trim_start(s))
+end
+
+def temper_trim_start(s: String) -> String do
+  case empty?(s) or not(temper_is_space(char_code(s, 0))) do
+    true -> s
+    _ -> temper_trim_start(slice(s, 1, length(s) - 1))
+  end
+end
+
+def temper_trim_end(s: String) -> String do
+  case empty?(s) or not(temper_is_space(char_code(s, length(s) - 1))) do
+    true -> s
+    _ -> temper_trim_end(slice(s, 0, length(s) - 1))
+  end
+end
+
+def temper_is_space(c: Int) -> Bool do
+  c == 32 or c == 9 or c == 10 or c == 13
 end
 
 def temper_parse_signed(s: String, radix: Int, n: Int) -> Int do
@@ -267,7 +409,7 @@ def temper_parse_positive(acc: Int) -> Int do
   end
 end
 
-def temper_parse_int32(s: String, radix: Int) -> Int do
+def temper_parse_int32(s: String, radix: Any) -> Int do
   temper_fit_int32(temper_parse_int64(s, radix))
 end
 
@@ -469,6 +611,16 @@ def temper_string_split_loop(s: String, sep: String, acc: List) -> List do
       acc ++ [slice(s, 0, i)]
     )
   end
+end
+
+# `indexOf` answers a byte offset, or -1 when the needle is not there. A nil
+# start means from the beginning.
+def temper_string_index_of(s: String, needle: String, start: Any) -> Int do
+  from = case nil?(start) do
+    true -> 0
+    _ -> start
+  end
+  temper_index_of_from(s, needle, from)
 end
 
 def temper_index_of_from(s: String, sub: String, i: Int) -> Int do
@@ -870,7 +1022,10 @@ def temper_insert_loop(rest: List, x: Any, cmp: Any, acc: List) -> List do
     true -> append(acc, x)
     _ ->
       h = head(rest)
-      case cmp(x, h) <= 0 do
+      # Strictly less than: an item equal to one already placed goes after it,
+      # which is what makes the sort stable. With `<= 0` a run of equal items
+      # comes out reversed, and sorting by one field of a record showed it.
+      case cmp(x, h) < 0 do
         true -> (append(acc, x)) ++ rest
         _ -> temper_insert_loop(tail(rest), x, cmp, append(acc, h))
       end
