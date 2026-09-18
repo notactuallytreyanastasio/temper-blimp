@@ -1200,8 +1200,19 @@ end
 
 def temper_run_tests(tests: List, path: String) -> Any do
   results = temper_run_tests_loop(tests, [])
-  write_file(path, temper_junit_xml(results))
-  temper_report_tests(results, 0)
+  # A report nobody can read is a failed run: the harness reads this file, and
+  # `write_file` answers false rather than raising, so ignoring the answer
+  # would turn "could not write" into "all tests passed".
+  wrote = write_file(path, temper_junit_xml(results))
+  case wrote do
+    true -> nil
+    _ -> puts(concat("could not write ", path))
+  end
+  already = case wrote do
+    true -> 0
+    _ -> 1
+  end
+  temper_report_tests(results, already)
 end
 
 def temper_run_tests_loop(tests: List, acc: List) -> List do
