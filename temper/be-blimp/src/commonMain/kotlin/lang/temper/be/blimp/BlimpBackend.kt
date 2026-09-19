@@ -93,13 +93,18 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         // source is spliced in and its `connected_<name>` functions are what a
         // @connected declaration calls.
         val connectedSources = mutableListOf<String>()
+        // One counter for the whole file. Every module below is translated by
+        // its own BlimpTranslator and every one of their outputs is appended
+        // to the same `main.blimp`, so a counter that starts at zero per
+        // module hands out `blimp_loop_3` once per module that gets that far.
+        val names = BlimpNames()
         val libraryName = libraryConfigurations.currentLibraryConfiguration.libraryName
         for (moduleSet in moduleSets) {
             val own = moduleSet === finished
             for (module in moduleSet.modules) {
                 val connectedPath = module.codeLocation.codeLocation.sourceFile.resolveFile(CONNECTED_FILE)
                 rawBackendFiles[connectedPath]?.let(connectedSources::add)
-                val translated = BlimpTranslator(module, types, emitTests = own).translateModule()
+                val translated = BlimpTranslator(module, types, emitTests = own, names = names).translateModule()
                 declarations.addAll(translated.declarations)
                 mainStatements.addAll(translated.mainStatements)
                 preludeHelpers.addAll(translated.preludeHelpers)

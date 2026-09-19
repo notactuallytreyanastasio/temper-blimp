@@ -64,6 +64,11 @@ private val notIdentifierChar = Regex("[^A-Za-z0-9_]")
  * Blimp has no module system, so every name in a translated program shares one
  * flat namespace. TmpL names already carry a disambiguating suffix (`a__4`),
  * which is what keeps that workable.
+ *
+ * [gensym] has no such suffix to lean on, only a counter, so one instance has
+ * to cover everything that lands in one file -- which is every module of every
+ * library in the dependency graph, not one module. It is built once in
+ * [BlimpBackend.translate] and passed to each module's translator.
  */
 internal class BlimpNames {
     private var gensymCount = 0
