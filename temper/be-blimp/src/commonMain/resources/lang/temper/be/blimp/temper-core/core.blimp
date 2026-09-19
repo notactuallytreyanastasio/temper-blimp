@@ -2222,16 +2222,31 @@ def temper_run_async_wait(readers: List, wait: Int) -> Any do
   end
   r = case empty?(readers) do
     true -> sleep_ms(ms)
-    _ -> temper_poll_stdin(ms)
+    _ -> temper_poll_and_rest(ms)
   end
   r
 end
 
-def temper_poll_stdin(ms: Int) -> Any do
+# A poll that answers early with nothing to read would send this loop straight
+# round again, and with the next timer still not due there would be nothing to
+# do but poll again: a spin, at a whole core, for as long as the program runs.
+# That is not hypothetical -- `poll` on a /dev/null stdin does exactly this on
+# macOS -- so the rest of the wait is slept off rather than trusted away.
+def temper_poll_and_rest(ms: Int) -> Any do
+  before = now_ms()
   ready = tcp_poll([0], ms)
-  r = case empty?(ready) do
-    true -> nil
-    _ -> temper_wake_reader()
+  woke = not(empty?(ready))
+  r = case woke do
+    true -> temper_wake_reader()
+    _ -> temper_rest_of(ms - (now_ms() - before))
+  end
+  r
+end
+
+def temper_rest_of(left: Int) -> Any do
+  r = case left > 0 do
+    true -> sleep_ms(left)
+    _ -> nil
   end
   r
 end
