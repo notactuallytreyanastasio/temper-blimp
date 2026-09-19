@@ -590,6 +590,15 @@ internal const val TEMPER_INT32 = "temper_int32"
 
 /** The cell a local lives in when a nested function assigns to it. */
 internal const val TEMPER_NEW_CELL = "temper_new_cell"
+
+/**
+ * The loop that settles what `sleep` and `readLine` left pending.
+ *
+ * Emitted once at the end of every program that touches temper-core, because
+ * a program whose last statement starts an `async` block would otherwise exit
+ * with that block parked on a promise nothing was going to settle.
+ */
+internal const val TEMPER_RUN_ASYNC = "temper_run_async"
 internal const val CELL_GET = "get"
 internal const val CELL_SET = "set"
 
