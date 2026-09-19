@@ -16,12 +16,14 @@ import lang.temper.be.cli.RunnerSpecifics
 import lang.temper.be.cli.ToolSpecifics
 import lang.temper.be.cli.ToolchainRequest
 import lang.temper.be.cli.ToolchainResult
+import lang.temper.be.cli.composing
 import lang.temper.be.cli.maybeLogBeforeRunning
 import lang.temper.common.RFailure
 import lang.temper.common.RResult
 import lang.temper.fs.OutDir
 import lang.temper.library.relativeOutputDirectoryForLibrary
 import lang.temper.log.FilePath
+import lang.temper.log.filePath
 import lang.temper.log.resolveFile
 import lang.temper.name.DashedIdentifier
 
@@ -32,13 +34,27 @@ import lang.temper.name.DashedIdentifier
  * the file, so running a translated library is a single command.
  */
 object BlimpSpecifics : RunnerSpecifics {
+    /**
+     * `blimp` takes a file, not a `-e` or a `-c`, so a string of source has to
+     * become one before it can run. be-lua does the same thing for the same
+     * reason; be-py, whose interpreter does take `-c`, does not.
+     */
     override fun runSingleSource(
         cliEnv: CliEnv,
         code: String,
         env: Map<String, String>,
         aux: Map<Aux, FilePath>,
-    ): RResult<EffortSuccess, CliFailure> {
-        TODO("Not yet implemented")
+    ): RResult<EffortSuccess, CliFailure> = cliEnv.composing(this) {
+        val sourceFile = filePath(SINGLE_SOURCE_FILE)
+        write(code, sourceFile)
+        this[BlimpCommand].run(
+            Command(
+                args = listOf(SINGLE_SOURCE_FILE),
+                cwd = FilePath.emptyPath,
+                env = env,
+                aux = aux,
+            ),
+        )
     }
 
     override fun runBestEffort(
@@ -46,7 +62,13 @@ object BlimpSpecifics : RunnerSpecifics {
         request: ToolchainRequest,
         code: OutDir,
         dependencies: Dependencies<*>,
-    ): List<ToolchainResult> = runBlimp(cliEnv, request)
+    ): List<ToolchainResult> = when (request) {
+        // The REPL is the one request that needs to know what was built, and
+        // `runBlimp` is also called straight from the functional harness,
+        // which has no dependencies to hand it. So it is answered here.
+        is ExecInteractiveRepl -> cliEnv.execRepl(dependencies)
+        else -> runBlimp(cliEnv, request)
+    }
 
     override val backendId get() = BlimpBackend.Factory.backendId
 
@@ -56,6 +78,9 @@ object BlimpSpecifics : RunnerSpecifics {
 object BlimpCommand : ToolSpecifics {
     override val cliNames = listOf("blimp")
 }
+
+/** Where [BlimpSpecifics.runSingleSource] parks a string of source to run it. */
+private const val SINGLE_SOURCE_FILE = "__CODE__.blimp"
 
 internal fun runBlimp(cliEnv: CliEnv, request: ToolchainRequest): List<ToolchainResult> {
     return when (request) {
@@ -67,8 +92,51 @@ internal fun runBlimp(cliEnv: CliEnv, request: ToolchainRequest): List<Toolchain
             else -> listOf(cliEnv.runMain(libraryName))
         }
         is RunBackendSpecificCompilationStepRequest -> error(request)
-        is ExecInteractiveRepl -> unavailable(cliEnv, "Blimp backend does not yet drive `blimp --repl`")
+        is ExecInteractiveRepl -> error(request)
     }
+}
+
+/**
+ * Hand the terminal to `blimp --repl`, seeded with one library.
+ *
+ * be-lua's shell prints a `require` per library and loads none of them, which
+ * it can do because Lua has a module system. Blimp does not: `main.blimp` is
+ * the whole library and there is nothing to type at the prompt that would pull
+ * a second one in. So this picks one library, loads it, and says which.
+ */
+private fun CliEnv.execRepl(dependencies: Dependencies<*>): List<ToolchainResult> {
+    val libraryNames = dependencies.libraryConfigurations.byLibraryName.keys.toList()
+    val libraryName = libraryNames.firstOrNull()
+        ?: return unavailable(this, "Blimp backend needs a library to open a REPL over")
+    val runDir = relativeOutputDirectoryForLibrary(BlimpBackend.Factory.backendId, libraryName)
+    val blimp = this[BlimpCommand]
+    shellPreferences.console.log(
+        buildString {
+            append("Starting blimp interactive shell over ${libraryName.text}.\n")
+            append("Blimp has no module system, so the library is evaluated into the prompt")
+            append(" rather than named there.\n")
+            if (libraryNames.size > 1) {
+                val rest = libraryNames.drop(1).joinToString(", ") { it.text }
+                append("Not loaded, because only one library fits in one prompt: $rest\n")
+            }
+        },
+    )
+    val command = Command(
+        args = listOf("--repl", BlimpBackend.MAIN_FILE),
+        cwd = runDir,
+    )
+    blimp.runAsLast(command)
+    // `runAsLast` only returns when the exec itself failed.
+    return listOf(
+        ToolchainResult(
+            result = RFailure(
+                CliFailure(
+                    message = "execve of ${blimp.command} failed",
+                    effort = Effort(command = blimp.specify(command), cliEnv = this),
+                ),
+            ),
+        ),
+    )
 }
 
 private fun unavailable(cliEnv: CliEnv, message: String = "Blimp backend cannot serve this request") =
