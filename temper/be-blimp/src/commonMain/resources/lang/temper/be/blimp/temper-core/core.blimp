@@ -1881,10 +1881,16 @@ def temper_rx_at(p: List, i: Int) -> Int do
   end
 end
 
+# `temper_rx_alt` stops at a `)` or at the end of the pattern, so stopping
+# anywhere else is impossible and stopping early means there was a `)` with no
+# `(`. Taking the node and discarding the rest is what compiled `a)b` to `a`.
 def temper_rx_parse(pattern: String) -> Any do
   p = u8_code_points(pattern)
   r = temper_rx_alt(p, 0)
-  elem(r, 0)
+  case elem(r, 1) >= length(p) do
+    true -> elem(r, 0)
+    _ -> bubble "regex: a closing paren with nothing open"
+  end
 end
 
 def temper_rx_alt(p: List, i: Int) -> List do
@@ -2122,11 +2128,13 @@ def temper_rx_group_body(p: List, i: Int, name: String) -> List do
     true -> elem(inner, 0)
     _ -> [:cap, name, elem(inner, 0)]
   end
-  # `temper_rx_alt` stops at `)` or at the end of the pattern, and skipping a
-  # closing paren that is not there is how `(?:a` compiled to `a`.
-  case temper_rx_at(p, elem(inner, 1)) == 41 do
-    true -> [node, elem(inner, 1) + 1]
-    _ -> bubble "regex: a group is never closed"
+  # Asking `temper_rx_at` whether the next character is a `)` bubbles with the
+  # generic "ends in the middle of something" when there is no next character,
+  # so the branch that said a group was never closed was unreachable -- 30,761
+  # fuzzed patterns never produced it. The position is what to test.
+  case elem(inner, 1) >= length(p) do
+    true -> bubble "regex: a group is never closed"
+    _ -> [node, elem(inner, 1) + 1]
   end
 end
 
