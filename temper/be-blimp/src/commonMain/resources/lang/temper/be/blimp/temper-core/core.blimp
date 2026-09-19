@@ -1993,13 +1993,85 @@ def temper_rx_rep(p: List, i: Int) -> List do
   temper_rx_rep_loop(p, elem(a, 1), elem(a, 0))
 end
 
+# An unbounded repetition of an unbounded repetition is one repetition.
+#
+# `pushRepeat` wraps its body in `(?:...)` before adding the quantifier, so
+# `new Repeat(new Repeat(x, 0, null), 0, null)` is written `(?:(?:x)*)*` and
+# is ordinary Temper. Matched as written it is exponential: the outer loop can
+# split n characters between its iterations in 2^(n-1) ways and a backtracking
+# matcher tries all of them. Twelve characters exhausted a 2 GB heap.
+#
+#   (x*)*  (x*)+  (x+)*  ->  x*        (x+)+  ->  x+
+#
+# Only when the body holds no capture. The collapsed node matches the same
+# strings either way, but which iteration a group inside it ends up recording
+# is not the same question, and that one has an answer the tests depend on.
+def temper_rx_collapse(node: Any, lo: Int, hi: Int) -> List do
+  inner = elem(node, 1)
+  collapsible = hi < 0 and elem(node, 3) < 0 and not(temper_rx_has_cap(inner))
+  r = case collapsible do
+    true -> [:rep, inner, lo * elem(node, 2), 0 - 1]
+    _ -> [:rep, node, lo, hi]
+  end
+  r
+end
+
+def temper_rx_rep_node(node: Any, lo: Int, hi: Int) -> List do
+  r = case elem(node, 0) == :rep do
+    true -> temper_rx_collapse(node, lo, hi)
+    _ -> [:rep, node, lo, hi]
+  end
+  r
+end
+
+def temper_rx_has_cap(node: Any) -> Bool do
+  tag = elem(node, 0)
+  r = case tag == :cap do
+    true -> true
+    _ -> temper_rx_has_cap_in(node, tag)
+  end
+  r
+end
+
+def temper_rx_has_cap_in(node: Any, tag: Atom) -> Bool do
+  r = case tag == :seq or tag == :alt do
+    true -> temper_rx_any_has_cap(elem(node, 1), 0)
+    _ -> temper_rx_has_cap_rep(node, tag)
+  end
+  r
+end
+
+def temper_rx_has_cap_rep(node: Any, tag: Atom) -> Bool do
+  r = case tag == :rep do
+    true -> temper_rx_has_cap(elem(node, 1))
+    _ -> false
+  end
+  r
+end
+
+def temper_rx_any_has_cap(nodes: List, i: Int) -> Bool do
+  r = case i >= length(nodes) do
+    true -> false
+    _ -> temper_rx_any_has_cap_at(nodes, i)
+  end
+  r
+end
+
+def temper_rx_any_has_cap_at(nodes: List, i: Int) -> Bool do
+  r = case temper_rx_has_cap(elem(nodes, i)) do
+    true -> true
+    _ -> temper_rx_any_has_cap(nodes, i + 1)
+  end
+  r
+end
+
 def temper_rx_rep_loop(p: List, i: Int, node: Any) -> List do
   c = case i < length(p) do
     true -> elem(p, i)
     _ -> 0
   end
   r = case c == 43 do
-    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 1, 0 - 1])
+    true -> temper_rx_rep_loop(p, i + 1, temper_rx_rep_node(node, 1, 0 - 1))
     _ -> temper_rx_rep_star(p, i, node, c)
   end
   r
@@ -2007,7 +2079,7 @@ end
 
 def temper_rx_rep_star(p: List, i: Int, node: Any, c: Int) -> List do
   r = case c == 42 do
-    true -> temper_rx_rep_loop(p, i + 1, [:rep, node, 0, 0 - 1])
+    true -> temper_rx_rep_loop(p, i + 1, temper_rx_rep_node(node, 0, 0 - 1))
     _ -> temper_rx_rep_opt(p, i, node, c)
   end
   r
