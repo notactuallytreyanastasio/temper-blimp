@@ -1749,15 +1749,120 @@ def temper_http_response(raw: String, method: String) -> Any do
     _ -> ""
   end
   lines = split(head, "\r\n")
-  temper_http_check_length(lines, body, method)
+  decoded = temper_http_decode(lines, body)
+  temper_http_check_length(lines, decoded, method)
   r = spawn TemperNetResponse
-  r <- :__init(temper_http_status(lines), temper_http_content_type(lines, 1), body)
+  r <- :__init(temper_http_status(lines), temper_http_content_type(lines, 1), decoded)
   r
 end
 
 # `tcp_read` answers the empty string both when the peer closes cleanly and
 # when it resets, so a connection dropped halfway through a body looks exactly
 # like a body that ended. The server already said how long it would be.
+# A chunked body is not a body. It is a sequence of `<hex size>\r\n<bytes>\r\n`
+# ending in a zero-length chunk, and handing it to the caller unread gave them
+# a string with the sizes still in it -- `5\r\nhello\r\n1\r\n \r\n6\r\nworld!`
+# where the answer is `hello world!`. That is not a missing feature, it is a
+# wrong answer that looks like a right one, which is the thing this project
+# has a rule against.
+#
+# HTTP/1.1 servers reach for chunked whenever they do not know the length in
+# advance, which is most of the time something is generated rather than read
+# off a disk.
+def temper_http_decode(lines: List, body: String) -> String do
+  te = temper_http_header(lines, 1, "transfer-encoding")
+  # Not `not(nil?(te)) and contains(downcase(te), ...)`. `and` evaluates both
+  # sides, so a response with no Transfer-Encoding handed nil to `downcase`
+  # and the whole request died -- which is chapter 71's finding, made again by
+  # the person who wrote chapter 71.
+  r = case nil?(te) do
+    true -> body
+    _ -> temper_http_decode_with(te, body)
+  end
+  r
+end
+
+def temper_http_decode_with(te: String, body: String) -> String do
+  r = case contains(downcase(te), "chunked") do
+    true -> temper_http_dechunk(body, 0, "")
+    _ -> body
+  end
+  r
+end
+
+def temper_http_dechunk(s: String, i: Int, acc: String) -> String do
+  e = temper_find_from(s, "\r\n", i)
+  case e < 0 do
+    true -> temper_raise("net: a chunked body ended in the middle of a chunk header")
+    _ -> temper_http_dechunk_size(s, i, e, acc)
+  end
+end
+
+# A chunk header may carry extensions after a `;`. Nothing here reads them.
+def temper_http_dechunk_size(s: String, i: Int, e: Int, acc: String) -> String do
+  size = temper_hex_value(elem(split(slice(s, i, e - i), ";"), 0))
+  case size == 0 do
+    true -> acc
+    _ -> temper_http_dechunk_take(s, e + 2, size, acc)
+  end
+end
+
+def temper_http_dechunk_take(s: String, at: Int, size: Int, acc: String) -> String do
+  case at + size > length(s) do
+    true -> temper_raise("net: a chunked body stopped early")
+    _ -> temper_http_dechunk(s, at + size + 2, concat(acc, slice(s, at, size)))
+  end
+end
+
+def temper_find_from(s: String, needle: String, from: Int) -> Int do
+  case from + length(needle) > length(s) do
+    true -> 0 - 1
+    _ -> temper_find_at(s, needle, from)
+  end
+end
+
+def temper_find_at(s: String, needle: String, at: Int) -> Int do
+  case slice(s, at, length(needle)) == needle do
+    true -> at
+    _ -> temper_find_from(s, needle, at + 1)
+  end
+end
+
+def temper_hex_value(text: String) -> Int do
+  temper_hex_loop(temper_trim(text), 0, 0)
+end
+
+def temper_hex_loop(s: String, i: Int, acc: Int) -> Int do
+  case i >= length(s) do
+    true -> acc
+    _ -> temper_hex_loop(s, i + 1, acc * 16 + temper_hex_digit(char_code(s, i)))
+  end
+end
+
+def temper_hex_digit(c: Int) -> Int do
+  d = case c >= 48 and c <= 57 do
+    true -> c - 48
+    _ -> temper_hex_letter(c)
+  end
+  d
+end
+
+def temper_hex_letter(c: Int) -> Int do
+  d = case c >= 97 and c <= 102 do
+    true -> c - 87
+    _ -> temper_hex_upper(c)
+  end
+  d
+end
+
+def temper_hex_upper(c: Int) -> Int do
+  d = case c >= 65 and c <= 70 do
+    true -> c - 55
+    _ -> temper_raise("net: a chunk size that is not hexadecimal")
+  end
+  d
+end
+
 # Three kinds of response carry a `Content-Length` and no body: a HEAD, which
 # reports what a GET would have returned, and a 204 or a 304, which say there
 # is nothing to send. Comparing the declared length against nothing turned
