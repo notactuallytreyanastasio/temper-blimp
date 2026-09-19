@@ -1539,11 +1539,12 @@ internal class BlimpTranslator(
                         translateHandler(
                             member,
                             fieldNames,
-                            Blimp.Atom(member.pos, "set_${member.dotName.dotNameText}"),
+                            Blimp.Atom(member.pos, setterMessage(member.dotName.dotNameText)),
                         ),
                     )
             }
         }
+        reportDuplicateHandlers(decl, handlers)
         declarations.add(
             Blimp.ActorDecl(
                 pos,
@@ -1657,6 +1658,39 @@ internal class BlimpTranslator(
 
     private fun nameText(id: TmpL.Id): String =
         nameOf(id)?.let { names.outName(it).outputNameText } ?: "$id"
+
+    /**
+     * The message a setter answers.
+     *
+     * Two leading underscores because a getter's message is the property name
+     * and a setter's has to differ from every method name as well: a class
+     * with `set value(v)` and `set_value(v)` put two `on :set_value` handlers
+     * in one actor, and Blimp dispatch takes the first, so the second was
+     * silently dead. `__new` and `__temper_types` already claim this shape.
+     */
+    private fun setterMessage(propertyName: String): String = "__set_$propertyName"
+
+    /**
+     * Two handlers answering one message is a wrong program, not a slow one,
+     * and Blimp accepts it without complaint -- the first wins and the rest
+     * are unreachable. [setterMessage] removes the case that turned up in
+     * practice; this catches whatever is left, including two methods whose
+     * names sanitize to the same atom.
+     */
+    private fun reportDuplicateHandlers(decl: TmpL.TypeDeclaration, handlers: List<Blimp.Handler>) {
+        val seen = mutableSetOf<String>()
+        for (handler in handlers) {
+            val name = handler.message.text
+            if (!seen.add(name)) {
+                mainStatements.add(
+                    Blimp.ExprStatement(
+                        decl.pos,
+                        untranslatable(handler.pos),
+                    ),
+                )
+            }
+        }
+    }
 
     private fun messageAtom(method: TmpL.NormalMethod): String =
         method.dotName?.dotNameText ?: names.outName(nameOf(method.name)!!).outputNameText
@@ -1798,7 +1832,7 @@ internal class BlimpTranslator(
                             target = Blimp.Id(pos, OutName("self", null)),
                             message = Blimp.MessageCall(
                                 pos,
-                                name = Blimp.Atom(pos, "set_$propertyName"),
+                                name = Blimp.Atom(pos, setterMessage(propertyName)),
                                 args = listOf(value),
                             ),
                         ),
@@ -1813,7 +1847,7 @@ internal class BlimpTranslator(
                         target = translateExpression(subject),
                         message = Blimp.MessageCall(
                             pos,
-                            name = Blimp.Atom(pos, "set_$propertyName"),
+                            name = Blimp.Atom(pos, setterMessage(propertyName)),
                             args = listOf(value),
                         ),
                     ),
