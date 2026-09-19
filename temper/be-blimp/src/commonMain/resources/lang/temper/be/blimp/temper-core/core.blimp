@@ -3978,3 +3978,26 @@ def temper_map_to_list_with(source: Any, f: Any) -> List do
   map(source <- :entries, fn(e: List) do f(elem(e, 0), elem(e, 1)) end)
 end
 
+
+# ── Console I/O ──────────────────────────────────────
+#
+# Both answer a promise that is already settled, because Blimp's `sleep_ms`
+# and `read_line` block. Temper's signature is a promise so that a backend
+# with a real event loop can be honest about it; here the waiting has already
+# happened by the time the promise exists.
+
+def temper_sleep(ms: Int) -> Any do
+  sleep_ms(ms)
+  p = temper_new_promise()
+  temper_promise_complete(p, ms)
+  p
+end
+
+# `read_line` answers nil at end of input, and nil is what Temper's `String?`
+# reads as null, so the two agree without a conversion.
+def temper_read_line() -> Any do
+  line = read_line()
+  p = temper_new_promise()
+  temper_promise_complete(p, line)
+  p
+end
