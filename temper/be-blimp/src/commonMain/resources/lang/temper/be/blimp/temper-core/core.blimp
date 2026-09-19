@@ -1758,14 +1758,37 @@ end
 # `tcp_read` answers the empty string both when the peer closes cleanly and
 # when it resets, so a connection dropped halfway through a body looks exactly
 # like a body that ended. The server already said how long it would be.
-# A HEAD response carries the `Content-Length` a GET would have returned and
-# no body at all, so comparing the two is comparing a promise about a
-# different request. Checking it turned every conforming HEAD into a broken
-# promise.
+# Three kinds of response carry a `Content-Length` and no body: a HEAD, which
+# reports what a GET would have returned, and a 204 or a 304, which say there
+# is nothing to send. Comparing the declared length against nothing turned
+# every one of them into a broken promise.
+#
+# The check is not skipped for them, it is inverted: they must have no body.
+# A HEAD that arrives carrying twenty bytes is a server doing something the
+# caller cannot use, and handing it over quietly is how it would go unnoticed.
 def temper_http_check_length(lines: List, body: String, method: String) -> Any do
+  bodiless = upcase(method) == "HEAD" or temper_http_bodiless_status(lines)
+  case bodiless do
+    true -> temper_http_expect_empty(body)
+    _ -> temper_http_check_declared(lines, body)
+  end
+end
+
+def temper_http_bodiless_status(lines: List) -> Bool do
+  code = temper_http_status(lines)
+  code == 204 or code == 304
+end
+
+def temper_http_expect_empty(body: String) -> Any do
+  case empty?(body) do
+    true -> nil
+    _ -> temper_raise(concat("net: a response that should carry no body carried ", concat(to_string(length(body)), " bytes")))
+  end
+end
+
+def temper_http_check_declared(lines: List, body: String) -> Any do
   declared = temper_http_header(lines, 1, "content-length")
-  skip = nil?(declared) or upcase(method) == "HEAD"
-  case skip do
+  case nil?(declared) do
     true -> nil
     _ -> temper_http_compare_length(declared, body)
   end
@@ -2072,7 +2095,11 @@ def temper_rx_collapse(node: Any, lo: Int, hi: Int) -> List do
   # `(x{2,})*`, whose language is "nothing, or two or more" -- `pushRepeat`
   # writes that for `Repeat(Repeat(x, 2, null), 0, null)` and the first
   # version of this collapsed it to `x*`, which accepts a single `x`.
-  ok = hi < 0 and elem(node, 3) < 0 and inner_lo <= 1
+  # An outer minimum of at least one means every reachable total is `lo *
+  # inner_lo` or more, so `(x{2,})+` is `x{2,}`. Only an outer minimum of zero
+  # needs the inner minimum small, because `(x{2,})*` is "nothing, or two or
+  # more" and no single repetition says that.
+  ok = hi < 0 and elem(node, 3) < 0 and (lo >= 1 or inner_lo <= 1)
   r = case ok and not(temper_rx_has_cap(elem(node, 1))) do
     true -> [:rep, elem(node, 1), lo * inner_lo, 0 - 1]
     _ -> [:rep, node, lo, hi]
