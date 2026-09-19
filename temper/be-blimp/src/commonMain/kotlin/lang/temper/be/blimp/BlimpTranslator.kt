@@ -96,6 +96,14 @@ internal class BlimpTranslator(
      * for, and the report it wrote would be the one the harness reads.
      */
     private val emitTests: Boolean = true,
+    /**
+     * Shared across every module spliced into one file.
+     *
+     * A translator is built per module and the output of all of them lands in
+     * one `main.blimp`, so a per-module gensym counter hands the same name out
+     * once per module. See [BlimpNames].
+     */
+    private val names: BlimpNames = BlimpNames(),
 ) {
 
     /** `actor` and `def` items, which must precede any code that runs them. */
@@ -111,8 +119,6 @@ internal class BlimpTranslator(
      * into the one output file, and only when something actually needs it.
      */
     private val preludeHelpers = mutableSetOf<String>()
-
-    private val names = BlimpNames()
 
     /**
      * Names bound in enclosing scopes, innermost last.
