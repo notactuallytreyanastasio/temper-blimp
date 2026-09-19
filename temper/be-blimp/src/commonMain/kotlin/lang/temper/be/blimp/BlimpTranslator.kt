@@ -154,7 +154,7 @@ internal class BlimpTranslator(
      */
     private var actorScope: ActorScope? = null
 
-    private class ActorScope(val fields: Set<ResolvedName>) {
+    private class ActorScope(val fields: Set<ResolvedName>, val cells: Set<ResolvedName>) {
         /** Fields written in this handler, in first-write order. */
         val mutated = linkedSetOf<ResolvedName>()
     }
@@ -1491,6 +1491,7 @@ internal class BlimpTranslator(
             .filterIsInstance<TmpL.InstanceProperty>()
             .filter { it.memberShape.abstractness == Abstractness.Concrete }
         val fieldNames = properties.mapNotNull { nameOf(it.name) }.toSet()
+        val cellFields = cellFieldsOf(flattened, fieldNames)
 
         // TmpL carries no field initializer -- every one lives in the
         // constructor as a property write -- so the declared default is nil and
@@ -1530,21 +1531,29 @@ internal class BlimpTranslator(
         for (member in flattened) {
             when (member) {
                 is TmpL.InstanceProperty -> {}
-                is TmpL.Constructor ->
-                    handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, CONSTRUCTOR_MESSAGE)))
-                is TmpL.NormalMethod ->
-                    handlers.add(translateHandler(member, fieldNames, Blimp.Atom(member.pos, messageAtom(member))))
+                is TmpL.Constructor -> handlers.add(
+                    translateHandler(member, fieldNames, cellFields, Blimp.Atom(member.pos, CONSTRUCTOR_MESSAGE)),
+                )
+                is TmpL.NormalMethod -> handlers.add(
+                    translateHandler(member, fieldNames, cellFields, Blimp.Atom(member.pos, messageAtom(member))),
+                )
                 // Statics have no instance, so they are emitted separately.
                 is TmpL.StaticMethod, is TmpL.StaticProperty -> {}
                 is TmpL.Getter ->
                     handlers.add(
-                        translateHandler(member, fieldNames, Blimp.Atom(member.pos, member.dotName.dotNameText)),
+                        translateHandler(
+                            member,
+                            fieldNames,
+                            cellFields,
+                            Blimp.Atom(member.pos, member.dotName.dotNameText),
+                        ),
                     )
                 is TmpL.Setter ->
                     handlers.add(
                         translateHandler(
                             member,
                             fieldNames,
+                            cellFields,
                             Blimp.Atom(member.pos, setterMessage(member.dotName.dotNameText)),
                         ),
                     )
@@ -1707,6 +1716,70 @@ internal class BlimpTranslator(
         method.dotName?.dotNameText ?: names.outName(nameOf(method.name)!!).outputNameText
 
     /**
+     * Fields that have to live in a `TemperCell` rather than in actor state.
+     *
+     * Blimp binds an actor's state at handler entry and `become` publishes to
+     * the *next* message. So when a handler sends to itself, it cannot see
+     * what the handler it called wrote, and its own trailing `become` would
+     * overwrite it. Temper fields are ordinary mutable fields and every other
+     * backend treats them that way.
+     *
+     * A cell is a separate actor holding one value, so `f <- :set(v)` is
+     * visible to everyone the moment it is answered. That costs a message per
+     * access and drags temper-core into the output, so it is spent only where
+     * a snapshot can actually go stale, which needs two things at once:
+     *
+     *  - `f` is written somewhere other than the constructor. A field only the
+     *    constructor writes is fixed by the time any other message runs.
+     *  - some member both sends to itself and touches `f`. Without a self-send
+     *    there is no way to re-enter the actor mid-handler, and a write that
+     *    arrives as its own message -- an outside `obj.f = v` reaching the
+     *    generated `__set_f` -- publishes normally.
+     *
+     * The constructor is the exception to the first point: if it calls one of
+     * its own methods, that method runs before the constructor's `become`, so
+     * every field it set reads back as nil. A constructor that sends to itself
+     * puts every field in a cell.
+     */
+    private fun cellFieldsOf(
+        flattened: List<TmpL.Member>,
+        fieldNames: Set<ResolvedName>,
+    ): Set<ResolvedName> {
+        val writtenLater = mutableSetOf<ResolvedName>()
+        val reachedAcrossASelfSend = mutableSetOf<ResolvedName>()
+        var constructorSendsToSelf = false
+        for (member in flattened) {
+            val isConstructor = member is TmpL.Constructor
+            var sendsToSelf = false
+            val touched = mutableSetOf<ResolvedName>()
+            member.boundaryDescent { node ->
+                when {
+                    node is TmpL.CallExpression && (node.fn as? TmpL.MethodReference)?.subject is TmpL.This ->
+                        sendsToSelf = true
+                    node is TmpL.SetBackedProperty && node.left.subject is TmpL.This -> {
+                        internalNameOf(node.left.property)?.let {
+                            touched.add(it)
+                            if (!isConstructor) writtenLater.add(it)
+                        }
+                    }
+                    node is TmpL.GetBackedProperty && node.subject is TmpL.This ->
+                        internalNameOf(node.property)?.let(touched::add)
+                    else -> {}
+                }
+                true
+            }
+            if (sendsToSelf) {
+                reachedAcrossASelfSend.addAll(touched)
+                if (isConstructor) constructorSendsToSelf = true
+            }
+        }
+        return when {
+            constructorSendsToSelf -> fieldNames
+            else -> writtenLater intersect reachedAcrossASelfSend intersect fieldNames
+        }
+    }
+
+    /**
      * A method becomes a handler.
      *
      * `this` is not a parameter: inside a handler the state is already in
@@ -1715,6 +1788,7 @@ internal class BlimpTranslator(
     private fun translateHandler(
         method: TmpL.FunctionDeclarationOrMethod,
         fieldNames: Set<ResolvedName>,
+        cellFields: Set<ResolvedName>,
         message: Blimp.Atom,
     ): Blimp.Handler {
         val pos = method.pos
@@ -1728,9 +1802,27 @@ internal class BlimpTranslator(
         val scope = mutableSetOf<ResolvedName>()
         formals.forEach { formal -> nameOf(formal.name)?.let(scope::add) }
         val previousActor = actorScope
-        actorScope = ActorScope(fieldNames)
+        actorScope = ActorScope(fieldNames, cellFields)
         scopes.addLast(scope)
         val statements = mutableListOf<Blimp.Statement>()
+        if (method is TmpL.Constructor && cellFields.isNotEmpty()) {
+            preludeHelpers.addAll(needsCore)
+            for (field in cellFields) {
+                val id = Blimp.Id(pos, names.outName(field))
+                statements.add(
+                    Blimp.Assign(
+                        pos,
+                        target = id,
+                        value = Blimp.Call(
+                            pos,
+                            callee = Blimp.Id(pos, OutName(TEMPER_NEW_CELL, null)),
+                            args = listOf(Blimp.NilLit(pos)),
+                        ),
+                    ),
+                )
+                actorScope!!.mutated.add(field)
+            }
+        }
         collectBoxedCaptures(method.body)
         val mutated = try {
             method.body?.statements?.let { translateBody(it, statements) }
@@ -1781,7 +1873,11 @@ internal class BlimpTranslator(
             // lexical scope inside its handlers. An abstract one is a getter,
             // so it has to be invoked even on `this`.
             is TmpL.This -> when (expression) {
-                is TmpL.GetBackedProperty -> Blimp.Id(pos, OutName(propertyName, null))
+                is TmpL.GetBackedProperty -> when (internalNameOf(expression.property)) {
+                    in (actorScope?.cells ?: setOf()) ->
+                        cellRead(pos, Blimp.Id(pos, OutName(propertyName, null)))
+                    else -> Blimp.Id(pos, OutName(propertyName, null))
+                }
                 else -> Blimp.Send(
                     pos,
                     target = Blimp.Id(pos, OutName("self", null)),
@@ -1832,8 +1928,33 @@ internal class BlimpTranslator(
             // has to be invoked, even on `this`.
             is TmpL.This -> when (statement) {
                 is TmpL.SetBackedProperty -> {
-                    internalNameOf(statement.left.property)?.let { actorScope?.mutated?.add(it) }
-                    out.add(Blimp.Assign(pos, target = Blimp.Id(pos, OutName(propertyName, null)), value = value))
+                    val field = internalNameOf(statement.left.property)
+                    when {
+                        field != null && field in (actorScope?.cells ?: setOf()) -> out.add(
+                            Blimp.ExprStatement(
+                                pos,
+                                Blimp.Send(
+                                    pos,
+                                    target = Blimp.Id(pos, OutName(propertyName, null)),
+                                    message = Blimp.MessageCall(
+                                        pos,
+                                        name = Blimp.Atom(pos, CELL_SET),
+                                        args = listOf(value),
+                                    ),
+                                ),
+                            ),
+                        )
+                        else -> {
+                            field?.let { actorScope?.mutated?.add(it) }
+                            out.add(
+                                Blimp.Assign(
+                                    pos,
+                                    target = Blimp.Id(pos, OutName(propertyName, null)),
+                                    value = value,
+                                ),
+                            )
+                        }
+                    }
                 }
                 else -> out.add(
                     Blimp.ExprStatement(
