@@ -2,11 +2,10 @@ package lang.temper.be.blimp
 
 import lang.temper.ast.boundaryDescent
 import lang.temper.be.tmpl.TmpL
-import lang.temper.be.tmpl.isStdLib
 import lang.temper.be.tmpl.TmpLOperator
+import lang.temper.be.tmpl.isStdLib
 import lang.temper.log.Position
 import lang.temper.name.OutName
-import lang.temper.value.connectedSymbol
 import lang.temper.name.ResolvedName
 import lang.temper.name.ResolvedParsedName
 import lang.temper.type.Abstractness
@@ -29,6 +28,7 @@ import lang.temper.value.TString
 import lang.temper.value.TSymbol
 import lang.temper.value.TType
 import lang.temper.value.TVoid
+import lang.temper.value.connectedSymbol
 
 /** The handler a `spawn` is followed by, standing in for Temper's constructor. */
 private const val CONSTRUCTOR_MESSAGE = "__new"

@@ -1,8 +1,8 @@
 package lang.temper.be.blimp
 
 import lang.temper.be.Backend
-import lang.temper.be.SiblingData
 import lang.temper.be.BackendSetup
+import lang.temper.be.SiblingData
 import lang.temper.be.storeDescriptorsForDeclarations
 import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLTranslator
@@ -11,9 +11,9 @@ import lang.temper.frontend.Module
 import lang.temper.fs.ResourceDescriptor
 import lang.temper.fs.declareResources
 import lang.temper.log.FilePath
-import lang.temper.log.resolveFile
 import lang.temper.log.dirPath
 import lang.temper.log.filePath
+import lang.temper.log.resolveFile
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
 import lang.temper.name.DashedIdentifier
