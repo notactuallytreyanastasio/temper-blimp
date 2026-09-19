@@ -1,0 +1,80 @@
+# ── The whole server ─────────────────────────────────────────────────────
+#
+# Everything above this file is generated. `newApp`, `:handle` and `:page`
+# come out of `temper build -b blimp` -- the routing, the game, the HTML and
+# the CSS are all Temper. What is left for Blimp is what Temper has no way to
+# say: accept a socket, read a request line, write a response.
+#
+# Boot:  blimp app.blimp        (snake-web's main.blimp, then this)
+# Then:  open http://localhost:8099
+
+def port() -> Int do
+  8099
+end
+
+# "GET /tick HTTP/1.1" -> "/tick", and a query string is not part of the path.
+def path_of(raw: String) -> String do
+  line = head(split(raw, "\r\n"))
+  parts = split(line, " ")
+  p = case length(parts) < 2 do
+    true -> "/"
+    _ -> head(split(elem(parts, 1), "?"))
+  end
+  p
+end
+
+def http_ok(body: String) -> String do
+  concat("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n",
+    concat("Content-Length: ", concat(to_string(length(body)),
+      concat("\r\nConnection: close\r\n\r\n", body))))
+end
+
+# One game, held here, because a page with no script has nowhere else to put
+# it. Two browsers pointed at this share a snake.
+actor Session do
+  state app: Any :: nil
+
+  on :__new do
+    become app: newApp(42)
+    reply nil
+  end
+
+  # `:handle` answers a new WebApp rather than changing this one, so the reply
+  # is the next state.
+  on :request(path: String) do
+    next_app = app <- :handle(path)
+    become app: next_app
+    reply next_app <- :page
+  end
+end
+
+session = spawn Session
+session <- :__new()
+
+# A `def` rather than a handler that sends to itself: this runs once per
+# request for as long as the server is up, and a self-send would put a frame
+# on the stack for every one of them.
+def serve(fd: Int) -> Any do
+  client = tcp_accept(fd)
+  raw = tcp_read(client)
+  body = case nil?(raw) do
+    true -> session <- :request("/")
+    _ -> session <- :request(path_of(raw))
+  end
+  tcp_write(client, http_ok(body))
+  tcp_close(client)
+  serve(fd)
+end
+
+# `tcp_listen` on a port something else already holds raises
+# `NotSupported while evaluating this`, which is true and tells you nothing.
+# The overwhelmingly likely cause is the last one of these still running.
+fd = try do
+  tcp_listen(port())
+catch e do
+  puts(concat("cannot listen on port ", concat(to_string(port()),
+    " -- something is already on it, probably an earlier one of these")))
+  exit(1)
+end
+puts(concat("snake on http://localhost:", to_string(port())))
+serve(fd)
