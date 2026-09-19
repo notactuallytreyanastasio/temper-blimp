@@ -1629,18 +1629,41 @@ def temper_url_scheme(scheme: String, rest: String) -> List do
   end
 end
 
-# A `#fragment` never goes on the wire -- it is for whoever opened the URL --
-# and sending it as part of the request target asks the server for a path that
-# does not exist. A `?query` does go, and has to survive the split.
+# The authority ends at the first `/`, `?` or `#`, and the three are not
+# interchangeable. A `#fragment` never goes on the wire -- it is for whoever
+# opened the URL -- and a `?query` does. Cutting only at `/` left the query
+# attached to the port, so `http://host?q=1` was refused with
+# "the port is not a number: 8762?q=1", which is a message asserting something
+# false about a URL that is fine.
 def temper_url_authority(whole: String) -> List do
   rest = elem(split(whole, "#"), 0)
-  cut = split(rest, "/")
+  q = split(rest, "?")
+  query = case length(q) > 1 do
+    true -> concat("?", temper_join_query(q, 1, ""))
+    _ -> ""
+  end
+  cut = split(elem(q, 0), "/")
   hostport = elem(cut, 0)
   path = case length(cut) > 1 do
     true -> concat("/", temper_join_rest(cut, 1, ""))
     _ -> "/"
   end
-  temper_url_hostport(hostport, path)
+  temper_url_hostport(hostport, concat(path, query))
+end
+
+# A query can contain a `?`, so everything after the first one is the query.
+def temper_join_query(parts: List, i: Int, acc: String) -> String do
+  case i >= length(parts) do
+    true -> acc
+    _ -> temper_join_query(parts, i + 1, temper_join_query_piece(acc, elem(parts, i)))
+  end
+end
+
+def temper_join_query_piece(acc: String, piece: String) -> String do
+  case empty?(acc) do
+    true -> piece
+    _ -> concat(acc, concat("?", piece))
+  end
 end
 
 # An IPv6 literal is bracketed and full of colons, and userinfo puts an `@`
@@ -2162,8 +2185,17 @@ end
 def temper_rx_rep_hi(p: List, i: Int, node: Any, lo: Int) -> List do
   hi = temper_rx_rep_num(p, i, 0)
   case elem(hi, 0) < lo do
-    true -> bubble concat("regex: a repeat of at least ", concat(to_string(lo), concat(" and at most ", concat(to_string(elem(hi, 0)), " can never match"))))
-    _ -> temper_rx_rep_loop(p, elem(hi, 1) + 1, [:rep, node, lo, elem(hi, 0)])
+    true -> temper_raise(concat("regex: a repeat of at least ", concat(to_string(lo), concat(" and at most ", concat(to_string(elem(hi, 0)), " can never match")))))
+    _ -> temper_rx_rep_close(p, elem(hi, 1), node, lo, elem(hi, 0))
+  end
+end
+
+# Stepping past the `}` without checking it is there swallowed whatever stood
+# in its place: `a{2,3Xb` compiled to exactly `a{2,3}b`, losing the `X`.
+def temper_rx_rep_close(p: List, i: Int, node: Any, lo: Int, hi: Int) -> List do
+  case temper_rx_at(p, i) == 125 do
+    true -> temper_rx_rep_loop(p, i + 1, temper_rx_rep_node(node, lo, hi))
+    _ -> temper_raise("regex: a repeat bound is never closed")
   end
 end
 

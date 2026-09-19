@@ -5,6 +5,7 @@ import lang.temper.be.assertGeneratedCode
 import lang.temper.log.FilePath
 import lang.temper.log.filePath
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 
 /**
  * What one construct translates to, checked against the text rather than by
@@ -147,6 +148,28 @@ class BlimpBackendTest {
                 |
             """.trimMargin(),
         )
+    }
+
+    /**
+     * Two handlers with one name stop the translation.
+     *
+     * `__set_value` is the setter's message, so writing it as a method name
+     * beside a `var value` collides again -- the prefix moved the common case,
+     * it did not remove the possibility. This aborts rather than emitting an
+     * actor whose second handler can never be reached.
+     */
+    @Test
+    fun twoHandlersWithOneNameAbort() {
+        assertFailsWith<NotImplementedError> {
+            assertGeneratedBlimp(
+                temper = """
+                    |export class Clash(public var value: Int) {
+                    |  public __set_value(v: Int): Int { v }
+                    |}
+                """.trimMargin(),
+                blimp = "",
+            )
+        }
     }
 
     /**
