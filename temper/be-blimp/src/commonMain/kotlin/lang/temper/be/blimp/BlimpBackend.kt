@@ -19,6 +19,7 @@ import lang.temper.name.BackendMeta
 import lang.temper.name.DashedIdentifier
 import lang.temper.name.FileType
 import lang.temper.name.LanguageLabel
+import lang.temper.name.OutName
 
 /**
  * <!-- snippet: backend/blimp -->
@@ -121,6 +122,25 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
             }
         }
         val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
+        // Nothing waits until something is told to wait. `sleep` and
+        // `readLine` hand back an unsettled promise and park the generator
+        // that awaited it, so a program whose last statement started an
+        // `async` block would otherwise exit with the block half-run. This is
+        // the loop that settles them, and it returns at once when nothing is
+        // queued -- which is every program that does not use `async`.
+        val runAsync = when {
+            preludeHelpers.isEmpty() -> listOf()
+            else -> listOf(
+                Blimp.ExprStatement(
+                    finished.pos,
+                    Blimp.Call(
+                        finished.pos,
+                        callee = Blimp.Id(finished.pos, OutName(TEMPER_RUN_ASYNC, null)),
+                        args = listOf(),
+                    ),
+                ),
+            )
+        }
         // The prelude is spliced in rather than imported, because Blimp has no
         // module system, and only when something actually called into it.
         val prelude = when {
@@ -132,7 +152,7 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 path = filePath(MAIN_FILE),
                 content = Blimp.SourceFile(
                     finished.pos,
-                    items = prelude + connected + declarations + mainStatements,
+                    items = prelude + connected + declarations + mainStatements + runAsync,
                 ),
                 mimeType = mimeType,
             ),

@@ -2106,8 +2106,167 @@ end
 
 # `async { ... }` builds a generator and drives it. Whatever it awaits arranges
 # its own resumption through `temper_awake_upon`.
+#
+# One step is all this does. A generator that awaits something already settled
+# runs to the end inside that step; one that awaits a timer or a keypress
+# stops, parked on the promise's `waiting` list, and `temper_run_async` is what
+# eventually wakes it.
 def temper_async(factory: Any) -> Any do
   temper_generator_next(factory())
+end
+
+# ── The scheduler ────────────────────────────────────
+#
+# Blimp has one thread and no event loop. Two `async` blocks that both wait --
+# one on 200ms, one on a keypress -- have to take turns, and before this they
+# did not: `temper_sleep` and `temper_read_line` blocked and answered a promise
+# that was already settled, so whichever block ran first ran to completion.
+# Snake read every key before drawing its first frame.
+#
+# So waiting is no longer done where the waiting is asked for. `sleep` and
+# `readLine` hand back an unsettled promise and record what it is waiting for,
+# and one loop at the end of the program does all the waiting in one place --
+# which is what an event loop is.
+#
+# The promise actor already parked generators on `waiting` for an unsettled
+# promise. Nothing had ever left one unsettled.
+
+actor TemperScheduler do
+  # [due_ms, promise], not kept in order: there are never many.
+  state timers: List :: []
+  # Promises waiting for a line, oldest first.
+  state readers: List :: []
+
+  on :add_timer(due: Int, p: Any) do
+    become timers: append(timers, [due, p])
+    reply nil
+  end
+
+  on :add_reader(p: Any) do
+    become readers: append(readers, p)
+    reply nil
+  end
+
+  on :timers do reply timers end
+  on :readers do reply readers end
+
+  on :take_reader do
+    case empty?(readers) do
+      true -> reply nil
+      _ ->
+        first = elem(readers, 0)
+        become readers: tail(readers)
+        reply first
+    end
+  end
+
+  # Hand back the timers that are due and keep the rest.
+  on :take_due(at: Int) do
+    due = filter(timers, fn(t: List) do elem(t, 0) <= at end)
+    become timers: filter(timers, fn(t: List) do elem(t, 0) > at end)
+    reply due
+  end
+end
+
+temper_the_scheduler = spawn TemperScheduler
+
+def temper_sleep(ms: Int) -> Any do
+  p = temper_new_promise()
+  temper_the_scheduler <- :add_timer(now_ms() + ms, p)
+  p
+end
+
+def temper_read_line() -> Any do
+  p = temper_new_promise()
+  temper_the_scheduler <- :add_reader(p)
+  p
+end
+
+# Run until nothing is waiting any more.
+#
+# Emitted at the end of every translated program. With nothing queued it does
+# one comparison and returns, which is what happens in every program that does
+# not use `async`.
+def temper_run_async() -> Any do
+  timers = temper_the_scheduler <- :timers
+  readers = temper_the_scheduler <- :readers
+  case empty?(timers) and empty?(readers) do
+    true -> nil
+    _ -> temper_run_async_step(timers, readers)
+  end
+end
+
+def temper_run_async_step(timers: List, readers: List) -> Any do
+  now = now_ms()
+  # How long there is to wait before the earliest timer comes due. With no
+  # timer at all, a tenth of a second, so a program waiting only on a key is
+  # not a spin loop.
+  wait = case empty?(timers) do
+    true -> 100
+    _ -> temper_earliest_due(timers, 0, now + 100000) - now
+  end
+  temper_run_async_wait(readers, wait)
+  temper_wake_due(now_ms())
+  temper_run_async()
+end
+
+# Wait for a keypress if anything wants one, and for the clock otherwise.
+#
+# `tcp_poll` is poll(2) under a name that has only ever been used on sockets.
+# Stdin is fd 0 and poll does not care, so one call covers both kinds of
+# waiting: it returns as soon as a line can be read, or when the wait is up.
+def temper_run_async_wait(readers: List, wait: Int) -> Any do
+  ms = case wait < 0 do
+    true -> 0
+    _ -> wait
+  end
+  r = case empty?(readers) do
+    true -> sleep_ms(ms)
+    _ -> temper_poll_stdin(ms)
+  end
+  r
+end
+
+def temper_poll_stdin(ms: Int) -> Any do
+  ready = tcp_poll([0], ms)
+  r = case empty?(ready) do
+    true -> nil
+    _ -> temper_wake_reader()
+  end
+  r
+end
+
+# `read_line` blocks, and it is called only once poll has said a read will not
+# block. At end of input it answers nil, which is the null the Temper
+# signature promises, so the waiting block sees its stream end rather than
+# waiting for a line that is never coming.
+def temper_wake_reader() -> Any do
+  p = temper_the_scheduler <- :take_reader
+  r = case nil?(p) do
+    true -> nil
+    _ -> temper_promise_complete(p, read_line())
+  end
+  r
+end
+
+def temper_wake_due(at: Int) -> Any do
+  each(temper_the_scheduler <- :take_due(at), fn(t: List) do
+    temper_promise_complete(elem(t, 1), 0)
+  end)
+end
+
+def temper_earliest_due(timers: List, i: Int, best: Int) -> Int do
+  case i >= length(timers) do
+    true -> best
+    _ -> temper_earliest_due(timers, i + 1, temper_min_int(best, elem(elem(timers, i), 0)))
+  end
+end
+
+def temper_min_int(a: Int, b: Int) -> Int do
+  case a < b do
+    true -> a
+    _ -> b
+  end
 end
 
 # ── Regex: the pattern parser ────────────────────────
@@ -3978,26 +4137,3 @@ def temper_map_to_list_with(source: Any, f: Any) -> List do
   map(source <- :entries, fn(e: List) do f(elem(e, 0), elem(e, 1)) end)
 end
 
-
-# ── Console I/O ──────────────────────────────────────
-#
-# Both answer a promise that is already settled, because Blimp's `sleep_ms`
-# and `read_line` block. Temper's signature is a promise so that a backend
-# with a real event loop can be honest about it; here the waiting has already
-# happened by the time the promise exists.
-
-def temper_sleep(ms: Int) -> Any do
-  sleep_ms(ms)
-  p = temper_new_promise()
-  temper_promise_complete(p, ms)
-  p
-end
-
-# `read_line` answers nil at end of input, and nil is what Temper's `String?`
-# reads as null, so the two agree without a conversion.
-def temper_read_line() -> Any do
-  line = read_line()
-  p = temper_new_promise()
-  temper_promise_complete(p, line)
-  p
-end
