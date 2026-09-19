@@ -1563,6 +1563,7 @@ def temper_net_broken_because(why: Any) -> Any do
 end
 
 def temper_net_exchange(fd: Int, where: List, method: String, body: Any, mime: Any) -> Any do
+  ignore_method = method
   text = case nil?(body) do
     true -> ""
     _ -> body
@@ -1571,7 +1572,7 @@ def temper_net_exchange(fd: Int, where: List, method: String, body: Any, mime: A
   raw = temper_http_drain(fd, "")
   tcp_close(fd)
   p = temper_new_promise()
-  temper_promise_complete(p, temper_http_response(raw))
+  temper_promise_complete(p, temper_http_response(raw, method))
   p
 end
 
@@ -1740,7 +1741,7 @@ actor TemperNetResponse do
   end
 end
 
-def temper_http_response(raw: String) -> Any do
+def temper_http_response(raw: String, method: String) -> Any do
   split_at = split(raw, "\r\n\r\n")
   head = elem(split_at, 0)
   body = case length(split_at) > 1 do
@@ -1748,7 +1749,7 @@ def temper_http_response(raw: String) -> Any do
     _ -> ""
   end
   lines = split(head, "\r\n")
-  temper_http_check_length(lines, body)
+  temper_http_check_length(lines, body, method)
   r = spawn TemperNetResponse
   r <- :__init(temper_http_status(lines), temper_http_content_type(lines, 1), body)
   r
@@ -1757,9 +1758,14 @@ end
 # `tcp_read` answers the empty string both when the peer closes cleanly and
 # when it resets, so a connection dropped halfway through a body looks exactly
 # like a body that ended. The server already said how long it would be.
-def temper_http_check_length(lines: List, body: String) -> Any do
+# A HEAD response carries the `Content-Length` a GET would have returned and
+# no body at all, so comparing the two is comparing a promise about a
+# different request. Checking it turned every conforming HEAD into a broken
+# promise.
+def temper_http_check_length(lines: List, body: String, method: String) -> Any do
   declared = temper_http_header(lines, 1, "content-length")
-  case nil?(declared) do
+  skip = nil?(declared) or upcase(method) == "HEAD"
+  case skip do
     true -> nil
     _ -> temper_http_compare_length(declared, body)
   end
@@ -2058,10 +2064,17 @@ end
 # strings either way, but which iteration a group inside it ends up recording
 # is not the same question, and that one has an answer the tests depend on.
 def temper_rx_collapse(node: Any, lo: Int, hi: Int) -> List do
-  inner = elem(node, 1)
-  collapsible = hi < 0 and elem(node, 3) < 0 and not(temper_rx_has_cap(inner))
-  r = case collapsible do
-    true -> [:rep, inner, lo * elem(node, 2), 0 - 1]
+  inner_lo = elem(node, 2)
+  # Both bounds unbounded, and the inner minimum at most one.
+  #
+  # `lo * inner_lo` is only the right new minimum when one iteration of the
+  # outer loop can produce every count the inner loop can. It cannot for
+  # `(x{2,})*`, whose language is "nothing, or two or more" -- `pushRepeat`
+  # writes that for `Repeat(Repeat(x, 2, null), 0, null)` and the first
+  # version of this collapsed it to `x*`, which accepts a single `x`.
+  ok = hi < 0 and elem(node, 3) < 0 and inner_lo <= 1
+  r = case ok and not(temper_rx_has_cap(elem(node, 1))) do
+    true -> [:rep, elem(node, 1), lo * inner_lo, 0 - 1]
     _ -> [:rep, node, lo, hi]
   end
   r
