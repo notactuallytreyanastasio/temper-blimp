@@ -466,6 +466,10 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("std/net.type NetResponse.get status()", "status"),
         BlimpConnectedSend("std/net.type NetResponse.get contentType()", "contentType"),
         BlimpConnectedSend("std/net.type NetResponse.get bodyContent()", "bodyContent"),
+        // Console I/O. Both block, and both answer a settled promise, because
+        // Blimp has one thread and nothing to hand a pending promise to.
+        BlimpConnectedCall("std/io.sleep()", "temper_sleep", needsCore),
+        BlimpConnectedCall("std/io.readLine()", "temper_read_line", needsCore),
         // Promises. The builder and the promise it hands out are one actor:
         // nothing distinguishes them but which methods a caller knows about,
         // and a caller with the builder can always reach the promise anyway.
