@@ -322,8 +322,16 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type Float64.floor()", "temper_float_floor", setOf("temper_float_floor")),
         BlimpConnectedCall("core.type Float64.round()", "temper_float_round", setOf("temper_float_round")),
         BlimpConnectedCall("core.type Float64.sign()", "temper_float_sign", setOf("temper_float_sign")),
-        BlimpConnectedCall("core.type Float64.min()", "temper_float_min", setOf("temper_float_min", "temper_float_nan", "temper_float_inf")),
-        BlimpConnectedCall("core.type Float64.max()", "temper_float_max", setOf("temper_float_max", "temper_float_nan", "temper_float_inf")),
+        BlimpConnectedCall(
+            "core.type Float64.min()",
+            "temper_float_min",
+            setOf("temper_float_min", "temper_float_nan", "temper_float_inf"),
+        ),
+        BlimpConnectedCall(
+            "core.type Float64.max()",
+            "temper_float_max",
+            setOf("temper_float_max", "temper_float_nan", "temper_float_inf"),
+        ),
         BlimpConnectedCall(
             "core.type Float64.near()",
             "temper_float_near",
@@ -748,14 +756,6 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
 ).associateBy { it.builtinOperatorId!! }
 
 /**
- * Temper's `hole(directive)` becomes Blimp's own hole operator.
- *
- * This is the one place where Blimp can do more with a Temper construct than
- * the other backends. A hole carries no BuiltinOperatorId, so a backend that
- * has not been taught about one says so at build time; Blimp has a real typed
- * gap that carries the directive to whoever fills it.
- */
-/**
  * `await p` becomes "resume this generator when p settles".
  *
  * Matched by name rather than by [BuiltinOperatorId] because the coroutine
@@ -785,6 +785,14 @@ internal object GetPromiseResultSync : BlimpInlineSupportCode("getPromiseResultS
         Blimp.Call(pos, callee = Blimp.Id(pos, OutName("temper_promise_result", null)), args = args)
 }
 
+/**
+ * Temper's `hole(directive)` becomes Blimp's own hole operator.
+ *
+ * This is the one place where Blimp can do more with a Temper construct than
+ * the other backends. A hole carries no BuiltinOperatorId, so a backend that
+ * has not been taught about one says so at build time; Blimp has a real typed
+ * gap that carries the directive to whoever fills it.
+ */
 internal object Hole : BlimpInlineSupportCode("hole") {
     override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree =
         Blimp.Hole(pos, directive = (args.firstOrNull() as? Blimp.StringLit)?.value ?: "fill this in")
