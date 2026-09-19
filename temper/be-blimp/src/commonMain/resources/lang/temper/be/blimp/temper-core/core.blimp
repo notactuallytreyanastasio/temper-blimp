@@ -1589,7 +1589,13 @@ def temper_http_request(where: List, method: String, body: String, mime: Any) ->
     _ -> concat("Content-Type: ", concat(mime, "\r\n"))
   end
   clen = concat("Content-Length: ", concat(to_string(length(body)), "\r\n"))
-  concat(head, concat(host, concat(ctype, concat(clen, concat("Connection: close\r\n\r\n", body)))))
+  # Saying nothing here does not mean "send it uncompressed". RFC 9110 12.5.3:
+  # "If no Accept-Encoding header field is in the request, any content coding
+  # is considered acceptable by the user agent." Silence is the *widest*
+  # possible answer, not the narrowest. Nothing in this client can inflate a
+  # gzip stream, so it says what it can actually read.
+  cenc = "Accept-Encoding: identity\r\n"
+  concat(head, concat(host, concat(ctype, concat(clen, concat(cenc, concat("Connection: close\r\n\r\n", body))))))
 end
 
 # `tcp_read` answers nil for "would block" and the empty string at end of
@@ -1770,6 +1776,7 @@ end
 # advance, which is most of the time something is generated rather than read
 # off a disk.
 def temper_http_decode(lines: List, body: String) -> String do
+  temper_http_check_encoding(lines)
   te = temper_http_header(lines, 1, "transfer-encoding")
   # Not `not(nil?(te)) and contains(downcase(te), ...)`. `and` evaluates both
   # sides, so a response with no Transfer-Encoding handed nil to `downcase`
@@ -1778,6 +1785,26 @@ def temper_http_decode(lines: List, body: String) -> String do
   r = case nil?(te) do
     true -> body
     _ -> temper_http_decode_with(te, body)
+  end
+  r
+end
+
+# A server that encodes a body anyway is not one this can read, and handing
+# back deflate bytes as a `String` is the same wrong-answer-that-looks-right
+# the chunked case was.
+def temper_http_check_encoding(lines: List) -> Any do
+  ce = temper_http_header(lines, 1, "content-encoding")
+  r = case nil?(ce) do
+    true -> nil
+    _ -> temper_http_check_encoding_with(ce)
+  end
+  r
+end
+
+def temper_http_check_encoding_with(ce: String) -> Any do
+  r = case downcase(temper_trim(ce)) == "identity" do
+    true -> nil
+    _ -> temper_raise(concat("net: a response body encoded with ", ce))
   end
   r
 end
