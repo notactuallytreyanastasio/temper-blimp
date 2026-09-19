@@ -1748,9 +1748,34 @@ def temper_http_response(raw: String) -> Any do
     _ -> ""
   end
   lines = split(head, "\r\n")
+  temper_http_check_length(lines, body)
   r = spawn TemperNetResponse
   r <- :__init(temper_http_status(lines), temper_http_content_type(lines, 1), body)
   r
+end
+
+# `tcp_read` answers the empty string both when the peer closes cleanly and
+# when it resets, so a connection dropped halfway through a body looks exactly
+# like a body that ended. The server already said how long it would be.
+def temper_http_check_length(lines: List, body: String) -> Any do
+  declared = temper_http_header(lines, 1, "content-length")
+  case nil?(declared) do
+    true -> nil
+    _ -> temper_http_compare_length(declared, body)
+  end
+end
+
+def temper_http_compare_length(declared: String, body: String) -> Any do
+  n = try do
+    temper_parse_int32(declared, 10)
+  catch e do
+    0 - 1
+  end
+  short = n >= 0 and length(body) < n
+  case short do
+    true -> temper_raise(concat("net: the response body stopped early, ", concat(to_string(length(body)), concat(" bytes of ", declared))))
+    _ -> nil
+  end
 end
 
 # A body can contain a blank line, so re-joining everything after the first one
@@ -1778,19 +1803,22 @@ def temper_http_status(lines: List) -> Int do
 end
 
 def temper_http_content_type(lines: List, i: Int) -> Any do
+  temper_http_header(lines, i, "content-type")
+end
+
+def temper_http_header(lines: List, i: Int, want: String) -> Any do
   case i >= length(lines) do
     true -> nil
-    _ -> temper_http_ct_line(lines, i)
+    _ -> temper_http_header_line(lines, i, want)
   end
 end
 
-def temper_http_ct_line(lines: List, i: Int) -> Any do
-  line = elem(lines, i)
-  colon = split(line, ":")
-  hit = length(colon) > 1 and downcase(elem(colon, 0)) == "content-type"
+def temper_http_header_line(lines: List, i: Int, want: String) -> Any do
+  colon = split(elem(lines, i), ":")
+  hit = length(colon) > 1 and downcase(elem(colon, 0)) == want
   case hit do
     true -> temper_trim(temper_join_rest_colon(colon, 1, ""))
-    _ -> temper_http_content_type(lines, i + 1)
+    _ -> temper_http_header(lines, i + 1, want)
   end
 end
 
