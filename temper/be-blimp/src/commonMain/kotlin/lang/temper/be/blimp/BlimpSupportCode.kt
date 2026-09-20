@@ -466,6 +466,12 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("std/net.type NetResponse.get status()", "status"),
         BlimpConnectedSend("std/net.type NetResponse.get contentType()", "contentType"),
         BlimpConnectedSend("std/net.type NetResponse.get bodyContent()", "bodyContent"),
+        // Serving. `listen` builds the actor; everything after it is a send to
+        // one, which is what an interface of connected members translates to.
+        BlimpConnectedCall("std/serve.listen()", "temper_listen", needsCore),
+        BlimpConnectedSend("std/serve.type Listener.accept()", "accept"),
+        BlimpConnectedSend("std/serve.type Connection.get request()", "request"),
+        BlimpConnectedSend("std/serve.type Connection.respond()", "respond"),
         // Console I/O. Both block, and both answer a settled promise, because
         // Blimp has one thread and nothing to hand a pending promise to.
         BlimpConnectedCall("std/io.sleep()", "temper_sleep", needsCore),

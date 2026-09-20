@@ -24,7 +24,7 @@ cp -R "$here/temper" "$work/web"
 cat "$work/temper.out/blimp/snake-web/main.blimp" "$here/server.blimp" > "$here/app.blimp"
 
 generated=$(wc -l < "$work/temper.out/blimp/snake-web/main.blimp" | tr -d ' ')
-written=$(wc -l < "$here/server.blimp" | tr -d ' ')
+written=$(grep -vcE '^\s*(#|$)' "$here/server.blimp" | tr -d ' ')
 echo "app.blimp: $generated lines generated, $written written by hand"
 echo
 echo "now: blimp $here/app.blimp"

@@ -4008,6 +4008,81 @@ def temper_reduce_from_index(source: Any, init: Any, index: Int, f: Any) -> Any 
   reduce(temper_list_slice(items, index, length(items)), init, f)
 end
 
+# ── Serving ──────────────────────────────────────────
+#
+# `std/net` makes a request; this answers one. Neither hands out a file
+# descriptor: a Listener and a Connection are actors, and the fd is state
+# inside them.
+#
+# `respond` writes and closes, in that order and always both, because every
+# way of leaving a connection open here is a leak and none of them is useful.
+
+actor TemperConnection do
+  state fd: Int :: -1
+  state raw: String :: ""
+
+  on :__init(f: Int, r: String) do
+    become fd: f, raw: r
+    reply nil
+  end
+
+  on :request do reply raw end
+
+  on :respond(out: String) do
+    tcp_write(fd, out)
+    tcp_close(fd)
+    reply nil
+  end
+end
+
+actor TemperListener do
+  state fd: Int :: -1
+
+  on :__init(f: Int) do
+    become fd: f
+    reply nil
+  end
+
+  # `tcp_read` answers nil when there was nothing to read. The connection is
+  # still handed back, with an empty request, because a caller that asked to
+  # accept one is owed something it can respond to and close.
+  on :accept do
+    client = tcp_accept(fd)
+    raw = tcp_read(client)
+    c = spawn TemperConnection
+    r = case nil?(raw) do
+      true -> ""
+      _ -> raw
+    end
+    c <- :__init(client, r)
+    reply c
+  end
+end
+
+# `tcp_listen` raises `NotSupported` for every reason there is, and the reason
+# is almost always that something else already has the port. A bubble carrying
+# that guess is more use than the truth carrying none.
+def temper_listen(port: Int) -> Any do
+  fd = try do
+    tcp_listen(port)
+  catch e do
+    0 - 1
+  end
+  # `bubble` is a statement Blimp only accepts inside a handler or a case arm,
+  # which is why the failure is carried out here as a value first.
+  r = case fd < 0 do
+    true -> bubble concat("serve: cannot listen on port ", concat(to_string(port), " -- something else is probably already on it"))
+    _ -> temper_listener_of(fd)
+  end
+  r
+end
+
+def temper_listener_of(fd: Int) -> Any do
+  l = spawn TemperListener
+  l <- :__init(fd)
+  l
+end
+
 # ── Maps ─────────────────────────────────────────────
 #
 # Blimp's own maps take string keys only, and Temper's take anything that is a
