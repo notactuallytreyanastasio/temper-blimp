@@ -20,17 +20,32 @@ $ curl -s http://localhost:8099/ | grep -c '<script'
 
 | | |
 |---|---|
-| `temper/src/webapp.temper.md` | routing, game state, the HTML, the CSS |
-| `server.blimp` | accept a socket, read a request line, write a response |
+| `temper/src/webapp.temper.md` | the accept loop, the request parsing, the HTTP framing, the routing, the HTML, the CSS |
+| `server.blimp` | `serve(8099)` |
 
-`build.sh` prints the split: about 6,600 lines generated against 70 written.
-The written ones do nothing a browser can see. Every byte of the page comes
-out of Temper, through `temper build -b blimp`.
+`build.sh` prints the split. It used to be seventy-one hand-written lines; it
+is one.
 
-That is further than `../snake` goes. There the harness is hand-written Blimp,
-because it produces a *view tree* and view nodes are Blimp builtins Temper
-cannot name. A page of HTML is only a `String`, so Temper can build it, and
-routing is only a comparison of one, so Temper can do that too.
+The five socket calls Temper could not say are `std/serve` now -- `listen`,
+`Listener.accept`, `Connection.request`, `Connection.respond` -- declared the
+way `std/net` declares the other half of the same idea, and implemented for
+this backend in temper-core. Nothing in that interface is a file descriptor,
+so a backend is free to answer it over something that is not TCP.
+
+Everything else was only ever string work. A request line is a `String` and
+splitting one is not something a language needs help with:
+
+```temper
+let pathOf(raw: String): String {
+  let firstLine = raw.split("\r\n").getOr(0, "GET / HTTP/1.1");
+  let target = firstLine.split(" ").getOr(1, "/");
+  target.split("?").getOr(0, "/")
+}
+```
+
+That is further than `../snake` can go. There the harness has to be
+hand-written Blimp, because it produces a *view tree* and view nodes are Blimp
+builtins Temper has no way to name.
 
 ## The clock and the controls
 
@@ -69,7 +84,10 @@ it is due to ask for the next.
 
 ## What is not here
 
-No favicon — a browser asking for one gets the board, because `handle` returns
-the current state for any path it does not know. That is the right answer for
-a typo and the wrong one for `/favicon.ico`, and telling them apart needs a
-404 this does not have.
+No favicon -- a browser asking for one gets the board, because `handle`
+returns the current state for any path it does not know. That is the right
+answer for a typo and the wrong one for `/favicon.ico`, and telling them apart
+needs a 404 this does not have.
+
+One connection at a time, served to completion before the next is accepted.
+`std/serve` has no shape for concurrency and this does not need one.

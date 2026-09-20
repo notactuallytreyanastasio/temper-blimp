@@ -12,6 +12,7 @@ accepts a socket, hands the path here, and writes back what comes out.
       Direction, Up, Down, Left, Right, Playing, SnakeGame,
       newGame, changeDirection, tick, render,
     } = import("snake");
+    let { listen } = import("std/serve");
 
 ## The state
 
@@ -123,4 +124,41 @@ ends its lines with CR LF. A `<pre>` wants neither.
       out.add(".note{margin:16px 0 0;color:#6a717d;font-size:12px}");
       out.add("code{color:#8b929e}");
       out.toList().join("") { s => s }
+    }
+
+## The server
+
+What used to be seventy-one lines of hand-written Blimp. `std/serve` gives
+Temper the five socket calls it could not say; the request line was always
+only a `String`, and splitting one is not something a language needs help
+with.
+
+    let pathOf(raw: String): String {
+      let firstLine = raw.split("\r\n").getOr(0, "GET / HTTP/1.1");
+      let target = firstLine.split(" ").getOr(1, "/");
+      target.split("?").getOr(0, "/")
+    }
+
+    let httpOk(body: String): String {
+      let head = new ListBuilder<String>();
+      head.add("HTTP/1.1 200 OK\r\n");
+      head.add("Content-Type: text/html; charset=utf-8\r\n");
+      head.add("Content-Length: ${body.countBetween(String.begin, body.end).toString()}\r\n");
+      head.add("Connection: close\r\n\r\n");
+      head.add(body);
+      head.toList().join("") { s => s }
+    }
+
+One game, held in this loop, because a page with no script has nowhere else to
+keep it.
+
+    export let serve(port: Int): Void throws Bubble {
+      let listener = listen(port);
+      console.log("snake on http://localhost:${port.toString()}");
+      var app = newApp(42);
+      while (true) {
+        let connection = listener.accept();
+        app = app.handle(pathOf(connection.request));
+        connection.respond(httpOk(app.page()));
+      }
     }
