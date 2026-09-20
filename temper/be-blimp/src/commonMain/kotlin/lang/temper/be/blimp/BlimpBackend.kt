@@ -94,6 +94,9 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         // source is spliced in and its `connected_<name>` functions are what a
         // @connected declaration calls.
         val connectedSources = mutableListOf<String>()
+
+        /** Every test in this library, for the one runner call below. */
+        val ownTests = mutableListOf<Blimp.ListLit>()
         // One counter for the whole file. Every module below is translated by
         // its own BlimpTranslator and every one of their outputs is appended
         // to the same `main.blimp`, so a counter that starts at zero per
@@ -117,8 +120,45 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 if (own) {
                     for ((test, blimpName) in translated.tests) {
                         dependenciesBuilder.addTest(libraryName, test, blimpName)
+                        ownTests.add(
+                            Blimp.ListLit(
+                                test.pos,
+                                items = listOf(
+                                    Blimp.StringLit(test.pos, blimpName),
+                                    Blimp.Id(test.pos, OutName(blimpName, null)),
+                                ),
+                            ),
+                        )
                     }
                 }
+            }
+        }
+        // One call for the library, not one per module.
+        //
+        // Blimp has no test framework to ask for a report -- be-lua runs
+        // busted with `-o junit` -- so the translated program runs its own
+        // tests and writes the file the harness reads. Emitting that per
+        // module wrote the same `test-results.xml` once per module, each one
+        // truncating the last, so a library of three modules reported the
+        // third module's tests and the harness called the other two "not run".
+        // A library is one program here; it gets one report.
+        val runTests = when {
+            ownTests.isEmpty() -> listOf()
+            else -> {
+                preludeHelpers.addAll(needsCore)
+                listOf(
+                    Blimp.ExprStatement(
+                        finished.pos,
+                        Blimp.Call(
+                            finished.pos,
+                            callee = Blimp.Id(finished.pos, OutName(TEMPER_RUN_TESTS, null)),
+                            args = listOf(
+                                Blimp.ListLit(finished.pos, items = ownTests),
+                                Blimp.StringLit(finished.pos, TEST_RESULTS_FILE),
+                            ),
+                        ),
+                    ),
+                )
             }
         }
         val connected = connectedSources.map { Blimp.Prelude(finished.pos, it) }
@@ -152,7 +192,7 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
                 path = filePath(MAIN_FILE),
                 content = Blimp.SourceFile(
                     finished.pos,
-                    items = prelude + connected + declarations + mainStatements + runAsync,
+                    items = prelude + connected + declarations + mainStatements + runTests + runAsync,
                 ),
                 mimeType = mimeType,
             ),

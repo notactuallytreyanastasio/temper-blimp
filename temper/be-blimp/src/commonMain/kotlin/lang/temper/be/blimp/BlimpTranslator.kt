@@ -174,7 +174,6 @@ internal class BlimpTranslator(
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
-        emitTestRunner()
         return Translated(
             declarations = declarations.toList(),
             mainStatements = mainStatements.toList(),
@@ -185,43 +184,6 @@ internal class BlimpTranslator(
 
     /** Tests declared in this module, in source order. */
     private val tests = mutableListOf<TmpL.Test>()
-
-    /**
-     * The call that runs this module's tests and writes the JUnit XML.
-     *
-     * Blimp has no test framework to ask for a report -- be-lua runs busted
-     * with `-o junit` -- so the translated module runs its own tests and writes
-     * the file the harness reads. Each entry is `[name, fn]`: the name is the
-     * declaration's, because the harness strips a `__123` suffix and converts
-     * camelCase back to the sentence the test was declared with.
-     */
-    private fun emitTestRunner() {
-        if (tests.isEmpty() || !emitTests) return
-        preludeHelpers.addAll(needsCore)
-        val pos = module.pos
-        val entries = tests.map { test ->
-            Blimp.ListLit(
-                test.pos,
-                items = listOf(
-                    Blimp.StringLit(test.pos, names.outName(test.name.name).outputNameText),
-                    idOf(test.name),
-                ),
-            )
-        }
-        mainStatements.add(
-            Blimp.ExprStatement(
-                pos,
-                Blimp.Call(
-                    pos,
-                    callee = Blimp.Id(pos, OutName(TEMPER_RUN_TESTS, null)),
-                    args = listOf(
-                        Blimp.ListLit(pos, items = entries),
-                        Blimp.StringLit(pos, BlimpBackend.TEST_RESULTS_FILE),
-                    ),
-                ),
-            ),
-        )
-    }
 
     data class Translated(
         val declarations: List<Blimp.Item>,

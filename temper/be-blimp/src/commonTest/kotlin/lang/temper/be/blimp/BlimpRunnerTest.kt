@@ -113,6 +113,37 @@ class BlimpRunnerTest {
     }
 
     /**
+     * Why a library gets one call to `temper_run_tests`, not one per module.
+     *
+     * `temper_run_tests` ends in a `write_file`, and writing a file truncates
+     * it. Emitting the call per module wrote the same `test-results.xml` once
+     * per module, each one over the last, so a library of three modules
+     * reported the third module's tests and the harness called the other two
+     * "not run". One call is emitted for the whole library now.
+     *
+     * The prelude is not here -- `runSingleSource` runs the source it is
+     * given and nothing else -- so this is the `write_file` underneath rather
+     * than `temper_run_tests` itself. If Blimp ever grew an appending write,
+     * this fails and the single call stops being the only way.
+     */
+    @Test
+    fun writingAFileTwiceKeepsOnlyTheSecond() {
+        val result = runIt(
+            """
+            |write_file("twice.txt", "first")
+            |write_file("twice.txt", "second")
+            |back = read_file("twice.txt")
+            |case back == "second" do
+            |  true -> nil
+            |  _ -> raise :a_second_write_did_not_replace_the_first
+            |end
+            |
+            """.trimMargin(),
+        )
+        assertTrue(result is RSuccess, "expected the second write to replace the first: $result")
+    }
+
+    /**
      * A program that dies has to come back as a failure. `blimp` exits
      * non-zero for an uncaught bubble, and if that were not plumbed through,
      * a caller would read a crash as a clean run.

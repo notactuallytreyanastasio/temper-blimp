@@ -824,7 +824,18 @@ private fun optimizeAutoescaperUse(
             val callee = t.child(0)
             val fn = callee.functionContained
             if (fn is DotHelper && fn.memberAccessor is CallMemberAccessor) {
-                val subject = callee.child(fn.memberAccessor.firstArgumentIndex + 1)
+                // `t.size >= 2` above says the *call* has an argument. It says
+                // nothing about the callee, which can be a leaf -- and
+                // `LeafTree.child` throws rather than answering null:
+                //
+                //     java.lang.IndexOutOfBoundsException
+                //       at lang.temper.value.LeafTree.child(Tree.kt:362)
+                //
+                // A callee with fewer children than the accessor wants cannot
+                // be a method call on the accumulator, so there is nothing to
+                // rewrite and the statement falls through to the general path.
+                val subjectIndex = fn.memberAccessor.firstArgumentIndex + 1
+                val subject = if (subjectIndex < callee.size) callee.child(subjectIndex) else null
                 if (subject is RightNameLeaf && subject.content == accumulatorName) {
                     val (_, classification) = methodClassification(fn.member)
                     if (classification != null) {
