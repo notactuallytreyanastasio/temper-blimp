@@ -55,6 +55,8 @@ actor DivTests do
   test "int div truncates toward zero" do
     assert_eq(temper_int_div(7, 2), 3)
     assert_eq(temper_int_div(0 - 7, 2), 0 - 3)
+    assert_eq(temper_int64_div(5000000000, 1), 5000000000)
+    assert_eq(temper_int64_div(0 - 7, 2), 0 - 3)
   end
   test "int rem matches the dividend's sign" do
     assert_eq(temper_int_rem(7, 2), 1)
