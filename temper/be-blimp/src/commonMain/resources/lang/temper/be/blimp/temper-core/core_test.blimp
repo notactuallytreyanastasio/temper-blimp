@@ -336,3 +336,24 @@ actor RegexTests do
     assert_eq(((m <- :groups) <- :get("x")) <- :value, "b")
   end
 end
+
+actor BytesTests do
+  # A Blimp string is bytes, and a Blimp caller can hand translated Temper
+  # half a character: char_at("é", 0) is its lead byte alone.
+  test "bytes that do not decode are U+FFFD, one byte at a time" do
+    lead = char_at("é", 0)
+    assert_eq(temper_string_code_point_at(lead, 0), 65533)
+    assert_eq(temper_string_next(lead, 0), 1)
+    cut = slice("a→", 0, 3)
+    assert_eq(temper_string_code_point_at(cut, 1), 65533)
+    assert_eq(temper_string_next(cut, 1), 2)
+    assert_eq(temper_string_code_point_at(char_at("é", 1), 0), 65533)
+    assert_eq(temper_string_code_point_at(concat(char_at("é", 0), "x"), 0), 65533)
+    assert_eq(u8_code_points(cut), [97, 65533, 65533])
+  end
+  test "whole characters still decode" do
+    assert_eq(temper_string_code_point_at("a→b", 1), 8594)
+    assert_eq(temper_string_next("a→b", 1), 4)
+    assert_eq(u8_code_points("é🌍"), [233, 127757])
+  end
+end

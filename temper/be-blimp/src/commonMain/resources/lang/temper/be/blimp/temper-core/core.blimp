@@ -343,18 +343,72 @@ def u8_seq_len(b: Int) -> Int do
   end
 end
 
-# The code point whose sequence starts at byte index i.
+# The code point whose sequence starts at byte index i, or U+FFFD where the
+# bytes there are not one: a continuation byte with no lead, or a lead whose
+# sequence is cut off by the end of the string or by a byte that is not a
+# continuation.
+#
+# A Temper string is Unicode by construction and cannot be any of those. A
+# Blimp string is bytes and can: `char_at(s, i)` of "é" is half of it, and a
+# program that cuts a string at a byte count can cut a character in two. A
+# Blimp caller of translated Temper passes such strings, and this read past
+# the end of them -- `char_code` beyond the last byte is nil, and `rem(nil,
+# 64)` stops the program. U+FFFD is what a UTF-8 decoder answers for bytes
+# that do not decode, and it is not a letter, a digit or a space, so a
+# question about one gets the answer it got from the byte.
 def u8_decode_at(s: String, i: Int) -> Int do
   b0 = char_code(s, i)
-  n = u8_seq_len(b0)
-  case n == 1 do
+  case b0 < 128 do
     true -> b0
-    _ -> case n == 2 do
-      true -> (rem(b0, 32) * 64) + rem(char_code(s, i + 1), 64)
-      _ -> case n == 3 do
-        true -> (rem(b0, 16) * 4096) + (rem(char_code(s, i + 1), 64) * 64) + rem(char_code(s, i + 2), 64)
-        _ -> (rem(b0, 8) * 262144) + (rem(char_code(s, i + 1), 64) * 4096) + (rem(char_code(s, i + 2), 64) * 64) + rem(char_code(s, i + 3), 64)
+    _ ->
+      n = u8_seq_len(b0)
+      case b0 < 192 or i + n > length(s) do
+        true -> 65533
+        _ -> case u8_tail_ok(s, i + 1, i + n) do
+          true -> u8_decode_multi(s, i, b0, n)
+          _ -> 65533
+        end
       end
+  end
+end
+
+def u8_tail_ok(s: String, i: Int, stop: Int) -> Bool do
+  case i >= stop do
+    true -> true
+    _ ->
+      b = char_code(s, i)
+      case b >= 128 and b < 192 do
+        true -> u8_tail_ok(s, i + 1, stop)
+        _ -> false
+      end
+  end
+end
+
+# How many bytes the code point at i takes: its sequence's length, or 1 where
+# u8_decode_at answers U+FFFD, so that stepping through bytes that do not
+# decode moves one byte at a time and never past the end.
+def u8_width_at(s: String, i: Int) -> Int do
+  b0 = char_code(s, i)
+  case b0 < 128 do
+    true -> 1
+    _ ->
+      n = u8_seq_len(b0)
+      case b0 < 192 or i + n > length(s) do
+        true -> 1
+        _ -> case u8_tail_ok(s, i + 1, i + n) do
+          true -> n
+          _ -> 1
+        end
+      end
+  end
+end
+
+def u8_decode_multi(s: String, i: Int, b0: Int, n: Int) -> Int do
+  case n == 2 do
+    true -> (rem(b0, 32) * 64) + rem(char_code(s, i + 1), 64)
+    _ -> case n == 3 do
+      true -> (rem(b0, 16) * 4096) + (rem(char_code(s, i + 1), 64) * 64) + rem(char_code(s, i + 2), 64)
+      _ -> (rem(b0, 8) * 262144) + (rem(char_code(s, i + 1), 64) * 4096) + (rem(char_code(s, i + 2), 64) * 64) + rem(char_code(s, i + 3), 64)
     end
   end
 end
@@ -395,7 +449,7 @@ def u8_cp_loop(s: String, i: Int, acc: List) -> List do
     true -> acc
     _ ->
       cp = u8_decode_at(s, i)
-      u8_cp_loop(s, i + u8_seq_len(char_code(s, i)), append(acc, cp))
+      u8_cp_loop(s, i + u8_width_at(s, i), append(acc, cp))
   end
 end
 
@@ -426,7 +480,7 @@ end
 def temper_string_next(s: String, i: Int) -> Int do
   case i >= length(s) do
     true -> length(s)
-    _ -> i + u8_seq_len(char_code(s, i))
+    _ -> i + u8_width_at(s, i)
   end
 end
 
@@ -1016,7 +1070,7 @@ def temper_code_points_loop(s: String, i: Int, acc: List) -> List do
   case i >= length(s) do
     true -> acc
     _ ->
-      n = u8_seq_len(char_code(s, i))
+      n = u8_width_at(s, i)
       temper_code_points_loop(s, i + n, acc ++ [slice(s, i, n)])
   end
 end
@@ -3157,7 +3211,7 @@ end
 def temper_rx_offsets_loop(s: String, i: Int, acc: List) -> List do
   case i >= length(s) do
     true -> append(acc, length(s))
-    _ -> temper_rx_offsets_loop(s, i + u8_seq_len(char_code(s, i)), append(acc, i))
+    _ -> temper_rx_offsets_loop(s, i + u8_width_at(s, i), append(acc, i))
   end
 end
 
