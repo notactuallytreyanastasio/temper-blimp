@@ -355,13 +355,21 @@ internal class BlimpTranslator(
                 // function that calls itself by that name counts as capturing.
                 val closed = capturesNothing(statement)
                 nameOf(statement.name)?.let { scopes.lastOrNull()?.add(it) }
+                val lambda = translateLambda(statement)
+                val identity = isIdentity(lambda)
+                if (identity) {
+                    nameOf(statement.name)?.let(identityFns::add)
+                    preludeHelpers.add(TEMPER_IDENTITY)
+                }
                 out.add(
                     Blimp.Assign(
                         statement.pos,
                         target = idOf(statement.name),
                         value = when {
-                            closed -> liftLambda(statement)
-                            else -> translateLambda(statement)
+                            // One def for every `{ (s) => s }`, not one each.
+                            identity -> Blimp.Id(statement.pos, OutName(TEMPER_IDENTITY, null))
+                            closed -> liftLambda(statement, lambda)
+                            else -> lambda
                         },
                     ),
                 )
@@ -619,10 +627,29 @@ internal class BlimpTranslator(
         return bindIfCase(pos, cased, hoisted)
     }
 
+    /** `items.join(sep) { (s) => s }` as `temper_join_strings(items, sep)`, or null. */
+    private fun joinOfStrings(call: TmpL.CallExpression, fn: TmpL.InlineSupportCodeWrapper): Blimp.Expr? {
+        val supportCode = fn.supportCode as BlimpInlineSupportCode
+        if (supportCode.connectedKey != JOIN_KEY || call.parameters.size != 3) return null
+        val shown = call.parameters[2] as? TmpL.Reference ?: return null
+        if (nameOf(shown.id) !in identityFns) return null
+        preludeHelpers.addAll(needsCore)
+        val items = call.parameters[0]
+        val fromSplit = items is TmpL.CallExpression &&
+            (items.fn as? TmpL.InlineSupportCodeWrapper)?.supportCode?.let {
+                (it as? BlimpInlineSupportCode)?.connectedKey == SPLIT_KEY
+            } == true
+        return Blimp.Call(
+            call.pos,
+            callee = Blimp.Id(call.pos, OutName(if (fromSplit) "join" else TEMPER_JOIN_STRINGS, null)),
+            args = call.parameters.take(2).map { translateActual(it) },
+        )
+    }
+
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
         when (val fn = call.fn) {
             // Support code such as console.log becomes Blimp syntax right here.
-            is TmpL.InlineSupportCodeWrapper -> {
+            is TmpL.InlineSupportCodeWrapper -> joinOfStrings(call, fn) ?: run {
                 val supportCode = fn.supportCode as BlimpInlineSupportCode
                 preludeHelpers.addAll(supportCode.preludeHelpers)
                 when (
@@ -1396,6 +1423,19 @@ internal class BlimpTranslator(
         return !captures
     }
 
+    /**
+     * Local functions that answer their one argument unchanged, the
+     * `{ (s) => s }` that `join` needs to join strings. See [JOIN_KEY].
+     */
+    private val identityFns = mutableSetOf<ResolvedName>()
+
+    private fun isIdentity(lambda: Blimp.Lambda): Boolean {
+        val param = lambda.params.singleOrNull() ?: return false
+        val statement = lambda.body.statements.singleOrNull() as? Blimp.ExprStatement ?: return false
+        val result = statement.expr as? Blimp.Id ?: return false
+        return result.outName.outputNameText == param.id.outName.outputNameText
+    }
+
     /** Every name this module declares at its top level. */
     private val moduleTopNames: Set<ResolvedName> by lazy {
         buildSet {
@@ -1421,8 +1461,7 @@ internal class BlimpTranslator(
      * called it 3,000 times took 470MB to render instead of 36MB. A def is
      * made once, and naming it makes nothing.
      */
-    private fun liftLambda(decl: TmpL.LocalFunctionDeclaration): Blimp.Id {
-        val lambda = translateLambda(decl)
+    private fun liftLambda(decl: TmpL.LocalFunctionDeclaration, lambda: Blimp.Lambda): Blimp.Id {
         val id = Blimp.Id(decl.pos, names.gensym("fn"))
         declarations.add(
             Blimp.DefDecl(

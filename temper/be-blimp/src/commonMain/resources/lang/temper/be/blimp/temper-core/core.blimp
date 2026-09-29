@@ -480,7 +480,10 @@ end
 def temper_string_next(s: String, i: Int) -> Int do
   case i >= length(s) do
     true -> length(s)
-    _ -> i + u8_width_at(s, i)
+    _ -> case char_code(s, i) < 128 do
+      true -> i + 1
+      _ -> i + u8_width_at(s, i)
+    end
   end
 end
 
@@ -1038,12 +1041,24 @@ end
 
 # `indexOf` answers a byte offset, or -1 when the needle is not there. A nil
 # start means from the beginning.
+#
+# The search is written out here rather than calling temper_index_of_from:
+# this is what every `s.indexOf` in a program becomes, and a Blimp def call
+# is not free.
 def temper_string_index_of(s: String, needle: String, start: Any) -> Int do
   from = case nil?(start) do
     true -> 0
     _ -> start
   end
-  temper_index_of_from(s, needle, from)
+  case from + length(needle) > length(s) do
+    true -> 0 - 1
+    _ ->
+      at = index_of(slice(s, from, length(s) - from), needle)
+      case at < 0 do
+        true -> 0 - 1
+        _ -> from + at
+      end
+  end
 end
 
 # Blimp's `index_of` is the search; it has no start, so it searches what is
@@ -1090,8 +1105,21 @@ end
 
 # `join` needs strings, so every item is shown first. The loop this replaces
 # built the result with `concat`, copying everything so far at every item.
+# What `join` becomes when the function that shows each item is the identity,
+# `{ (s) => s }`: the backend sees that and calls this instead, so a list of
+# strings is joined without a call per item.
+def temper_join_strings(source: Any, sep: String) -> String do
+  case type_of(source) == :list do
+    true -> join(source, sep)
+    _ -> join(temper_items(source), sep)
+  end
+end
+
 def temper_join(source: Any, sep: String, show: Any) -> String do
-  join(map(temper_items(source), show), sep)
+  case type_of(source) == :list do
+    true -> join(map(source, show), sep)
+    _ -> join(map(temper_items(source), show), sep)
+  end
 end
 
 def temper_for_each(source: Any, body: Any) -> Any do
@@ -3815,12 +3843,29 @@ end
 # A negative start is clamped, not counted from the end: Temper's slice takes
 # an exclusive end and clamps both bounds, so `slice(-2, 0)` is empty rather
 # than whatever `elem` makes of a negative index.
+# `tail` answers a view of the same list, so dropping the front is a step per
+# item and copies nothing; the back is dropped the same way from the reverse.
+# Not `map(range(from, to - 1), fn(i) do elem(items, i) end)`, which it was
+# for a commit: that makes a closure per call, and the interpreter copies
+# every binding in sight into a closure it makes.
 def temper_list_slice(items: List, start: Int, stop: Int) -> List do
   from = max(start, 0)
   to = min(stop, length(items))
   case to <= from do
     true -> []
-    _ -> map(range(from, to - 1), fn(i: Int) -> Any do elem(items, i) end)
+    _ ->
+      front = temper_list_drop(items, from)
+      case to == length(items) do
+        true -> front
+        _ -> reverse(temper_list_drop(reverse(front), length(items) - to))
+      end
+  end
+end
+
+def temper_list_drop(items: List, n: Int) -> List do
+  case n <= 0 do
+    true -> items
+    _ -> temper_list_drop(tail(items), n - 1)
   end
 end
 
@@ -3855,15 +3900,26 @@ def temper_insert_loop(rest: List, x: Any, cmp: Any, acc: List) -> List do
   end
 end
 
-# Sequence operations that accept either a list or a builder.
-def temper_len(x: Any) -> Int do length(temper_items(x)) end
+# Sequence operations that accept either a list or a builder. A list, which
+# is nearly always what they get, is answered without calling temper_items.
+def temper_len(x: Any) -> Int do
+  case type_of(x) == :list do
+    true -> length(x)
+    _ -> length(temper_items(x))
+  end
+end
 def temper_is_empty(x: Any) -> Bool do
   case type_of(x) == :string do
     true -> empty?(x)
     _ -> empty?(temper_items(x))
   end
 end
-def temper_get(x: Any, i: Int) -> Any do elem(temper_items(x), i) end
+def temper_get(x: Any, i: Int) -> Any do
+  case type_of(x) == :list do
+    true -> elem(x, i)
+    _ -> elem(temper_items(x), i)
+  end
+end
 def temper_map(x: Any, f: Any) -> List do map(temper_items(x), f) end
 def temper_reduce(x: Any, init: Any, f: Any) -> Any do reduce(temper_items(x), init, f) end
 def temper_to_list(x: Any) -> List do temper_items(x) end

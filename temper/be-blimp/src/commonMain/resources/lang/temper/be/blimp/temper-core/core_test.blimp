@@ -226,6 +226,12 @@ actor ListTests do
     assert_eq(temper_join([1], ",", fn(x: Int) do to_string(x) end), "1")
     assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
   end
+  test "join_strings joins a list or a builder without showing" do
+    assert_eq(temper_join_strings(["a", "", "b"], "-"), "a--b")
+    assert_eq(temper_join_strings([], "-"), "")
+    b = temper_new_list_builder_from(["x", "y"])
+    assert_eq(temper_join_strings(b, ","), "x,y")
+  end
   test "list slice clamps both ends" do
     assert_eq(temper_list_slice([1, 2, 3], 0 - 2, 2), [1, 2])
     assert_eq(temper_list_slice([1, 2, 3], 1, 99), [2, 3])

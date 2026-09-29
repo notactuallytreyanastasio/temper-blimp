@@ -166,10 +166,10 @@ class BlimpBackend(setup: BackendSetup<BlimpBackend>) : Backend<BlimpBackend>(Fa
         // `readLine` hand back an unsettled promise and park the generator
         // that awaited it, so a program whose last statement started an
         // `async` block would otherwise exit with the block half-run. This is
-        // the loop that settles them, and it returns at once when nothing is
-        // queued -- which is every program that does not use `async`.
+        // the loop that settles them. Nothing else queues anything, so it is
+        // emitted only when one of the two was called.
         val runAsync = when {
-            preludeHelpers.isEmpty() -> listOf()
+            TEMPER_RUN_ASYNC !in preludeHelpers -> listOf()
             else -> listOf(
                 Blimp.ExprStatement(
                     finished.pos,
