@@ -3197,7 +3197,7 @@ actor TemperGroup do
   on :end do reply gend end
 end
 
-def temper_rx_group(n: String, v: String, b: Int, e: Int) -> Any do
+def temper_rx_new_group(n: String, v: String, b: Int, e: Int) -> Any do
   g = spawn TemperGroup
   g <- :__init(n, v, b, e)
   g
@@ -3224,7 +3224,7 @@ end
 # naming the translated class -- which it could not do anyway, since the name
 # depends on the translation.
 def temper_rx_build_match(text: String, offs: List, m: List) -> Any do
-  full = temper_rx_group("full", temper_rx_slice(text, offs, elem(m, 0), elem(m, 1)), elem(offs, elem(m, 0)), elem(offs, elem(m, 1)))
+  full = temper_rx_new_group("full", temper_rx_slice(text, offs, elem(m, 0), elem(m, 1)), elem(offs, elem(m, 0)), elem(offs, elem(m, 1)))
   groups = temper_new_map()
   groups <- :set("full", full)
   temper_rx_fill_groups(groups, text, offs, elem(m, 2), 0)
@@ -3241,7 +3241,7 @@ def temper_rx_fill_groups(groups: Any, text: String, offs: List, caps: List, i: 
     true -> groups
     _ ->
       c = elem(caps, i)
-      groups <- :set(elem(c, 0), temper_rx_group(elem(c, 0), temper_rx_slice(text, offs, elem(c, 1), elem(c, 2)), elem(offs, elem(c, 1)), elem(offs, elem(c, 2))))
+      groups <- :set(elem(c, 0), temper_rx_new_group(elem(c, 0), temper_rx_slice(text, offs, elem(c, 1), elem(c, 2)), elem(offs, elem(c, 1)), elem(offs, elem(c, 2))))
       temper_rx_fill_groups(groups, text, offs, caps, i + 1)
   end
   r

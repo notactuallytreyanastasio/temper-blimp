@@ -325,3 +325,14 @@ actor BuilderTests do
     assert_eq(temper_len(m <- :keys()), 0)
   end
 end
+
+actor RegexTests do
+  # Two defs were called temper_rx_group, the parser's (2 arguments) and the
+  # match's (4). Blimp keeps one def per name, the later, so every pattern
+  # with a `(` stopped with WRONG ARGUMENT COUNT.
+  test "a pattern with a group compiles, and its named group reads back" do
+    m = temper_regex_find(nil, temper_regex_compile(nil, "a(?<x>b)c"), "xabc", 0, nil)
+    assert_eq((m <- :full) <- :value, "abc")
+    assert_eq(((m <- :groups) <- :get("x")) <- :value, "b")
+  end
+end
