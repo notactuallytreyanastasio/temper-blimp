@@ -5,6 +5,8 @@ import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.be.tmpl.isStdLib
 import lang.temper.log.Position
+import lang.temper.name.BuiltinName
+import lang.temper.name.ExportedName
 import lang.temper.name.OutName
 import lang.temper.name.ResolvedName
 import lang.temper.name.ResolvedParsedName
@@ -349,12 +351,18 @@ internal class BlimpTranslator(
             is TmpL.WhileStatement -> translateWhileStatement(statement, out)
 
             is TmpL.LocalFunctionDeclaration -> {
+                // Asked before the function's own name joins the scope, so a
+                // function that calls itself by that name counts as capturing.
+                val closed = capturesNothing(statement)
                 nameOf(statement.name)?.let { scopes.lastOrNull()?.add(it) }
                 out.add(
                     Blimp.Assign(
                         statement.pos,
                         target = idOf(statement.name),
-                        value = translateLambda(statement),
+                        value = when {
+                            closed -> liftLambda(statement)
+                            else -> translateLambda(statement)
+                        },
                     ),
                 )
             }
@@ -1344,6 +1352,88 @@ internal class BlimpTranslator(
             ),
             body = body,
         )
+    }
+
+    /**
+     * True when [decl] could be a top-level `def` and mean the same thing: it
+     * is not inside a class, and every name in it is its own (a formal, a
+     * local, a function declared inside it), a declaration at the top of this
+     * module, or an export or builtin, which are top-level names in the one
+     * output file too.
+     *
+     * A list of what is allowed, not of what is not: a local of the function
+     * around it is not in any scope yet when it is declared after the nested
+     * function that uses it (two local functions calling each other), so
+     * asking "is this name in an enclosing scope" would miss it and lift a
+     * def that names a local nobody can see.
+     */
+    private fun capturesNothing(decl: TmpL.LocalFunctionDeclaration): Boolean {
+        if (actorScope != null || decl.parameters.thisName != null) return false
+        val own = mutableSetOf<ResolvedName>()
+        decl.parameters.boundaryDescent { node ->
+            if (node is TmpL.Formal) nameOf(node.name)?.let(own::add)
+            true
+        }
+        decl.body?.boundaryDescent { node ->
+            when (node) {
+                is TmpL.Formal -> nameOf(node.name)?.let(own::add)
+                is TmpL.LocalDeclaration -> nameOf(node.name)?.let(own::add)
+                is TmpL.LocalFunctionDeclaration -> nameOf(node.name)?.let(own::add)
+                else -> {}
+            }
+            true
+        }
+        var captures = false
+        decl.body?.boundaryDescent { node ->
+            if (node is TmpL.Id) {
+                val name = nameOf(node)
+                val global = name == null || name in own || name in moduleTopNames ||
+                    name is ExportedName || name is BuiltinName
+                if (!global) captures = true
+            }
+            !captures
+        }
+        return !captures
+    }
+
+    /** Every name this module declares at its top level. */
+    private val moduleTopNames: Set<ResolvedName> by lazy {
+        buildSet {
+            for (topLevel in module.topLevels) {
+                when (topLevel) {
+                    is TmpL.ModuleLevelDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    is TmpL.ModuleFunctionDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    is TmpL.TypeDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    /**
+     * A nested function that captures nothing, as a top-level `def`; what
+     * stands where the `fn` stood is the def's name.
+     *
+     * The interpreter copies the environment into every closure it makes, and
+     * a Temper lambda is made each time the function around it runs. In a
+     * program the size of a web site that copy is about 140KB, so a helper
+     * that passed `{ (s) => s }` to `join` cost 140KB a call, and a page that
+     * called it 3,000 times took 470MB to render instead of 36MB. A def is
+     * made once, and naming it makes nothing.
+     */
+    private fun liftLambda(decl: TmpL.LocalFunctionDeclaration): Blimp.Id {
+        val lambda = translateLambda(decl)
+        val id = Blimp.Id(decl.pos, names.gensym("fn"))
+        declarations.add(
+            Blimp.DefDecl(
+                decl.pos,
+                id = id,
+                params = lambda.params.map { it.deepCopy() },
+                returnType = anyType(decl.pos),
+                body = lambda.body.deepCopy(),
+            ),
+        )
+        return id.deepCopy()
     }
 
     /**
