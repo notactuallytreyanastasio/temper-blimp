@@ -14,7 +14,6 @@ import lang.temper.value.pureVirtualBuiltinName
 
 /** temper-core shims over Blimp builtins whose shape differs from Temper's. */
 internal const val TEMPER_SLICE = "temper_slice"
-internal const val TEMPER_STRING_END = "temper_string_end"
 internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
 internal const val TEMPER_IDENTITY = "temper_identity"
 
@@ -36,7 +35,7 @@ internal val cmpHelpers = strCmpHelpers + TEMPER_CMP
 
 /** List operations Blimp lacks, plus the loops they run on. */
 internal val listHelpers = setOf(
-    "temper_filter", "temper_filter_loop", "temper_join", "temper_join_loop", "temper_for_each",
+    "temper_filter", "temper_join", "temper_for_each",
 )
 
 /** The UTF-8 layer, which the code-point string operations all lean on. */
@@ -376,7 +375,10 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
         BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
         BlimpConnectedCall("core.type String.split()", "temper_string_split", utf8Helpers + needsCore),
-        BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
+        // `end` is one past the last byte, which is Blimp's `length`. It went
+        // through a temper-core def that called `length`; a library that
+        // compares against `s.end` in its inner loop paid a call for nothing.
+        BlimpConnectedCall("core.type String.get end()", "length"),
         BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
         BlimpConnectedCall(
             "core.type String.indexOf()",

@@ -226,6 +226,30 @@ actor ListTests do
     assert_eq(temper_join([1], ",", fn(x: Int) do to_string(x) end), "1")
     assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
   end
+  test "list slice clamps both ends" do
+    assert_eq(temper_list_slice([1, 2, 3], 0 - 2, 2), [1, 2])
+    assert_eq(temper_list_slice([1, 2, 3], 1, 99), [2, 3])
+    assert_eq(temper_list_slice([1, 2, 3], 2, 1), [])
+    assert_eq(temper_list_slice([], 0, 3), [])
+  end
+end
+
+actor SearchTests do
+  test "split keeps every empty piece, as Temper does" do
+    assert_eq(temper_string_split(" g  h i", " "), ["", "g", "", "h", "i"])
+    assert_eq(temper_string_split("a,,b,", ","), ["a", "", "b", ""])
+    assert_eq(temper_string_split("abab", "ab"), ["", "", ""])
+    assert_eq(temper_string_split("", ","), [""])
+    assert_eq(temper_string_split("def", ""), ["d", "e", "f"])
+  end
+  test "indexOf answers a byte offset from the start, or -1" do
+    assert_eq(temper_string_index_of("a-b-c", "-", nil), 1)
+    assert_eq(temper_string_index_of("a-b-c", "-", 2), 3)
+    assert_eq(temper_string_index_of("a-b-c", "-", 4), 0 - 1)
+    assert_eq(temper_string_index_of("abc", "", 3), 3)
+    assert_eq(temper_string_index_of("abc", "", 4), 0 - 1)
+    assert_eq(temper_string_index_of("héllo", "l", nil), 3)
+  end
 end
 
 actor MathTests do

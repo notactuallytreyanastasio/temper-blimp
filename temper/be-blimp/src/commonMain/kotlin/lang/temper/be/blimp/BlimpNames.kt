@@ -53,6 +53,14 @@ private val blimpBuiltins = setOf(
     "to_html", "to_int", "to_string", "type_of", "uniq", "upcase", "values", "video", "view_diff",
     "waitpid", "write_bytes", "write_file", "ws_accept_key", "ws_read_frame", "ws_write_frame",
     "zip",
+    // `join`, `index_of` and `replace` joined builtins.zig after this list was
+    // read. `map`, `filter`, `reduce` and `each` were never in its registry:
+    // eval.zig dispatches them by name after searching the environment, so a
+    // def or a local closure of the same name wins over them too. temper-core
+    // calls `filter`, `join` and `index_of` directly, so a Temper export called
+    // `filter` would have turned every list filter in the program into a call
+    // to it.
+    "each", "filter", "index_of", "join", "map", "reduce", "replace",
 )
 
 /** Blimp identifiers are ASCII letters, digits and underscore, not starting with a digit. */

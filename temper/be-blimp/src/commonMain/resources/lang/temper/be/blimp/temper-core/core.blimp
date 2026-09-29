@@ -962,30 +962,23 @@ def temper_identity(x: Any) -> Any do
   x
 end
 
-# Temper's split, which Blimp's `split` is not: Blimp runs consecutive
-# separators together and counts bytes, while Temper keeps every empty piece
-# and an empty separator cuts between code points.
+# Temper's split. With a separator it is Blimp's `split`, which keeps every
+# empty piece the way Temper does; an empty separator cuts between code points,
+# where Blimp's would cut between bytes.
 #
 #     " g  h i".split(" ")   ["", "g", "", "h", "i"]
 #     "def".split("")        ["d", "e", "f"]
 #     "".split("")           []
 #     "\u{1F30D}".split("")         ["\u{1F30D}"]     -- four bytes, one piece
+#
+# This used to be a loop here: find the separator a byte at a time, cut, and
+# `acc ++ [piece]`. Both halves were quadratic. Splitting a 200KB page on
+# "&" to escape it did 200K Blimp calls to find the pieces and copied the
+# list of pieces once per piece.
 def temper_string_split(s: String, sep: String) -> List do
   case sep == "" do
     true -> temper_string_code_points(s)
-    _ -> temper_string_split_loop(s, sep, [])
-  end
-end
-
-def temper_string_split_loop(s: String, sep: String, acc: List) -> List do
-  i = temper_index_of_from(s, sep, 0)
-  case i < 0 do
-    true -> acc ++ [s]
-    _ -> temper_string_split_loop(
-      slice(s, i + length(sep), length(s) - i - length(sep)),
-      sep,
-      acc ++ [slice(s, 0, i)]
-    )
+    _ -> split(s, sep)
   end
 end
 
@@ -999,13 +992,19 @@ def temper_string_index_of(s: String, needle: String, start: Any) -> Int do
   temper_index_of_from(s, needle, from)
 end
 
+# Blimp's `index_of` is the search; it has no start, so it searches what is
+# left after `i`. The slice is a copy, but a native one. This was a Blimp loop
+# comparing `slice(s, i, length(sub))` at every byte, which is the same shape
+# that once took a site's boot from 8s to 23s.
 def temper_index_of_from(s: String, sub: String, i: Int) -> Int do
   case i + length(sub) > length(s) do
     true -> 0 - 1
-    _ -> case slice(s, i, length(sub)) == sub do
-      true -> i
-      _ -> temper_index_of_from(s, sub, i + 1)
-    end
+    _ ->
+      at = index_of(slice(s, i, length(s) - i), sub)
+      case at < 0 do
+        true -> 0 - 1
+        _ -> i + at
+      end
   end
 end
 
@@ -1024,39 +1023,21 @@ end
 
 # ── List operations ──────────────────────────────────
 #
-# Blimp has map, reduce and sort but no filter or join, and its `reduce` takes
-# the initial value, so reduceFrom lines up with it directly.
+# Blimp's `reduce` takes the initial value, so reduceFrom lines up with it
+# directly. filter and join are Blimp builtins too, and they are used here
+# rather than written out: a Blimp list is copied by `append`, by `++` and by
+# `[x | acc]` alike, so any loop that builds a list one item at a time is
+# quadratic. A 40,000-item build that way reaches the interpreter's 2GB heap
+# ceiling; `filter` over the same list takes 3ms.
 
 def temper_filter(items: Any, keep: Any) -> List do
-  temper_filter_loop(temper_items(items), keep, [])
+  filter(temper_items(items), keep)
 end
 
-def temper_filter_loop(items: List, keep: Any, acc: List) -> List do
-  case empty?(items) do
-    true -> acc
-    _ ->
-      x = head(items)
-      acc2 = case keep(x) do
-        true -> append(acc, x)
-        _ -> acc
-      end
-      temper_filter_loop(tail(items), keep, acc2)
-  end
-end
-
+# `join` needs strings, so every item is shown first. The loop this replaces
+# built the result with `concat`, copying everything so far at every item.
 def temper_join(source: Any, sep: String, show: Any) -> String do
-  items = temper_items(source)
-  case empty?(items) do
-    true -> ""
-    _ -> temper_join_loop(tail(items), sep, show, show(head(items)))
-  end
-end
-
-def temper_join_loop(items: List, sep: String, show: Any, acc: String) -> String do
-  case empty?(items) do
-    true -> acc
-    _ -> temper_join_loop(tail(items), sep, show, concat(acc, concat(sep, show(head(items)))))
-  end
+  join(map(temper_items(source), show), sep)
 end
 
 def temper_for_each(source: Any, body: Any) -> Any do
@@ -3781,17 +3762,11 @@ end
 # an exclusive end and clamps both bounds, so `slice(-2, 0)` is empty rather
 # than whatever `elem` makes of a negative index.
 def temper_list_slice(items: List, start: Int, stop: Int) -> List do
-  from = case start < 0 do
-    true -> 0
-    _ -> start
-  end
-  temper_list_slice_loop(items, from, stop, from, [])
-end
-
-def temper_list_slice_loop(items: List, start: Int, stop: Int, i: Int, acc: List) -> List do
-  case i >= stop or i >= length(items) do
-    true -> acc
-    _ -> temper_list_slice_loop(items, start, stop, i + 1, append(acc, elem(items, i)))
+  from = max(start, 0)
+  to = min(stop, length(items))
+  case to <= from do
+    true -> []
+    _ -> map(range(from, to - 1), fn(i: Int) -> Any do elem(items, i) end)
   end
 end
 
