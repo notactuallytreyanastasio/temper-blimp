@@ -718,6 +718,7 @@ internal const val TEMPER_PANIC = "temper_panic"
 
 /** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
 internal const val TEMPER_INT_DIV = "temper_int_div"
+internal const val TEMPER_INT64_DIV = "temper_int64_div"
 internal const val TEMPER_INT_REM = "temper_int_rem"
 
 /**
@@ -825,7 +826,7 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     // The unchecked variants bubble on a zero divisor, as Temper's Int does.
     call(BuiltinOperatorId.DivIntInt, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
     call(BuiltinOperatorId.ModIntInt, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
-    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT64_DIV, setOf(TEMPER_INT64_DIV)),
     call(BuiltinOperatorId.ModIntInt64, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
     // `nil?` is Blimp's null test; a non-null assertion is the value itself,
     // because Temper has already proved it.

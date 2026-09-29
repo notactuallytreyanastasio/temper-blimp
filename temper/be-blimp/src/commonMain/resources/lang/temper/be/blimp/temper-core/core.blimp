@@ -597,6 +597,14 @@ def temper_int_div(a: Int, b: Int) -> Int do
   end
 end
 
+# Int64's `/`: the same, without the wrap to 32 bits. Blimp's own Int is 64.
+def temper_int64_div(a: Int, b: Int) -> Int do
+  case b == 0 do
+    true -> bubble :divide_by_zero
+    _ -> a / b
+  end
+end
+
 # ── Parsing integers with a radix ────────────────────
 #
 # Blimp's `to_int` reads decimal only and takes no radix, so `"7FFFFFFF"
