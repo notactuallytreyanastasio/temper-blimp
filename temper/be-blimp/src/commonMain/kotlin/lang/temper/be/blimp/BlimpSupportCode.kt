@@ -14,7 +14,6 @@ import lang.temper.value.pureVirtualBuiltinName
 
 /** temper-core shims over Blimp builtins whose shape differs from Temper's. */
 internal const val TEMPER_SLICE = "temper_slice"
-internal const val TEMPER_STRING_END = "temper_string_end"
 internal const val TEMPER_HAS_INDEX = "temper_string_has_index"
 internal const val TEMPER_IDENTITY = "temper_identity"
 
@@ -36,7 +35,7 @@ internal val cmpHelpers = strCmpHelpers + TEMPER_CMP
 
 /** List operations Blimp lacks, plus the loops they run on. */
 internal val listHelpers = setOf(
-    "temper_filter", "temper_filter_loop", "temper_join", "temper_join_loop", "temper_for_each",
+    "temper_filter", "temper_join", "temper_for_each",
 )
 
 /** The UTF-8 layer, which the code-point string operations all lean on. */
@@ -189,6 +188,53 @@ internal class BlimpConnectedCall(
             else -> args + List(padTo - args.size) { Blimp.NilLit(pos) }
         }
         return Blimp.Call(pos, callee = Blimp.Id(pos, OutName(byArity[args.size] ?: fn, null)), args = padded)
+    }
+}
+
+/**
+ * `s.slice(begin, end)`: Blimp's `slice` takes a length, and it already
+ * answers "" for a length of zero or less and stops at the end of the string,
+ * which is what temper_slice checked for. So where `begin` can be written
+ * twice -- a name or a number -- this is `slice(s, begin, end - begin)` at the
+ * call site, and temper_slice only where `begin` is an expression that should
+ * not run twice. A def call is not free, and a string library slices in its
+ * inner loops.
+ */
+internal object StringSlice : BlimpInlineSupportCode("core.type String.slice()") {
+    override val preludeHelpers: Set<String> get() = setOf(TEMPER_SLICE)
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree {
+        val start = args.getOrNull(1)
+        if (args.size != 3 || (start !is Blimp.Id && start !is Blimp.NumberLit)) {
+            return Blimp.Call(pos, callee = Blimp.Id(pos, OutName(TEMPER_SLICE, null)), args = args)
+        }
+        val length = Blimp.Operation(
+            pos,
+            left = args[2],
+            operator = Blimp.Operator(pos, BlimpOperator.Subtraction),
+            right = start.deepCopy(),
+        )
+        return Blimp.Call(pos, callee = Blimp.Id(pos, OutName("slice", null)), args = listOf(args[0], start, length))
+    }
+}
+
+/**
+ * `s.split(sep)`. With a separator that is a non-empty string literal it is
+ * Blimp's own `split`, which keeps every empty piece as Temper's does; only
+ * the empty separator, which cuts between code points rather than bytes,
+ * needs temper_string_split. See [JOIN_KEY] for what `join` does with the
+ * result.
+ */
+internal const val SPLIT_KEY = "core.type String.split()"
+
+internal object StringSplit : BlimpInlineSupportCode(SPLIT_KEY) {
+    override val preludeHelpers: Set<String> get() = utf8Helpers + needsCore
+    override fun callFactory(pos: Position, args: List<Blimp.Expr>): Blimp.Tree {
+        val sep = args.getOrNull(1)
+        val fn = when {
+            args.size == 2 && sep is Blimp.StringLit && sep.value.isNotEmpty() -> "split"
+            else -> "temper_string_split"
+        }
+        return Blimp.Call(pos, callee = Blimp.Id(pos, OutName(fn, null)), args = args)
     }
 }
 
@@ -375,8 +421,11 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         // String. Its indices are byte offsets, which is what Blimp uses too.
         BlimpConnectedCall("core.type String.get isEmpty()", "empty?"),
         BlimpConnectedCall("core.type String.toString()", "temper_identity", setOf(TEMPER_IDENTITY)),
-        BlimpConnectedCall("core.type String.split()", "temper_string_split", utf8Helpers + needsCore),
-        BlimpConnectedCall("core.type String.get end()", TEMPER_STRING_END, setOf(TEMPER_STRING_END)),
+        StringSplit,
+        // `end` is one past the last byte, which is Blimp's `length`. It went
+        // through a temper-core def that called `length`; a library that
+        // compares against `s.end` in its inner loop paid a call for nothing.
+        BlimpConnectedCall("core.type String.get end()", "length"),
         BlimpConnectedCall("core.type String.hasIndex()", TEMPER_HAS_INDEX, setOf(TEMPER_HAS_INDEX)),
         BlimpConnectedCall(
             "core.type String.indexOf()",
@@ -384,7 +433,8 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             needsCore,
             padTo = 3,
         ),
-        BlimpConnectedCall("core.type String.get()", "temper_string_code_point_at", utf8Helpers),
+        // temper_string_code_point_at is this and nothing else; a def call less.
+        BlimpConnectedCall("core.type String.get()", "u8_decode_at", utf8Helpers),
         BlimpConnectedCall("core.type String.next()", "temper_string_next", utf8Helpers),
         BlimpConnectedCall("core.type String.prev()", "temper_string_prev", needsCore),
         BlimpConnectedCall("core.type String.step()", "temper_string_step", needsCore),
@@ -397,7 +447,7 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
             utf8Helpers + needsCore,
         ),
         // Blimp's slice takes a length; Temper's takes an exclusive end.
-        BlimpConnectedCall("core.type String.slice()", TEMPER_SLICE, setOf(TEMPER_SLICE)),
+        StringSlice,
         BlimpConnectedCall("core.type Listed.slice()", "temper_list_slice", needsCore),
         // map, reduce and sort are Blimp builtins with the same argument order;
         // filter, join and forEach are not, so temper-core supplies them.
@@ -474,8 +524,8 @@ internal val blimpConnectedReferences: Map<String, BlimpInlineSupportCode> =
         BlimpConnectedSend("std/serve.type Connection.respond()", "respond"),
         // Console I/O. Both block, and both answer a settled promise, because
         // Blimp has one thread and nothing to hand a pending promise to.
-        BlimpConnectedCall("std/io.sleep()", "temper_sleep", needsCore),
-        BlimpConnectedCall("std/io.readLine()", "temper_read_line", needsCore),
+        BlimpConnectedCall("std/io.sleep()", "temper_sleep", needsCore + TEMPER_RUN_ASYNC),
+        BlimpConnectedCall("std/io.readLine()", "temper_read_line", needsCore + TEMPER_RUN_ASYNC),
         // Promises. The builder and the promise it hands out are one actor:
         // nothing distinguishes them but which methods a caller knows about,
         // and a caller with the builder can always reach the promise anyway.
@@ -600,13 +650,35 @@ internal const val TEMPER_NEW_CELL = "temper_new_cell"
 /**
  * The loop that settles what `sleep` and `readLine` left pending.
  *
- * Emitted once at the end of every program that touches temper-core, because
- * a program whose last statement starts an `async` block would otherwise exit
- * with that block parked on a promise nothing was going to settle.
+ * Emitted once at the end of a program that calls either, because a program
+ * whose last statement starts an `async` block would otherwise exit with that
+ * block parked on a promise nothing was going to settle. They are the only two
+ * things that queue anything on the scheduler (`:add_timer`, `:add_reader`),
+ * so a program that calls neither has nothing for the loop to do. It used to
+ * be emitted into every program that touched temper-core, and a call to it
+ * reaches the scheduler actor, promises and generators: twenty-odd top-level
+ * names that a program cutting temper-core down to what it uses had to keep.
+ * Every top-level name costs the site's interpreter time on every closure it
+ * makes, because a closure captures them all.
  */
 internal const val TEMPER_RUN_ASYNC = "temper_run_async"
 internal const val CELL_GET = "get"
 internal const val CELL_SET = "set"
+
+/**
+ * `Listed.join`, which takes a function to show each item. For a list of
+ * strings that function is `{ (s) => s }`, and calling it once per piece is
+ * most of the cost of the join: the blog's `replace_all` is a split and a
+ * join, and building its pages spent 360ms more in those calls than Blimp's
+ * own `join(split(s, find), with)` spends in total. When the function is
+ * known to be the identity the call goes to [TEMPER_JOIN_STRINGS] instead,
+ * which is `join` and nothing else -- or, when the list is straight out of a
+ * `String.split`, and so certainly a list and not a builder, to Blimp's
+ * `join` itself: `s.split("&").join("&amp;") { (x) => x }` is
+ * `join(split(s, "&"), "&amp;")`.
+ */
+internal const val JOIN_KEY = "core.type Listed.join()"
+internal const val TEMPER_JOIN_STRINGS = "temper_join_strings"
 
 /** A cast that can fail: checks the tag and bubbles if it does not match. */
 internal const val TEMPER_CAST = "temper_cast"
@@ -646,6 +718,7 @@ internal const val TEMPER_PANIC = "temper_panic"
 
 /** temper-core helpers that bubble on a zero divisor, as Temper's Int does. */
 internal const val TEMPER_INT_DIV = "temper_int_div"
+internal const val TEMPER_INT64_DIV = "temper_int64_div"
 internal const val TEMPER_INT_REM = "temper_int_rem"
 
 /**
@@ -753,7 +826,7 @@ internal val blimpOperators: Map<BuiltinOperatorId, BlimpOperatorSupportCode> = 
     // The unchecked variants bubble on a zero divisor, as Temper's Int does.
     call(BuiltinOperatorId.DivIntInt, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
     call(BuiltinOperatorId.ModIntInt, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
-    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT_DIV, setOf(TEMPER_INT_DIV, TEMPER_INT32)),
+    call(BuiltinOperatorId.DivIntInt64, TEMPER_INT64_DIV, setOf(TEMPER_INT64_DIV)),
     call(BuiltinOperatorId.ModIntInt64, TEMPER_INT_REM, setOf(TEMPER_INT_REM)),
     // `nil?` is Blimp's null test; a non-null assertion is the value itself,
     // because Temper has already proved it.

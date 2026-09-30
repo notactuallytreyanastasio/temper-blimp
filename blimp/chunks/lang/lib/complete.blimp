@@ -14,7 +14,7 @@ end
 
 def builtin_names() do
   ["length", "max", "min", "append", "reverse", "lookup", "put",
-   "keys", "values", "now", "concat", "split", "contains",
+   "keys", "values", "now", "concat", "split", "join", "contains",
    "to_string", "to_int", "slice", "upcase", "downcase", "range",
    "head", "tail", "sort", "merge", "type_of", "print", "rem",
    "abs", "nil?", "elem", "floor", "ceil", "round", "not", "size",
@@ -26,7 +26,8 @@ def builtin_names() do
    "stack", "row", "grid", "text", "heading", "bold", "italic",
    "code", "code_block", "blockquote", "divider", "list", "link",
    "image", "button", "input", "textarea", "select", "form",
-   "mount_root"]
+   "mount_root",
+   "index_of", "replace"]
 end
 
 def starts_with(str: String, prefix: String) -> Bool do

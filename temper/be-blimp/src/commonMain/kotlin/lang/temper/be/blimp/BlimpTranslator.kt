@@ -5,6 +5,8 @@ import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.be.tmpl.isStdLib
 import lang.temper.log.Position
+import lang.temper.name.BuiltinName
+import lang.temper.name.ExportedName
 import lang.temper.name.OutName
 import lang.temper.name.ResolvedName
 import lang.temper.name.ResolvedParsedName
@@ -174,7 +176,6 @@ internal class BlimpTranslator(
         for (topLevel in module.topLevels) {
             processTopLevel(topLevel)
         }
-        emitTestRunner()
         return Translated(
             declarations = declarations.toList(),
             mainStatements = mainStatements.toList(),
@@ -185,43 +186,6 @@ internal class BlimpTranslator(
 
     /** Tests declared in this module, in source order. */
     private val tests = mutableListOf<TmpL.Test>()
-
-    /**
-     * The call that runs this module's tests and writes the JUnit XML.
-     *
-     * Blimp has no test framework to ask for a report -- be-lua runs busted
-     * with `-o junit` -- so the translated module runs its own tests and writes
-     * the file the harness reads. Each entry is `[name, fn]`: the name is the
-     * declaration's, because the harness strips a `__123` suffix and converts
-     * camelCase back to the sentence the test was declared with.
-     */
-    private fun emitTestRunner() {
-        if (tests.isEmpty() || !emitTests) return
-        preludeHelpers.addAll(needsCore)
-        val pos = module.pos
-        val entries = tests.map { test ->
-            Blimp.ListLit(
-                test.pos,
-                items = listOf(
-                    Blimp.StringLit(test.pos, names.outName(test.name.name).outputNameText),
-                    idOf(test.name),
-                ),
-            )
-        }
-        mainStatements.add(
-            Blimp.ExprStatement(
-                pos,
-                Blimp.Call(
-                    pos,
-                    callee = Blimp.Id(pos, OutName(TEMPER_RUN_TESTS, null)),
-                    args = listOf(
-                        Blimp.ListLit(pos, items = entries),
-                        Blimp.StringLit(pos, BlimpBackend.TEST_RESULTS_FILE),
-                    ),
-                ),
-            ),
-        )
-    }
 
     data class Translated(
         val declarations: List<Blimp.Item>,
@@ -387,12 +351,26 @@ internal class BlimpTranslator(
             is TmpL.WhileStatement -> translateWhileStatement(statement, out)
 
             is TmpL.LocalFunctionDeclaration -> {
+                // Asked before the function's own name joins the scope, so a
+                // function that calls itself by that name counts as capturing.
+                val closed = capturesNothing(statement)
                 nameOf(statement.name)?.let { scopes.lastOrNull()?.add(it) }
+                val lambda = translateLambda(statement)
+                val identity = isIdentity(lambda)
+                if (identity) {
+                    nameOf(statement.name)?.let(identityFns::add)
+                    preludeHelpers.add(TEMPER_IDENTITY)
+                }
                 out.add(
                     Blimp.Assign(
                         statement.pos,
                         target = idOf(statement.name),
-                        value = translateLambda(statement),
+                        value = when {
+                            // One def for every `{ (s) => s }`, not one each.
+                            identity -> Blimp.Id(statement.pos, OutName(TEMPER_IDENTITY, null))
+                            closed -> liftLambda(statement, lambda)
+                            else -> lambda
+                        },
                     ),
                 )
             }
@@ -649,10 +627,29 @@ internal class BlimpTranslator(
         return bindIfCase(pos, cased, hoisted)
     }
 
+    /** `items.join(sep) { (s) => s }` as `temper_join_strings(items, sep)`, or null. */
+    private fun joinOfStrings(call: TmpL.CallExpression, fn: TmpL.InlineSupportCodeWrapper): Blimp.Expr? {
+        val supportCode = fn.supportCode as BlimpInlineSupportCode
+        if (supportCode.connectedKey != JOIN_KEY || call.parameters.size != 3) return null
+        val shown = call.parameters[2] as? TmpL.Reference ?: return null
+        if (nameOf(shown.id) !in identityFns) return null
+        preludeHelpers.addAll(needsCore)
+        val items = call.parameters[0]
+        val fromSplit = items is TmpL.CallExpression &&
+            (items.fn as? TmpL.InlineSupportCodeWrapper)?.supportCode?.let {
+                (it as? BlimpInlineSupportCode)?.connectedKey == SPLIT_KEY
+            } == true
+        return Blimp.Call(
+            call.pos,
+            callee = Blimp.Id(call.pos, OutName(if (fromSplit) "join" else TEMPER_JOIN_STRINGS, null)),
+            args = call.parameters.take(2).map { translateActual(it) },
+        )
+    }
+
     private fun translateCallExpression(call: TmpL.CallExpression): Blimp.Expr =
         when (val fn = call.fn) {
             // Support code such as console.log becomes Blimp syntax right here.
-            is TmpL.InlineSupportCodeWrapper -> {
+            is TmpL.InlineSupportCodeWrapper -> joinOfStrings(call, fn) ?: run {
                 val supportCode = fn.supportCode as BlimpInlineSupportCode
                 preludeHelpers.addAll(supportCode.preludeHelpers)
                 when (
@@ -1382,6 +1379,100 @@ internal class BlimpTranslator(
             ),
             body = body,
         )
+    }
+
+    /**
+     * True when [decl] could be a top-level `def` and mean the same thing: it
+     * is not inside a class, and every name in it is its own (a formal, a
+     * local, a function declared inside it), a declaration at the top of this
+     * module, or an export or builtin, which are top-level names in the one
+     * output file too.
+     *
+     * A list of what is allowed, not of what is not: a local of the function
+     * around it is not in any scope yet when it is declared after the nested
+     * function that uses it (two local functions calling each other), so
+     * asking "is this name in an enclosing scope" would miss it and lift a
+     * def that names a local nobody can see.
+     */
+    private fun capturesNothing(decl: TmpL.LocalFunctionDeclaration): Boolean {
+        if (actorScope != null || decl.parameters.thisName != null) return false
+        val own = mutableSetOf<ResolvedName>()
+        decl.parameters.boundaryDescent { node ->
+            if (node is TmpL.Formal) nameOf(node.name)?.let(own::add)
+            true
+        }
+        decl.body?.boundaryDescent { node ->
+            when (node) {
+                is TmpL.Formal -> nameOf(node.name)?.let(own::add)
+                is TmpL.LocalDeclaration -> nameOf(node.name)?.let(own::add)
+                is TmpL.LocalFunctionDeclaration -> nameOf(node.name)?.let(own::add)
+                else -> {}
+            }
+            true
+        }
+        var captures = false
+        decl.body?.boundaryDescent { node ->
+            if (node is TmpL.Id) {
+                val name = nameOf(node)
+                val global = name == null || name in own || name in moduleTopNames ||
+                    name is ExportedName || name is BuiltinName
+                if (!global) captures = true
+            }
+            !captures
+        }
+        return !captures
+    }
+
+    /**
+     * Local functions that answer their one argument unchanged, the
+     * `{ (s) => s }` that `join` needs to join strings. See [JOIN_KEY].
+     */
+    private val identityFns = mutableSetOf<ResolvedName>()
+
+    private fun isIdentity(lambda: Blimp.Lambda): Boolean {
+        val param = lambda.params.singleOrNull() ?: return false
+        val statement = lambda.body.statements.singleOrNull() as? Blimp.ExprStatement ?: return false
+        val result = statement.expr as? Blimp.Id ?: return false
+        return result.outName.outputNameText == param.id.outName.outputNameText
+    }
+
+    /** Every name this module declares at its top level. */
+    private val moduleTopNames: Set<ResolvedName> by lazy {
+        buildSet {
+            for (topLevel in module.topLevels) {
+                when (topLevel) {
+                    is TmpL.ModuleLevelDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    is TmpL.ModuleFunctionDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    is TmpL.TypeDeclaration -> nameOf(topLevel.name)?.let(::add)
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    /**
+     * A nested function that captures nothing, as a top-level `def`; what
+     * stands where the `fn` stood is the def's name.
+     *
+     * The interpreter copies the environment into every closure it makes, and
+     * a Temper lambda is made each time the function around it runs. In a
+     * program the size of a web site that copy is about 140KB, so a helper
+     * that passed `{ (s) => s }` to `join` cost 140KB a call, and a page that
+     * called it 3,000 times took 470MB to render instead of 36MB. A def is
+     * made once, and naming it makes nothing.
+     */
+    private fun liftLambda(decl: TmpL.LocalFunctionDeclaration, lambda: Blimp.Lambda): Blimp.Id {
+        val id = Blimp.Id(decl.pos, names.gensym("fn"))
+        declarations.add(
+            Blimp.DefDecl(
+                decl.pos,
+                id = id,
+                params = lambda.params.map { it.deepCopy() },
+                returnType = anyType(decl.pos),
+                body = lambda.body.deepCopy(),
+            ),
+        )
+        return id.deepCopy()
     }
 
     /**

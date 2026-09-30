@@ -55,6 +55,8 @@ actor DivTests do
   test "int div truncates toward zero" do
     assert_eq(temper_int_div(7, 2), 3)
     assert_eq(temper_int_div(0 - 7, 2), 0 - 3)
+    assert_eq(temper_int64_div(5000000000, 1), 5000000000)
+    assert_eq(temper_int64_div(0 - 7, 2), 0 - 3)
   end
   test "int rem matches the dividend's sign" do
     assert_eq(temper_int_rem(7, 2), 1)
@@ -226,6 +228,36 @@ actor ListTests do
     assert_eq(temper_join([1], ",", fn(x: Int) do to_string(x) end), "1")
     assert_eq(temper_join([], ",", fn(x: Int) do to_string(x) end), "")
   end
+  test "join_strings joins a list or a builder without showing" do
+    assert_eq(temper_join_strings(["a", "", "b"], "-"), "a--b")
+    assert_eq(temper_join_strings([], "-"), "")
+    b = temper_new_list_builder_from(["x", "y"])
+    assert_eq(temper_join_strings(b, ","), "x,y")
+  end
+  test "list slice clamps both ends" do
+    assert_eq(temper_list_slice([1, 2, 3], 0 - 2, 2), [1, 2])
+    assert_eq(temper_list_slice([1, 2, 3], 1, 99), [2, 3])
+    assert_eq(temper_list_slice([1, 2, 3], 2, 1), [])
+    assert_eq(temper_list_slice([], 0, 3), [])
+  end
+end
+
+actor SearchTests do
+  test "split keeps every empty piece, as Temper does" do
+    assert_eq(temper_string_split(" g  h i", " "), ["", "g", "", "h", "i"])
+    assert_eq(temper_string_split("a,,b,", ","), ["a", "", "b", ""])
+    assert_eq(temper_string_split("abab", "ab"), ["", "", ""])
+    assert_eq(temper_string_split("", ","), [""])
+    assert_eq(temper_string_split("def", ""), ["d", "e", "f"])
+  end
+  test "indexOf answers a byte offset from the start, or -1" do
+    assert_eq(temper_string_index_of("a-b-c", "-", nil), 1)
+    assert_eq(temper_string_index_of("a-b-c", "-", 2), 3)
+    assert_eq(temper_string_index_of("a-b-c", "-", 4), 0 - 1)
+    assert_eq(temper_string_index_of("abc", "", 3), 3)
+    assert_eq(temper_string_index_of("abc", "", 4), 0 - 1)
+    assert_eq(temper_string_index_of("héllo", "l", nil), 3)
+  end
 end
 
 actor MathTests do
@@ -299,5 +331,37 @@ actor BuilderTests do
     m = temper_new_map_from([])
     assert_eq(m <- :length(), 0)
     assert_eq(temper_len(m <- :keys()), 0)
+  end
+end
+
+actor RegexTests do
+  # Two defs were called temper_rx_group, the parser's (2 arguments) and the
+  # match's (4). Blimp keeps one def per name, the later, so every pattern
+  # with a `(` stopped with WRONG ARGUMENT COUNT.
+  test "a pattern with a group compiles, and its named group reads back" do
+    m = temper_regex_find(nil, temper_regex_compile(nil, "a(?<x>b)c"), "xabc", 0, nil)
+    assert_eq((m <- :full) <- :value, "abc")
+    assert_eq(((m <- :groups) <- :get("x")) <- :value, "b")
+  end
+end
+
+actor BytesTests do
+  # A Blimp string is bytes, and a Blimp caller can hand translated Temper
+  # half a character: char_at("é", 0) is its lead byte alone.
+  test "bytes that do not decode are U+FFFD, one byte at a time" do
+    lead = char_at("é", 0)
+    assert_eq(temper_string_code_point_at(lead, 0), 65533)
+    assert_eq(temper_string_next(lead, 0), 1)
+    cut = slice("a→", 0, 3)
+    assert_eq(temper_string_code_point_at(cut, 1), 65533)
+    assert_eq(temper_string_next(cut, 1), 2)
+    assert_eq(temper_string_code_point_at(char_at("é", 1), 0), 65533)
+    assert_eq(temper_string_code_point_at(concat(char_at("é", 0), "x"), 0), 65533)
+    assert_eq(u8_code_points(cut), [97, 65533, 65533])
+  end
+  test "whole characters still decode" do
+    assert_eq(temper_string_code_point_at("a→b", 1), 8594)
+    assert_eq(temper_string_next("a→b", 1), 4)
+    assert_eq(u8_code_points("é🌍"), [233, 127757])
   end
 end

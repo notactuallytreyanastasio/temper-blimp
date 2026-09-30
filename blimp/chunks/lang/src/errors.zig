@@ -456,13 +456,14 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
     const builtins = [_][]const u8{
         "length",  "max",     "min",      "append",  "reverse",
         "lookup",  "put",     "keys",     "now",     "concat",
-        "split",   "contains", "to_string", "to_int", "slice",
+        "split",   "join",    "contains", "to_string", "to_int", "slice",
         "upcase",  "downcase", "range",    "head",    "tail",
         "sort",    "merge",   "values",   "type_of",  "print",
         "rem",     "abs",     "nil?",     "elem",    "floor",
         "ceil",    "round",   "not",      "size",    "empty?",
         "flat",    "zip",     "uniq",     "sum",
         "map",     "filter",  "reduce",   "each",
+        "index_of", "replace",
     };
 
     var best_match: ?[]const u8 = null;
@@ -482,7 +483,7 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         hint.appendSlice(alloc, match) catch {};
         hint.appendSlice(alloc, "`?\n\n") catch {};
     }
-    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each") catch {};
+    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each,\n      join, index_of, replace") catch {};
 
     return .{
         .title = "UNKNOWN FUNCTION",

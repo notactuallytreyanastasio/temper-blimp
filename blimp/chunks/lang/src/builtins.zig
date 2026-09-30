@@ -59,7 +59,10 @@ pub const BuiltinRegistry = struct {
         reg.register("now_ms", &builtinNowMs);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
+        reg.register("join", &builtinJoin);
         reg.register("contains", &builtinContains);
+        reg.register("index_of", &builtinIndexOf);
+        reg.register("replace", &builtinReplace);
         reg.register("to_string", &builtinToString);
         reg.register("to_int", &builtinToInt);
         reg.register("char_at", &builtinCharAt);
@@ -420,14 +423,20 @@ fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     var parts: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
     var start: usize = 0;
     var i: usize = 0;
-    while (i + sep.len <= str.len) : (i += 1) {
+    // No continue-expression: after a match `i` must land exactly on the byte
+    // following the separator, or a separator that starts there is skipped
+    // and "a,,b" splits into two fields instead of three. An empty separator
+    // matches at every byte, so it still has to step one to make progress.
+    while (i + sep.len <= str.len) {
         if (std.mem.eql(u8, str[i .. i + sep.len], sep)) {
             const part = allocator.create(Value) catch return error.OutOfMemory;
             part.* = Value{ .string = str[start..i] };
             parts.append(allocator, part) catch return error.OutOfMemory;
             i += sep.len;
             start = i;
-            continue;
+            if (sep.len == 0) i += 1;
+        } else {
+            i += 1;
         }
     }
     // Last segment
@@ -440,12 +449,78 @@ fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     return result;
 }
 
+/// join(["a", "b"], ", ") => "a, b"
+/// The inverse of split. It sizes the result once and copies each part once;
+/// building the same string with `concat` in a loop copies everything built
+/// so far on every step, and the evaluator frees none of those copies.
+fn builtinJoin(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .list or args[1].* != .string) return error.TypeError;
+    const parts = args[0].list;
+    const sep = args[1].string;
+
+    var total: usize = 0;
+    for (parts, 0..) |part, i| {
+        if (part.* != .string) return error.TypeError;
+        total += part.string.len;
+        if (i > 0) total += sep.len;
+    }
+
+    const buf = allocator.alloc(u8, total) catch return error.OutOfMemory;
+    var pos: usize = 0;
+    for (parts, 0..) |part, i| {
+        if (i > 0) {
+            @memcpy(buf[pos .. pos + sep.len], sep);
+            pos += sep.len;
+        }
+        @memcpy(buf[pos .. pos + part.string.len], part.string);
+        pos += part.string.len;
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf };
+    return result;
+}
+
 /// contains("hello world", "world") => true
 fn builtinContains(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (args[0].* != .string or args[1].* != .string) return error.TypeError;
     const found = std.mem.indexOf(u8, args[0].string, args[1].string) != null;
     return make(allocator, .{ .boolean = found });
+}
+
+/// index_of("hello world", "world") => 6, or -1 when it is not there.
+///
+/// A byte offset, so it can go straight to `slice`. An empty needle is found
+/// at 0, as in every other language's indexOf. Strings only: TypeError for
+/// a list or an atom, rather than searching its formatted text.
+///
+/// A program's own `def index_of` still wins; user defs shadow builtins.
+fn builtinIndexOf(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const at: i64 = if (std.mem.indexOf(u8, args[0].string, args[1].string)) |i| @intCast(i) else -1;
+    return make(allocator, .{ .integer = at });
+}
+
+/// replace(s, find, with) => s with every occurrence of find replaced,
+/// scanning left to right without overlap ("aaa", "aa", "b" => "ba") and
+/// never rescanning what it inserted, so replacing "a" with "aa" terminates.
+///
+/// TypeError for an empty find -- it matches between every pair of bytes and
+/// there is no one answer to what replacing it means -- and for non-Strings.
+/// A string with no match comes back as the same value, not a copy.
+fn builtinReplace(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[0].* != .string or args[1].* != .string or args[2].* != .string) return error.TypeError;
+    const s = args[0].string;
+    const find = args[1].string;
+    const with = args[2].string;
+    if (find.len == 0) return error.TypeError;
+    const count = std.mem.count(u8, s, find);
+    if (count == 0) return args[0];
+    const out = allocator.alloc(u8, s.len - count * find.len + count * with.len) catch return error.OutOfMemory;
+    _ = std.mem.replace(u8, s, find, with, out);
+    return make(allocator, .{ .string = out });
 }
 
 /// to_string(42) => "42", to_string(:ok) => "ok"
