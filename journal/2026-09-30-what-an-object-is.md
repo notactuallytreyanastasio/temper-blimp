@@ -208,3 +208,56 @@ The test that pins the cost: a ref made in one process is not an object in
 another. `Task.async` reading it raises `... is not an object in this
 process`. That will matter the day Temper's async code is translated, and
 the test is there so it cannot be forgotten.
+
+## Chapter 4: AlgosHelloWorld is green
+
+The first functional test passes through real translation. Temper's
+
+```temper
+console.log("Hello, World!");
+```
+
+becomes
+
+```elixir
+defmodule TemperMain do
+  def main() do
+    IO.puts("Hello, World!")
+  end
+end
+```
+
+Three pieces made that happen:
+
+- **`console.log` is support code.** `core.getConsole()` becomes `nil` and
+  `core.type Console.log()` becomes `IO.puts(message)`, dropping the `nil`
+  receiver, as in be-blimp. `IO.inspect` would have quoted the string.
+- **A Temper module's top-level statements become `main/0`.** Temper runs
+  them when the module loads; a Mix project has no load-time code that
+  `mix run` executes, so they run in order as the body of the function it
+  calls.
+- **`ElixirTranslator`** walks the module, and anything it does not know
+  is `TODO()` carrying the node. Today it knows literals, calls to inline
+  support code, and expression and block statements. That is all
+  AlgosHelloWorld needs.
+
+The first functional run failed, and not because of the translation:
+
+```
+Unchecked dependencies for environment dev:
+* temper_core (../temper-core)
+  the dependency is not available
+```
+
+`temper build` lays temper-core down beside the library, but the
+functional harness only copies what `translate()` returned. be-rust's
+functional test copies its core crate in by hand, and so does this one now.
+
+To be sure the green is real, `console.log` was briefly sabotaged to print
+"sabotage" instead: the test failed, and passed again once restored.
+`temper run -b elixir --library elixir-hello` prints the right thing too,
+so the runner's own path is exercised.
+
+**Not done:** every library is `TemperMain` with app `:temper_main`, so
+two libraries in one build would collide. The functional suite builds one
+library at a time, so this waits until something needs two.

@@ -90,3 +90,25 @@ mix test
 | `TemperCore.int32_div(a, b)`, `int32_rem(a, b)` | the wrap, plus a bubble on division by zero |
 | `TemperCore.Heap.new/get/put` | mutable objects that every alias shares |
 | `TemperCore.Bubble` | the exception an uncaught Temper bubble becomes |
+
+## 4. The translator, and the functional suite
+
+`ElixirTranslator` turns one Temper module (in TmpL form) into Elixir.
+Top-level statements become the body of `TemperMain.main/0`, because a
+Temper module runs its top level on load and `mix run` calls a function.
+
+Support code is how Temper builtins reach the target. `console.log` is
+connected support code: `ElixirSupportNetwork.translateConnectedReference`
+answers the key `core.type Console.log()` with an `ElixirInlineSupportCode`
+that builds `IO.puts(message)` at the call site.
+
+Progress is measured by Temper's shared functional tests. Which ones run
+for Elixir is the `onlyPasses(elixir(), ...)` list in
+`temper/functional-test-suite/.../FunctionalTestStatus.kt`; everything else
+is skipped. To run them:
+
+```bash
+./gradlew :be-elixir:jvmTest --tests 'lang.temper.be.elixir.ElixirFunctionalTest'
+```
+
+Passing so far: AlgosHelloWorld.
