@@ -1,0 +1,46 @@
+# How be-elixir works
+
+A guide to the backend as it stands, written to be read in order. Each
+chapter of the backend adds a section; nothing here describes code that does
+not exist yet.
+
+## 1. The output grammar
+
+A Temper backend never prints strings of target code. It builds a tree of
+the target language and lets Temper's formatter render it. For Elixir the
+tree is described in one file:
+
+    temper/be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/elixir.out-grammar
+
+and `./gradlew kcodegen:updateGeneratedCode` turns it into `Elixir.kt`, one
+Kotlin class per node. A rule like
+
+```
+Match ::= left%Pattern & "=" & right%Expr;
+```
+
+becomes `class Match(pos, left: Pattern, right: Expr)` that renders as
+`left = right`.
+
+Three files sit next to the grammar:
+
+- `ElixirOperatorDefinition.kt` is the precedence ladder. The formatter
+  consults it to decide where parentheses go, so the tree never contains
+  any. Comparison and equality are non-associative on purpose: `1 < 2 < 3`
+  is valid Elixir and evaluates to `false`.
+- `ElixirFormattingHints.kt` decides spaces and line breaks. Elixir ignores
+  indentation but not newlines, so the hints that matter are the ones that
+  keep `do` and `->` at the end of a line.
+- `ElixirHelpers.kt` writes literals: strings with every `#` escaped so
+  nothing interpolates, atoms quoted when they are not plain identifiers,
+  and floats with digits on both sides of the point. NaN and infinity, which
+  the BEAM cannot hold, are compile errors.
+
+To check a change to any of them:
+
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+cd temper
+./gradlew :be-elixir:jvmTest :be-elixir:ktlintCheck
+elixir ../journal/probes/05_grammar_samples.exs
+```
