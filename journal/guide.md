@@ -903,7 +903,28 @@ binaries. Entry 27 covers how the runtime's share of that shrank. PDF
 reflow, which the original did with a regex per line, is faster in
 Temper.
 
-## 17. Limits
+## 17. Deliberate differences from js and py
+
+Where js and py agree and this backend does not, it is a bug, with these
+exceptions, each chosen for Elixir developers using a translated library:
+
+- **`@imu` values compare by their fields.** An `@imu` class is a struct, and
+  `==` on two structs is equal when their fields are, which is what an Elixir
+  developer expects of a value. js and py compare objects by identity. A
+  class that is not `@imu` is a heap ref, and its `==` is identity, as in js
+  and py. Pinned by `imuValuesCompareByTheirFields`.
+- **Float64 division by zero gives Infinity, -Infinity or NaN.** `1.0 / 0.0`
+  is `Infinity` and `x % 0.0` is `NaN`, as in js. py, and Temper's
+  `BuiltinOperatorSpecs`, bubble instead. The BEAM itself raises
+  ArithmeticError for `1.0 / 0.0`; entry 10 gave Temper's infinities and NaN
+  values of their own (`:infinity`, `:neg_infinity`, `:nan`), and a program
+  that produces one keeps running with it rather than stopping. Pinned by
+  temper-core's IEEE tests.
+
+Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
+`"007".toFloat64()` fail where js and py accept them.
+
+## 18. Limits
 
 - **Inheriting from another library's interface.** A class gets every
   inherited member it does not override, but only from types its own
@@ -920,7 +941,7 @@ Temper.
 - **A module-level mutable non-actor object is per process.** Each process
   gets its own copy on first read.
 
-## 18. Where things are
+## 19. Where things are
 
 - Backend: `temper/be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/`
 - Runtime: `temper/be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core/`
