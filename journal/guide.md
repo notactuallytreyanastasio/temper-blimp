@@ -341,6 +341,7 @@ used as a value is a capture, `&Temper.Std.parseJson/1`.
 | a local function that calls itself | it is passed to itself: `rec = fn rec, x -> ... rec.(rec, ...) end` |
 | a local that a closure reads and anyone assigns | a cell: `TemperCore.Heap.new(:cell, %{v: x})` |
 | local functions that call each other | cells created at the top of the block, so either can call the other |
+| a local function called before it is declared, which the frontend hoists | its cell is made at the top of the block, but the function is stored into it after the last local it captures is bound |
 | a local assigned in a `do` body and declared outside it | a cell, so the assignment survives into the `orelse` |
 
 Elixir closures capture values, and Temper closures capture variables.
