@@ -44,3 +44,4 @@ guide that grows as the backend does.
 29. [2026-10-01: what production cannot reach](2026-10-01-what-production-cannot-reach.md)
 30. [2026-10-01: code nothing reaches](2026-10-01-code-nothing-reaches.md)
 31. [2026-10-01: names that stay put](2026-10-01-names-that-stay-put.md)
+32. [2026-10-01: the constructor of a rejected class](2026-10-01-rejected-constructor.md)
