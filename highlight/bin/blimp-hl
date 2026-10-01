@@ -1,0 +1,36 @@
+#!/bin/sh
+# Highlights a Blimp file for the terminal, or as HTML.
+#
+#   bin/blimp-hl [--js] [--html] file.blimp
+#
+# The highlighter is Temper. By default it runs as Blimp, on the interpreter it
+# is highlighting for; --js runs the JavaScript translation instead. Build first
+# with `temper build -b blimp -b js` in this directory.
+set -eu
+lib=$(cd "$(dirname "$0")/.." && pwd)
+backend=blimp; fn=toAnsi
+while [ $# -gt 1 ]; do
+  case "$1" in
+    --js) backend=js ;;
+    --html) fn=toHtml ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+file=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+
+case "$backend" in
+  blimp)
+    run=$(mktemp -t blimp-hl).blimp
+    # The generated program runs the library's own tests first; drop that line.
+    grep -v '^temper_run_tests(' "$lib/temper.out/blimp/blimp-highlight/main.blimp" > "$run"
+    printf 'puts(%s(read_file("%s")))\n' "$fn" "$file" >> "$run"
+    blimp "$run" | sed '$d'
+    rm -f "$run" ;;
+  js)
+    node --input-type=module -e "
+      import { readFileSync } from 'node:fs';
+      import { $fn } from '$lib/temper.out/js/blimp-highlight/index.js';
+      process.stdout.write($fn(readFileSync(process.argv[1], 'utf8')));
+    " "$file" ;;
+esac
