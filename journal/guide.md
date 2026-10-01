@@ -485,6 +485,7 @@ from the `_connected.ex` file next to its Temper source.
 | `panic()` | `raise TemperCore.Panic` |
 | code the frontend rejected but was told to build anyway | `raise(TemperCore.Panic, "broken code: <the frontend's diagnostic>")`, where it stands |
 | a property read on a value whose type did not compile, such as an object of a rejected class | the same raise, naming the property |
+| a read or write of a property a rejected class no longer declares | the same raise; never a call of a `get_`/`set_` function the module does not define |
 
 ## 12. Tests
 

@@ -108,12 +108,53 @@ checked through the CLI: ormery now reports `0 of 30 (30 not run)`, alloy
 still `225 of 225`, and the line above was checked both ways by reverting
 the change.
 
+## The constructor of a rejected class
+
+The class ormery's frontend rejected still has a constructor, and it still
+says `this.schema = schema` about a property the class no longer has. That
+compiled to `Temper.Ormery.Query.set_schema(this, schema)`, a function the
+class's module never defines: a compiler warning, and an
+`UndefinedFunctionError` when Elixir code constructs the class directly.
+
+A class module defines `set_x` exactly when the class's flattened members
+include a setter for `x` with a body, so the translator can ask the same
+question before calling one. When the answer is no, for a class of this
+library, the write is broken code like the rest of the class:
+
+```
+** (TemperCore.Panic) broken code: write of .schema on a class that does not declare it
+```
+
+The same class's reads had the same problem (`get_schema/1`), and get the
+same answer. A class from another library cannot be inspected from here,
+so a call into one stands.
+
+The second ORM showed a third shape. Its `new Query(tableName, [], [], [],
+null, null)` failed to type-check, and a call the frontend could not check
+carries `invalidSig`: no fixed parameters and a rest parameter typed
+*Invalid*. Packing arguments by that signature put all six into one list,
+a call of `Query.new/1` against a `new/6`. With the real arity unknown, the
+arguments now go as written, as they do in js.
+
+Three more `ElixirBackendTest` cases, each red first. After them neither
+ORM has an undefined function in its generated Elixir. What warnings
+remain are Elixir's type checker reasoning about values whose types did not
+compile: 36 and 10 "incompatible types given to", and 35 "comparison
+between distinct types".
+
 ## What is left
 
-The rejected class's constructor still compiles to a call of a setter the
-class never defined (`Query.set_schema/2`): a compiler warning on code the
-frontend already refused, and an `UndefinedFunctionError` if Elixir code
-constructs such a class directly. The library's own init raises the
-frontend's message before anything gets there, as JS does.
+ormery has one warning of another kind, and it is not about broken code:
+
+```
+warning: clauses with the same name and arity ... "def main/0" was previously defined
+```
+
+ormery exports a function called `main`, and be-elixir names its own entry
+point `main/0`. The user's comes first, so the entry point never runs. A
+four-line library shows what that costs: running it prints "user main ran"
+though nothing called `main`, and the entry point's `TemperCore.Async.drain()`
+is skipped. Fixing it means renaming one of the two, which changes how a
+translated program is run, so it is left for its own entry.
 
 65 of 65 functional tests pass.
