@@ -43,3 +43,4 @@ guide that grows as the backend does.
 28. [2026-10-01: tests out of the library, and tests that test something](2026-10-01-tests-out-of-the-library.md)
 29. [2026-10-01: what production cannot reach](2026-10-01-what-production-cannot-reach.md)
 30. [2026-10-01: code nothing reaches](2026-10-01-code-nothing-reaches.md)
+31. [2026-10-01: names that stay put](2026-10-01-names-that-stay-put.md)
