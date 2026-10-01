@@ -45,3 +45,4 @@ guide that grows as the backend does.
 30. [2026-10-01: the constructor of a rejected class](2026-10-01-rejected-constructor.md)
 31. [2026-10-01: a library may have a `main`](2026-10-01-temper-main.md)
 32. [2026-10-01: what a reviewer found](2026-10-01-what-a-reviewer-found.md)
+33. [2026-10-01: what a `do` assigned before it bubbled](2026-10-01-try-keeps-assignments.md)
