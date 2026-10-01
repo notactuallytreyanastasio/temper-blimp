@@ -43,3 +43,4 @@ guide that grows as the backend does.
 28. [2026-10-01: tests out of the library, and tests that test something](2026-10-01-tests-out-of-the-library.md)
 29. [2026-10-01: what production cannot reach](2026-10-01-what-production-cannot-reach.md)
 30. [2026-10-01: the constructor of a rejected class](2026-10-01-rejected-constructor.md)
+31. [2026-10-01: a library may have a `main`](2026-10-01-temper-main.md)

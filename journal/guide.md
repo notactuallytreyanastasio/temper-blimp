@@ -19,7 +19,7 @@ cd temper
 ./gradlew :cli:installDist                      # a `temper` that knows -b elixir
 cli/build/install/temper/bin/temper build -b elixir -w path/to/my-lib
 cd path/to/my-lib/temper.out/elixir/my-lib
-mix compile && mix run --no-compile -e "Temper.MyLib.main()"
+mix compile && mix run --no-compile -e "Temper.MyLib.__temper_main__()"
 ```
 
 `temper.out/elixir/` holds one Mix project per Temper library, next to
@@ -160,7 +160,10 @@ end
   is still running it waits under a lock until it finishes.
 - A library's init first calls the init of every library it imports from,
   so std's globals exist before the user's code reads them.
-- `main/0` runs init, then the async queue (section 9).
+- `__temper_main__/0` runs init, then the async queue (section 9). It is
+  not called `main` because a library may export a `main` of its own: in
+  Elixir the first of two `def main()` wins, and the library's would run
+  in the entry point's place.
 - **Elixir code never has to call init.** Every exported function, and
   the constructor of every exported class, starts with
   `Temper.Lib.__temper_init__()`. The first call on the node runs the top
@@ -446,7 +449,7 @@ end
 | `async { ... }` | queued on a FIFO run queue in the process dictionary |
 | `await p` | park the generator on `p`; settling `p` queues it again |
 
-`main/0` ends by draining that queue. It pops one generator, steps it
+`__temper_main__/0` ends by draining that queue. It pops one generator, steps it
 once, and repeats. No step runs inside another, so a long chain of awaits
 is a loop and not a deeper stack. A million settled awaits drained in
 444 ms.
@@ -577,7 +580,7 @@ test("identical spans are all one piece") { test =>
 ```
 
 **The harness.** `temper test -b elixir` and the functional suite compile
-and run with `MIX_ENV=test`. They run `main/0`, then
+and run with `MIX_ENV=test`. They run `__temper_main__/0`, then
 `Temper.MyLib.Tests.__temper_tests__/0`, which writes the JUnit XML that
 `reportTestResults` writes to `test-results.xml`. Each test is also
 registered with the CLI under its function name, the name that XML
