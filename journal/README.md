@@ -46,3 +46,4 @@ guide that grows as the backend does.
 31. [2026-10-01: a library may have a `main`](2026-10-01-temper-main.md)
 32. [2026-10-01: what a reviewer found](2026-10-01-what-a-reviewer-found.md)
 33. [2026-10-01: what a `do` assigned before it bubbled](2026-10-01-try-keeps-assignments.md)
+34. [2026-10-01: a hoisted function, made too early](2026-10-01-hoisted-closures.md)
