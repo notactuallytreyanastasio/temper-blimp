@@ -758,7 +758,72 @@ in an actor, whose single process makes each update one step.
 Each call runs through `Heap.entry` inside the actor, so garbage from a
 method is freed when the method returns.
 
-## 16. Limits
+## 16. Using it in an app
+
+[Marginalia](https://github.com/notactuallytreyanastasio/marginalia), a
+Phoenix app, runs its core text logic from Temper this way: paragraph and
+word diffs, sentence splitting, PDF reflow, and the manuscript segmenter.
+The case study is
+[marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6),
+and entry 26 covers what it taught the backend.
+
+**Commit the generated code.** The Temper libraries live in `temper/`, and
+the Elixir generated from them in `temper/out/`, used as a path
+dependency. Building, testing and deploying then need no JVM:
+
+```elixir
+{:temper_marginalia_core, path: "temper/out/marginalia-core"},
+...
+"temper.check": ["cmd bin/temper-gen --check"],
+precommit: ["temper.check", "compile --warnings-as-errors", ...]
+```
+
+`bin/temper-gen` runs `temper build -b elixir` in a scratch copy, deletes
+the `*.map` files, replaces `temper/out`, and records the compiler's commit
+in `temper/out/TEMPER_COMMIT`. `--check` rebuilds and fails if the result
+differs from what is committed, which works because the output is
+deterministic and compiles without warnings. A Dockerfile needs
+`COPY temper/out temper/out` before `mix deps.get`.
+
+**Keep the Elixir modules as facades.** Each module keeps its API and
+calls the generated library, turning `@imu` structs back into whatever its
+callers already match on:
+
+```elixir
+def rows(before_text, after_text) do
+  Core.rows(before_text || "", after_text || "") |> Enum.map(&row/1)
+end
+
+defp row(%Core.Row{kind: "same", left: l, right: r}), do: {:same, l, r}
+```
+
+**Export only the API.** Every exported function runs the library's init
+check and `TemperCore.Heap.entry` (section 14). That is cheap once per call
+from Elixir, but a helper called once per character pays it once per
+character. Un-exporting Marginalia's helpers was most of a 3x-to-5x
+slowdown.
+
+**Let the host answer what Temper cannot know.** Temper's core strings carry
+no Unicode character data. Questions like "is this code point `\p{Lu}`"
+are `@connected` declarations, answered in `_connected.ex` by the engine the
+original code used, with an ASCII fast path:
+
+```elixir
+def isUnicodeUpper(cp) when cp < 128, do: cp >= ?A and cp <= ?Z
+def isUnicodeUpper(cp), do: Regex.match?(~r/\A\p{Lu}\z/u, <<cp::utf8>>)
+```
+
+**Check a port against the code it replaces.** Keep the original modules
+as fixtures, run old and new on random inputs, and count which rules the
+inputs reached. Marginalia's ports agreed on more than 90,000 inputs, and
+being faithful turned up a regex bug the original had always had.
+
+**What it costs.** Code that walks strings is about 3x slower than
+hand-written Elixir that runs regexes over whole binaries. In Marginalia
+that is a few milliseconds per document. PDF reflow, which the original did
+with a regex per line, got 3.5x faster.
+
+## 17. Limits
 
 - **Async is single-process.** `async` is a queue inside one process, not
   BEAM concurrency. Concurrency comes from `@actor` classes, or from host
@@ -769,7 +834,7 @@ method is freed when the method returns.
 - **A module-level mutable non-actor object is per process.** Each process
   gets its own copy on first read.
 
-## 17. Where things are
+## 18. Where things are
 
 - Backend: `temper/be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/`
 - Runtime: `temper/be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core/`
@@ -777,5 +842,7 @@ method is freed when the method returns.
 - Runnable examples: `journal/examples/bank/` (actors, a shared ledger,
   supervision, driven from Elixir) and `journal/examples/twolibs/` (one
   library using another)
+- Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
+  (section 16)
 - How each part came about: the dated entries in `journal/`, listed in
   `journal/README.md`
