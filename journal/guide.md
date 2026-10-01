@@ -516,7 +516,8 @@ defp elixirc_paths(_), do: ["lib"]
 
 Two rules decide what is test-only. The frontend marks each declaration
 that only tests reach. Then the backend sends to the test side every
-non-exported function or module value that production can't reach.
+non-exported function or module value that production can't reach but a
+test can. Anything nothing reaches isn't generated at all.
 Production's roots are what Elixir can reach: exported functions and
 values, classes, and top-level statements. The second rule catches what
 the first misses. A call the frontend evaluated while compiling is gone
