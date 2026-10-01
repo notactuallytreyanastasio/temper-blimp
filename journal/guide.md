@@ -557,7 +557,8 @@ leads with the Temper line, the line to fix:
      src/words_test.temper.md:24: a b -> a c: got same:a |del:b|ins:c
 ```
 
-A test that bubbles without a failed hard assert reports `Bubble`, as
+Two tests with the same title in one source file are numbered (`same`,
+`same (2)`), since ExUnit refuses a repeated test name in a module. A test that bubbles without a failed hard assert reports `Bubble`, as
 std/testing does. ExUnit's own tools work: `mix test --seed`, `--only`, and
 a line number to run one test.
 
@@ -899,6 +900,12 @@ Temper.
 
 ## 17. Limits
 
+- **Inheriting from another library's interface.** A class gets every
+  inherited member it does not override, but only from types its own
+  library declares. A getter or method with a body in another library's
+  interface is not copied in, so calling it is an `UndefinedFunctionError`.
+- **Broken code skips its operands.** A read or write the frontend rejected
+  raises before evaluating its subject or value, where js evaluates them.
 - **Async is single-process.** `async` is a queue inside one process, not
   BEAM concurrency. Concurrency comes from `@actor` classes, or from host
   processes using export and import.
