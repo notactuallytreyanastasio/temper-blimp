@@ -44,3 +44,26 @@ cd temper
 ./gradlew :be-elixir:jvmTest :be-elixir:ktlintCheck
 elixir ../journal/probes/05_grammar_samples.exs
 ```
+
+## 2. The backend and its runner
+
+Three classes make `-b elixir` exist:
+
+- `ElixirBackend` turns Temper's intermediate form (TmpL) into output
+  files. Today it ignores its input and writes a hello-world Mix project.
+- `ElixirSupportNetwork` tells TmpL how this target handles what differs
+  between languages: bubbles (Temper's errors) become exceptions, function
+  values stay functions, void is `nil`.
+- `ElixirSpecifics` runs the output: `mix compile`, then
+  `mix run --no-compile -e "TemperMain.main()"`, so that Mix's
+  "Compiling 1 file" lines never mix with the program's output.
+
+It is registered in `settings.gradle`, `bundled-backends/build.gradle` and
+`supported-backends/.../basic-plugin-list.json`, and then
+`./gradlew :cli:installDist` gives a `temper` that knows it:
+
+```bash
+temper build -b elixir -w path/to/library
+cd path/to/library/temper.out/elixir/<library>
+mix compile && mix run --no-compile -e "TemperMain.main()"
+```

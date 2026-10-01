@@ -135,3 +135,37 @@ suite still names the test, so it can only fail to load. The three
 regenerated files are reverted for now; the fix (re-extract the file, and
 anchor the ignore as `/temper/**/build/` or similar so it only matches
 Gradle output) belongs with the chapter that first runs the suite.
+
+## Chapter 2: a backend that always says hello
+
+`ElixirBackend` registers as `-b elixir` and, whatever the input, writes a
+Mix project that prints `Hello, World!`. That is the backend guide's advice
+for a first step: prove the file plumbing and the run path before any real
+translation. For a tiny library the output is
+
+```
+temper.out/elixir/elixir-hello/mix.exs
+temper.out/elixir/elixir-hello/lib/temper_main.ex
+```
+
+and `mix compile`, then `mix run --no-compile -e "TemperMain.main()"`,
+prints `Hello, World!`.
+
+Why two commands and not `mix run`: on a fresh build `mix run` prints
+
+```
+Compiling 1 file (.ex)
+Generated temper_main app
+Hello, World!
+```
+
+all on stdout, and stdout is what a run is judged by. Compiling separately
+keeps Mix's chatter out of the program's output; a failed compile is
+returned as the result, diagnostics and all.
+
+**Not done:** `temper build` still reports failure for any library that
+calls `console.log`, before translation ever starts, because the support
+network maps no builtins yet (`Cannot translate value fn getConsole`). The
+files are written anyway, which is how the run above was checked. The
+runner's path through `temper run` has not been exercised yet for the same
+reason.
