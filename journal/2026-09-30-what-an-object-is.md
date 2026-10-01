@@ -169,3 +169,42 @@ network maps no builtins yet (`Cannot translate value fn getConsole`). The
 files are written anyway, which is how the run above was checked. The
 runner's path through `temper run` has not been exercised yet for the same
 reason.
+
+## Chapter 3: temper-core, written in Elixir
+
+`temper-core` is the runtime the translated code calls into. Blimp cannot
+import a second file, so `be-blimp` splices its core into every output.
+Elixir can, so this one is a Mix project of its own, laid down at
+`temper.out/elixir/temper-core`, and each library's `mix.exs` depends on it
+by path:
+
+```elixir
+defp deps do
+  [{:temper_core, path: "../temper-core"}]
+end
+```
+
+Why the obvious version, a `temper_core.ex` copied into each library, is
+wrong: two libraries would each define `TemperCore`, and a library that
+depends on another would not compile.
+
+It holds three things today, and `mix test` in its directory runs 8 tests:
+
+- **`int32/1` and `int64/1`.** Temper's `Int` is 32-bit two's complement
+  and wraps; Elixir integers have no width. The wrap is a binary
+  round-trip, `<<v::signed-32>> = <<x::32>>`. Every expectation in its
+  tests is a line from Temper's own `types/int/limits` functional test:
+  `2147483647 + 1` is `-2147483648`, `-2147483648 / -1` is `-2147483648`.
+- **`int32_div/2` and `int32_rem/2`.** `div` and `rem` already truncate
+  toward zero the way Temper does; these add the wrap and turn division by
+  zero into a `TemperCore.Bubble`.
+- **`TemperCore.Heap`.** The decision from the first entry, made real. A
+  mutable object is a `%TemperCore.Ref{class: ..., id: make_ref()}`, its
+  fields live in the process dictionary under that ref, and every alias
+  sees every write. A field the object does not have is a `KeyError`,
+  never `nil`.
+
+The test that pins the cost: a ref made in one process is not an object in
+another. `Task.async` reading it raises `... is not an object in this
+process`. That will matter the day Temper's async code is translated, and
+the test is there so it cannot be forgotten.

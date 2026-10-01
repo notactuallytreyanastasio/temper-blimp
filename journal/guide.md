@@ -67,3 +67,26 @@ temper build -b elixir -w path/to/library
 cd path/to/library/temper.out/elixir/<library>
 mix compile && mix run --no-compile -e "TemperMain.main()"
 ```
+
+## 3. temper-core
+
+The runtime library lives in the backend's resources:
+
+    temper/be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core/
+
+It is a complete Mix project. The backend copies it to
+`temper.out/elixir/temper-core` (it is the backend's
+`coreLibraryResources`), and every generated library depends on it by
+path. Test it in place:
+
+```bash
+cd temper/be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core
+mix test
+```
+
+| Function | Why it exists |
+|----------|---------------|
+| `TemperCore.int32(x)`, `int64(x)` | Elixir integers have no width; Temper's wrap |
+| `TemperCore.int32_div(a, b)`, `int32_rem(a, b)` | the wrap, plus a bubble on division by zero |
+| `TemperCore.Heap.new/get/put` | mutable objects that every alias shares |
+| `TemperCore.Bubble` | the exception an uncaught Temper bubble becomes |
