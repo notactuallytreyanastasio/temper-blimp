@@ -244,7 +244,7 @@ does, `1.0e+25` and `0.000001`, always with a point.
 
 **Lists.** A Temper `List` is a tuple in a struct, so `xs[i]` and
 `xs.length` take constant time. As an Elixir list, an indexed loop over
-16,000 items took 282 ms, because both walk the list. A `ListBuilder`
+16,000 items took 236 ms, because both walk the list. A `ListBuilder`
 holds an `:array`, so appending is `O(log n)`; as a list, every append
 copied, and 16,000 appends took 1.2 s. Now a million items build in 186 ms
 and sum by index in 20 ms.
@@ -484,6 +484,7 @@ from the `_connected.ex` file next to its Temper source.
 | a bubble (`throws Bubble`, a failed `as`, `orelse`) | `raise TemperCore.Bubble`, caught with `rescue _ in TemperCore.Bubble` |
 | `panic()` | `raise TemperCore.Panic` |
 | code the frontend rejected but was told to build anyway | `raise(TemperCore.Panic, "broken code: <the frontend's diagnostic>")`, where it stands |
+| a property read on a value whose type did not compile, such as an object of a rejected class | the same raise, naming the property |
 
 ## 12. Tests
 
@@ -527,7 +528,11 @@ a line number to run one test.
 
 **The harness.** `temper test -b elixir` and the functional suite run
 `main/0`, then `__temper_tests__/0`, which writes the JUnit XML that
-`reportTestResults` writes to `test-results.xml`.
+`reportTestResults` writes to `test-results.xml`. Each test is also
+registered with the CLI under its function name, the name that XML
+carries. So a failure is reported by its sentence, and a library whose
+init raises before any test runs reports `0 of 30 (30 not run)`, not
+`0 of 0`.
 
 ## 13. Names and layout
 
@@ -553,7 +558,10 @@ every binding that nothing reads the `_` prefix. It works backwards
 through each block and follows Elixir's scoping, where a binding inside
 an `if`, `case` or `fn` does not leak out. The same pass drops the
 binding from `t = raise(...)`, which Elixir's type checker reports as a
-pattern that can never match.
+pattern that can never match, and ends the block at the raise. Elixir
+checks every variable a function reads, reachable or not, so a later read
+of `t` would not compile ("undefined variable"); nothing after a raise in
+its block can run anyway (`probes/10_unbound_after_raise.exs`).
 
 ## 14. Long-running programs
 
@@ -630,8 +638,9 @@ it arrives. Export copies every object the value reaches. Objects keep
 their ids, which are unique across processes and nodes, so aliasing
 inside the value survives and a ref captured by a closure still works.
 Like any BEAM message it is a copy: later writes on either side are not
-shared. The receiving process must have run the library's
-`__temper_init__/0` if the code it calls reads module values.
+shared. The receiving process does not have to initialize anything: every
+exported function and constructor runs the library's `__temper_init__/0`
+first (entry 24).
 
 ## 15. Actors
 
