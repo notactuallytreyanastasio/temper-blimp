@@ -396,13 +396,15 @@ defp firstNegative_loop_1(xs, i, return) do
 end
 ```
 
-**The rest throw.** An exit from a loop inside an `if` in the middle of a
-list still becomes a tagged `throw`, caught by the function or block it
-leaves, because that `if` hands back variables rather than the function's
-result. So does a `break` out of a block whose following statements are
-too long to copy. The loop's recursive call stays outside any `try`,
-which would otherwise break the tail call; for the same reason a `try`
-inside a loop body never carries the loop's end into its arms.
+**So do an `if` and a `try` in the middle of a list.** Their arms end
+`{:cont, vars}` or with an exit's tuple, and a `case` after them goes on
+with the rest of the list, written once, or takes the exit (entry 49).
+The `case` is outside the `try`, so a loop's call to itself from it is
+still a tail call; for the same reason a `try` inside a loop body never
+carries the loop's end into its arms. An exit still throws only from a
+list nothing can hand it back through, module init code or a block whose
+following statements are too long to copy; std, alloy and
+marginalia-core have none.
 
 **Calls.** A module function is called qualified, `Temper.Lib.f()`,
 which works from inside a class module and never collides with a Kernel

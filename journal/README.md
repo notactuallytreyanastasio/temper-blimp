@@ -62,3 +62,4 @@ guide that grows as the backend does.
 46. [2026-10-02: a plain list at the door](2026-10-02-a-plain-list-at-the-door.md)
 47. [2026-10-02: a loop is a named function](2026-10-02-a-loop-is-a-named-function.md)
 48. [2026-10-02: tests nobody saw](2026-10-02-tests-nobody-saw.md)
+49. [2026-10-02: no throw left](2026-10-02-no-throw-left.md)
