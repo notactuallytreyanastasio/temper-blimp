@@ -3,19 +3,24 @@
 be-elixir compiles Temper to Elixir that runs on the BEAM. This guide
 covers the backend as it is now, in the order you need it: how to run it,
 what each Temper construct becomes, and where it falls short. The dated
-journal entries tell how each piece came about. Every Elixir snippet here
+journal entries tell how each piece came about. The backend itself now
+lives in the Temper fork,
+[notactuallytreyanastasio/temper](https://github.com/notactuallytreyanastasio/temper)
+(`be-elixir/`, whose `README.md` is this guide), and is proposed upstream
+as [temperlang/temper#507](https://github.com/temperlang/temper/pull/507);
+temper-blimp keeps the journal, probes and examples. Every Elixir snippet here
 is real output, mostly from one small program, *the tour*, reproduced
 whole in section 3.
 
 ## 1. Running it
 
 You need Elixir 1.15 or later with `mix` on the path. It was developed
-against Elixir 1.19.5 on OTP 28, and `~> 1.15` has not been tested below
-1.19. You also need JDK 21 to build Temper itself.
+against Elixir 1.19.5 and 1.18.4, both on OTP 28; `~> 1.15` has not been
+tested below 1.18. You also need JDK 21 to build Temper itself.
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
-cd temper
+git clone https://github.com/notactuallytreyanastasio/temper && cd temper
 ./gradlew :cli:installDist                      # a `temper` that knows -b elixir
 cli/build/install/temper/bin/temper build -b elixir -w path/to/my-lib
 cd path/to/my-lib/temper.out/elixir/my-lib
@@ -42,12 +47,14 @@ after 60000 ms" instead of hanging whatever called it.
 To check the backend:
 
 ```bash
-./gradlew :be-elixir:jvmTest :be-elixir:ktlintCheck     # unit, grammar and functional tests
+./gradlew :be-elixir:jvmTest :be-elixir:ktlintCheck :be-elixir:detekt   # unit, grammar and functional tests; lint
 cd be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core && mix test
 ```
 
-The functional tests are Temper's shared suite of 65 programs, each with
-its expected output. All 65 pass. The ones that run for Elixir are the
+The functional tests are Temper's shared suite of programs, each with its
+expected output. All 64 that exist today pass. Upstream's CI runs detekt
+as well as ktlint, so a change that passes only ktlint can still fail
+there (entry 39). The ones that run for Elixir are the
 `onlyPasses(elixir(), ...)` list in `FunctionalTestStatus.kt`.
 
 ## 2. How a backend is put together
@@ -154,7 +161,7 @@ def __temper_init__() do
     nil
   end)
 end
-def main() do
+def __temper_main__() do
   Temper.Tour.__temper_init__()
   TemperCore.Async.drain()
 end
@@ -252,6 +259,14 @@ Temper's total order:
 `near` is Python's `math.isclose`. `toString` prints the way JavaScript
 does, `1.0e+25` and `0.000001`, always with a point.
 
+**Comparisons.** Only `Int` has `<`, `<=`, `>` and `>=` as builtins; for
+every other type the frontend writes `a < b` as `(a <=> b) < 0`.
+`simplifyPossibleComparison` turns that back into `a < b` for `Int64`,
+`Boolean`, `String` and a string index, whose order on the BEAM is
+Temper's (UTF-8 binaries compare by code point, `false < true`). A
+`Float64` stays `TemperCore.Float.cmp(a, b) < 0`, for the order above
+(`journal/examples/comparisons/`).
+
 **Lists.** A Temper `List` is a tuple in a struct, so `xs[i]` and
 `xs.length` take constant time. As an Elixir list, an indexed loop over
 16,000 items took 236 ms, because both walk the list. A `ListBuilder`
@@ -330,8 +345,7 @@ end
 **Calls.** A module function is always called qualified,
 `Temper.Tour.tick()`. That works from inside a class module and never
 collides with a Kernel import of the same name. An omitted optional
-argument is passed as `nil`. A rest parameter is one list. A function
-used as a value is a capture, `&Temper.Std.parseJson/1`.
+argument is passed as `nil`. A function used as a value is a capture, `&Temper.Std.parseJson/1`.
 
 ## 7. Closures
 
@@ -368,8 +382,7 @@ change:
 The choice follows the annotation, not the class body. If it were
 inferred, a later version of a library that added a setter would silently
 turn a struct into a ref. Consumers' `%Lib.Point{}` patterns would stop
-matching, values that crossed processes freely no longer would, and `==`
-would compare identity instead of fields. With `@imu` as the contract,
+matching, and values that crossed processes freely no longer would. With `@imu` as the contract,
 that change can only happen by removing the annotation. An unannotated
 class that never mutates is a ref, which is slower but consistent. std's
 value classes are annotated: the JSON tree, regex nodes, `Match`, `Group`
@@ -917,21 +930,24 @@ Temper.
 
 ## 17. Deliberate differences from js and py
 
-Where js and py agree and this backend does not, it is a bug, with these
-exceptions, each chosen for Elixir developers using a translated library:
+Where js and py agree and this backend does not, it is a bug, with one
+exception, chosen for Elixir developers using a translated library:
 
-- **`@imu` values compare by their fields.** An `@imu` class is a struct, and
-  `==` on two structs is equal when their fields are, which is what an Elixir
-  developer expects of a value. js and py compare objects by identity. A
-  class that is not `@imu` is a heap ref, and its `==` is identity, as in js
-  and py. Pinned by `imuValuesCompareByTheirFields`.
 - **Float64 division by zero gives Infinity, -Infinity or NaN.** `1.0 / 0.0`
   is `Infinity` and `x % 0.0` is `NaN`, as in js. py, and Temper's
   `BuiltinOperatorSpecs`, bubble instead. The BEAM itself raises
-  ArithmeticError for `1.0 / 0.0`; entry 10 gave Temper's infinities and NaN
-  values of their own (`:infinity`, `:neg_infinity`, `:nan`), and a program
+  ArithmeticError for `1.0 / 0.0`; this backend gives Temper's infinities and
+  NaN values of their own (`:infinity`, `:neg_infinity`, `:nan`), and a program
   that produces one keeps running with it rather than stopping. Pinned by
   temper-core's IEEE tests.
+
+There is no `==` between two class instances to differ on: Temper rejects
+it on every backend unless the class declares an `@operator("==")`
+method. An `@imu` instance is still an Elixir struct, so Elixir code
+comparing two with `==` compares their fields. Entry 38 had kept
+field equality as a deliberate difference; upstream's
+[temperlang/temper#494](https://github.com/temperlang/temper/pull/494)
+removed the case (entry 39).
 
 Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
 `"007".toFloat64()` fail where js and py accept them.
@@ -952,15 +968,26 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   stay consistent belongs in an `@actor`.
 - **A module-level mutable non-actor object is per process.** Each process
   gets its own copy on first read.
+- **A rejected `==` panics with the frontend's internal message**
+  (`` Operator member infix nym`==` should have been converted to dot-name
+  form ``), not the type error the user saw. js throws the same text at run
+  time.
 
 ## 19. Where things are
 
-- Backend: `temper/be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/`
-- Runtime: `temper/be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core/`
+- Backend: `be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/` in
+  [notactuallytreyanastasio/temper](https://github.com/notactuallytreyanastasio/temper)
+- Runtime: `be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core/`
+  in the same repository
+- Upstream proposal: [temperlang/temper#507](https://github.com/temperlang/temper/pull/507);
+  the decisions behind the backend:
+  [notactuallytreyanastasio/temper#5](https://github.com/notactuallytreyanastasio/temper/pull/5)'s
+  description
 - Probes, which check claims about Elixir and the BEAM: `journal/probes/`
 - Runnable examples: `journal/examples/bank/` (actors, a shared ledger,
   supervision, driven from Elixir) and `journal/examples/twolibs/` (one
-  library using another)
+  library using another), and `journal/examples/comparisons/`
+  (comparisons after temperlang/temper#494)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
   (section 16)
 - How each part came about: the dated entries in `journal/`, listed in
