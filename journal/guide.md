@@ -15,8 +15,10 @@ whole in section 3.
 ## 1. Running it
 
 You need Elixir 1.15 or later with `mix` on the path. It was developed
-against Elixir 1.19.5 and 1.18.4, both on OTP 28; `~> 1.15` has not been
-tested below 1.18. You also need JDK 21 to build Temper itself.
+against Elixir 1.19.5 on OTP 28, and has also been run on 1.18.4 on OTP
+28, the `elixir:1.18` image that
+[temper-elixir-example](https://github.com/notactuallytreyanastasio/temper-elixir-example)
+uses. Nothing below 1.18 has been tried. You also need JDK 21 to build Temper itself.
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
@@ -633,7 +635,12 @@ a line number to run one test.
 
 **A test of constants tests the compiler.** The frontend evaluates every
 expression whose inputs are known while compiling, on every backend,
-through as many pure calls as it takes. So `assert(kinds(rows("a",
+through as many pure calls as it takes, including exported functions and
+loops. It stops at a call that makes an object: `isSpace(32)` and
+`sumTo(4) == 6` reach Elixir as `assert(test, true, ...)`, while
+`mk(3).n` and `cut("abc").length` (a class instance, a `List`) are called
+by the generated test (`journal/examples/folding/`). From the test you
+cannot see where that line falls. So `assert(kinds(rows("a",
 "b")) == "same")` reaches Elixir, and JS, as `assert(false)` with its
 message already computed. It tests Temper's interpreter, not the
 generated code. The frontend tries at more than one stage. A call that
@@ -987,6 +994,14 @@ The case study is
 [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6),
 and entry 26 covers what it taught the backend.
 
+[temper-elixir-example](https://github.com/notactuallytreyanastasio/temper-elixir-example) is the other
+shape. It is a small LiveView app meant for editing Temper and watching
+the page change, all in Docker. It does not commit `temper/out`: a
+watcher regenerates it, and Phoenix reloads it as a dependency, which
+takes `reloadable_apps: [:draft, :temper_textkit]` in `config/dev.exs`
+and live reload `dirs: ["", "../temper/out"]` with a pattern on
+`temper/out/textkit/lib/.*\.ex$`. Entry 44 covers it.
+
 **Commit the generated code.** The Temper libraries live in `temper/`, and
 the Elixir generated from them in `temper/out/`, used as a path
 dependency. Building, testing and deploying then need no JVM:
@@ -998,9 +1013,14 @@ dependency. Building, testing and deploying then need no JVM:
 precommit: ["temper.check", "compile --warnings-as-errors", ...]
 ```
 
-`bin/temper-gen` runs `temper build -b elixir` in a scratch copy, deletes
-the `*.map` files, replaces `temper/out`, and records the compiler's commit
-in `temper/out/TEMPER_COMMIT`. `--check` rebuilds and fails if the result
+`bin/temper-gen` runs `temper build -b elixir` in a scratch copy, which
+matters: a build that fails still writes `temper.out`, with the rejected
+expression translated as written, and that code compiles (entry 44: a
+string passed where an `Int` is wanted comes out as `Stats.new(words,
+sentences, characters, "slow")`). So `temper/out` should be replaced only
+when the build exits 0. The script then deletes the `*.map` files,
+replaces `temper/out`, and records the compiler's commit in
+`temper/out/TEMPER_COMMIT`. `--check` rebuilds and fails if the result
 differs from what is committed, which works because the output is
 deterministic and compiles without warnings. A Dockerfile needs
 `COPY temper/out temper/out` before `mix deps.get`. Marginalia's Temper
@@ -1130,7 +1150,8 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
 - The Dialyzer check: `be-elixir/src/commonTest/resources/lang/temper/be/elixir/dialyze.exs`
   in the fork, run by `ElixirTypespecTest`; negative controls in
   `journal/probes/11_dialyzer/`
-- Probes, which check claims about Elixir and the BEAM: `journal/probes/`
+- Probes, which check claims about Elixir and the BEAM: `journal/probes/`;
+  `13_failed_build_writes.sh` shows that a failed build still writes Elixir
 - Runnable examples, in `journal/examples/`:
   - `bank/`: actors, a shared ledger, supervision, driven from Elixir
   - `twolibs/`: one library using another
@@ -1140,9 +1161,12 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
     what Dialyzer catches (entry 42)
   - `shelf/`: which helper becomes `defp`, which stays `def` under
     `@doc false`, and the docs (entry 43)
+  - `folding/`: which constant calls the frontend evaluates while compiling
+    (entry 44)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
+  and [temper-elixir-example](https://github.com/notactuallytreyanastasio/temper-elixir-example)
   (section 17)
-- The interpreter fix that building it on today's Temper needs:
+- The interpreter fix that building Marginalia on today's Temper needs:
   [temper#6](https://github.com/notactuallytreyanastasio/temper/pull/6)
 - How each part came about: the dated entries in `journal/`, listed in
   `journal/README.md`
