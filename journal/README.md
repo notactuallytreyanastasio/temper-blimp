@@ -52,3 +52,4 @@ guide that grows as the backend does.
 37. [2026-10-01: `<=>` on floats, and the empty string](2026-10-01-float-order-and-empty-index.md)
 38. [2026-10-01: two differences, kept on purpose](2026-10-01-kept-on-purpose.md)
 39. [2026-10-01: the backend moves into Temper](2026-10-01-the-backend-moves-into-temper.md)
+40. [2026-10-01: a loop whose condition fails while compiling](2026-10-01-a-loop-whose-condition-fails.md)

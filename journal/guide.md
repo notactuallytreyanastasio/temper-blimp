@@ -594,8 +594,12 @@ expression whose inputs are known while compiling, on every backend,
 through as many pure calls as it takes. So `assert(kinds(rows("a",
 "b")) == "same")` reaches Elixir, and JS, as `assert(false)` with its
 message already computed. It tests Temper's interpreter, not the
-generated code. A function that takes the `test` is never evaluated
-early, so put each check inside one:
+generated code. The frontend tries at more than one stage. A call that
+bubbles is left for run time, so `countBelow("abc") orelse -1` stays a
+call inside `rescue TemperCore.Bubble`. A call that fails only at an
+early stage is folded at a later one (`journal/examples/loopcond/`). A
+function that takes the `test` is never evaluated early, so put each
+check inside one:
 
 ```temper
 let diffIs(test: Test, a: String, b: String, want: String): Void {
@@ -876,7 +880,11 @@ the `*.map` files, replaces `temper/out`, and records the compiler's commit
 in `temper/out/TEMPER_COMMIT`. `--check` rebuilds and fails if the result
 differs from what is committed, which works because the output is
 deterministic and compiles without warnings. A Dockerfile needs
-`COPY temper/out temper/out` before `mix deps.get`.
+`COPY temper/out temper/out` before `mix deps.get`. Marginalia's Temper
+needs a Temper that includes
+[temper#6](https://github.com/notactuallytreyanastasio/temper/pull/6),
+merged into the fork's `main` as `b77cfcdf`. Without it, its `trim` loop
+crashes the interpreter while compiling, on every backend (entry 40).
 
 **Keep the Elixir modules as facades.** Each module keeps its API and
 calls the generated library, turning `@imu` structs back into whatever its
@@ -990,5 +998,7 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   (comparisons after temperlang/temper#494)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
   (section 16)
+- The interpreter fix that building it on today's Temper needs:
+  [temper#6](https://github.com/notactuallytreyanastasio/temper/pull/6)
 - How each part came about: the dated entries in `journal/`, listed in
   `journal/README.md`
