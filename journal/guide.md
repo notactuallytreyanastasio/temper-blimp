@@ -704,7 +704,9 @@ and run with `MIX_ENV=test`. They run `__temper_main__/0`, then
 registered with the CLI under its function name, the name that XML
 carries. So a failure is reported by its sentence, and a library whose
 init raises before any test runs reports `0 of 30 (30 not run)`, not
-`0 of 0`.
+`0 of 0`. A test that panics, crashes or throws fails alone, with Elixir's
+banner for what it raised, and the tests after it still run; in a
+workspace of several libraries, each library's tests run (entry 48).
 
 ## 13. Names and layout
 
