@@ -51,6 +51,13 @@ To check the backend:
 cd be-elixir/src/commonMain/resources/lang/temper/be/elixir/temper-core && mix test
 ```
 
+`:be-elixir:jvmTest` includes `ElixirTypespecTest`, which runs Dialyzer
+over a generated library and temper-core. It needs `elixir` on the path.
+On its first run it builds a PLT of Erlang/OTP and Elixir in
+`be-elixir/build/dialyzer/base.plt`, which takes about 18 s locally and
+longer on a CI runner. So the test has its own 15-minute timeout and does
+not use the build's 30 s default (entry 41).
+
 The functional tests are Temper's shared suite of programs, each with its
 expected output. All 64 that exist today pass. Upstream's CI runs detekt
 as well as ktlint, so a change that passes only ktlint can still fail
@@ -66,12 +73,13 @@ formatter renders that tree. The pieces:
 
 | File | What it does |
 |------|--------------|
-| `elixir.out-grammar` | the Elixir syntax tree. `./gradlew kcodegen:updateGeneratedCode` turns it into `Elixir.kt`, one class per node |
+| `elixir.out-grammar` | the Elixir syntax tree. `./gradlew kcodegen:updateGeneratedCode` turns it into `Elixir.kt`, one class per node. Types are nodes of their own (`TypeSpec`, `UnionType`, `FunType`, ...), not expressions |
 | `ElixirOperatorDefinition.kt` | the precedence ladder, which decides every parenthesis. Comparisons are non-associative on purpose, since `1 < 2 < 3` is legal Elixir and means `false` |
 | `ElixirFormattingHints.kt` | spaces, line breaks, indentation. `do` and `fn` indent, `end` dedents |
 | `ElixirHelpers.kt` | literals: strings with `#` escaped, atoms quoted when needed, floats always with a point |
 | `ElixirBackend.kt` | one Mix project per library: `mix.exs`, `lib/temper_main.ex`, the root module |
 | `ElixirTranslator.kt` | TmpL to Elixir: statements, classes, closures, calls |
+| `ElixirTypespecs.kt` | a Temper type as the Elixir type its values have, for `@spec` and `@type` (section 14) |
 | `ElixirSupportNetwork.kt` | tells the frontend how this target differs: bubbles are exceptions, coroutines are state machines, void is `nil` |
 | `ElixirSupportCode.kt` | each builtin operator and `@connected` member, as an Elixir expression |
 | `ElixirNames.kt` | legal and readable names |
@@ -88,7 +96,7 @@ is code the frontend has already rejected (section 11).
 This program is used throughout:
 
 ```temper
-class Point(public x: Int, public y: Int) {
+@imu class Point(public x: Int, public y: Int) {
   public plus(o: Point): Point { new Point(x + o.x, y + o.y) }
 }
 
@@ -153,17 +161,23 @@ A Temper module runs its top level when it loads. That code becomes
 `__temper_init__/0`:
 
 ```elixir
-def __temper_init__() do
-  TemperCore.init_once(:"Temper.Tour", fn ->
-    TemperCore.Global.put(:"Temper.Tour.p", Temper.Tour.Point.plus(Temper.Tour.Point.new(1, 2), Temper.Tour.Point.new(3, 4)))
-    TemperCore.Global.put(:"Temper.Tour.c", Temper.Tour.Counter.new())
-    ...
-    nil
-  end)
-end
-def __temper_main__() do
-  Temper.Tour.__temper_init__()
-  TemperCore.Async.drain()
+defmodule Temper.Tour do
+  require TemperCore.Heap
+  ...
+  @spec __temper_init__() :: nil
+  def __temper_init__() do
+    TemperCore.init_once(:"Temper.Tour", fn ->
+      TemperCore.Global.put(:"Temper.Tour.p", Temper.Tour.Point.plus(Temper.Tour.Point.new(1, 2), Temper.Tour.Point.new(3, 4)))
+      TemperCore.Global.put(:"Temper.Tour.c", Temper.Tour.Counter.new())
+      ...
+      nil
+    end)
+  end
+  @spec __temper_main__() :: nil
+  def __temper_main__() do
+    Temper.Tour.__temper_init__()
+    TemperCore.Async.drain()
+  end
 end
 ```
 
@@ -188,7 +202,7 @@ end
   shared (a number, string, list, map, `@imu` struct or actor) lives in an
   ETS table. A mutable object that is not an actor cannot be shared, since
   its ref only means something in the heap that made it, so each process
-  gets its own copy the first time it reads it. Section 15 covers sharing
+  gets its own copy the first time it reads it. Section 16 covers sharing
   mutable state safely.
 - The ETS table, the actor registry and the actor supervisor belong to the
   `:temper_core` OTP application. It starts with any Mix project that
@@ -375,7 +389,7 @@ change:
   The frontend enforces `@imu` ("Class P claims imu but has a `var`
   property"), so the struct can never be written after construction.
 - **A class marked `@actor`** is a process per instance,
-  `%TemperCore.Actor{class, id}`, that any process may hold (section 15).
+  `%TemperCore.Actor{class, id}`, that any process may hold (section 16).
 - **Any other class** is a `%TemperCore.Ref{class, id}` into a heap kept in
   the process dictionary.
 
@@ -394,7 +408,9 @@ that crosses processes as it is. Two names for one object see each other's
 ```elixir
 defmodule Temper.Tour.Point do
   defstruct [:x, :y]
+  @type t() :: %Temper.Tour.Point{x: integer(), y: integer()}
   ...
+  @spec new(integer(), integer()) :: Temper.Tour.Point.t()
   def new(x, y) do
     this = %Temper.Tour.Point{}
     this = %{this | :x => x}
@@ -404,10 +420,15 @@ defmodule Temper.Tour.Point do
 end
 
 defmodule Temper.Tour.Counter do
+  @type t() :: TemperCore.Ref.t()
+  ...
+  @spec bump(Temper.Tour.Counter.t()) :: nil
   def bump(this) do
-    ...
-    TemperCore.Heap.put(this, :count, return)
+    t = TemperCore.int32(TemperCore.Heap.get(this, :count) + 1)
+    TemperCore.Heap.put(this, :count, t)
+    nil
   end
+  @spec new() :: Temper.Tour.Counter.t()
   def new() do
     this = TemperCore.Heap.new(Temper.Tour.Counter, %{:count => nil})
     ...
@@ -652,7 +673,58 @@ checks every variable a function reads, reachable or not, so a later read
 of `t` would not compile ("undefined variable"); nothing after a raise in
 its block can run anyway (`probes/10_unbound_after_raise.exs`).
 
-## 14. Long-running programs
+## 14. Typespecs
+
+Every `def` in generated code has an `@spec`, and every class module an
+`@type t`. The tour's `Point`, and three functions from
+`ElixirTypespecTest`'s fixture:
+
+```elixir
+@type t() :: %Temper.Tour.Point{x: integer(), y: integer()}
+@spec plus(Temper.Tour.Point.t(), Temper.Tour.Point.t()) :: Temper.Tour.Point.t()
+@spec firstOrNull(TemperCore.Vec.t(String.t())) :: String.t() | nil
+@spec greet(String.t(), String.t() | nil) :: String.t()
+@spec twice((integer() -> integer()), integer()) :: integer()
+```
+
+| Temper | Elixir type |
+|--------|-------------|
+| `Int`, `Int64`, a string index | `integer()` |
+| `Float64` | `TemperCore.Float.t()`, which also covers the three atoms |
+| `Boolean`, `String` | `boolean()`, `String.t()` |
+| `List<T>`, `Map<K, V>`, `Pair<K, V>` | `TemperCore.Vec.t(t)`, `TemperCore.Map.t(k, v)`, `TemperCore.Pair.t(k, v)` |
+| a builder, generator, promise or deque | `TemperCore.Ref.t()` |
+| an `@imu` class | its struct, field by field |
+| any other class, an `@actor` class | `TemperCore.Ref.t()`, `TemperCore.Actor.t()` |
+| an interface, a type parameter | `term()` |
+| `Never`, an abstract method's result | `no_return()` |
+
+An omitted parameter gains `| nil`. A function that bubbles returns its
+pass type. A builtin type with no row fails the build by name rather than
+becoming `term()`.
+
+`ElixirTypespecTest` runs Dialyzer over a library that reaches every row,
+and fails on any spec the code contradicts, any call that breaks one, or
+any type that does not exist. To check your own library:
+
+```bash
+elixir be-elixir/src/commonTest/resources/lang/temper/be/elixir/dialyze.exs /tmp/temper.plt path/to/temper.out/elixir/my-lib
+```
+
+It prints each warning, then `SPEC-TOTAL` and `TOTAL`.
+
+A green run needs the code to be visible to Dialyzer, and three things
+make it so. `TemperCore.Heap.entry` is a macro, not a function that takes
+a closure (section 15). temper-core's public functions have specs, 214 of
+them, because a function that ends in an unspecced runtime call returns
+`any()` too. And a null check is `case x do nil -> ...; x -> ... end`
+rather than `if x === nil`, since Dialyzer narrows through a pattern and
+not through `===`. Without the first, eight false return specs given to
+exported functions on purpose are caught 0 times; with all three, 6
+(`journal/probes/11_dialyzer/`, entry 41). Section 19 lists what is still
+not checked.
+
+## 15. Long-running programs
 
 Mutable objects live in their process's heap, which leaves two problems
 for a program that keeps running. `TemperCore.Heap` provides a tool for
@@ -675,6 +747,13 @@ def handle(n) do
   end)
 end
 ```
+
+`entry` is a macro. It expands, inline, to `Heap.enter()` and
+`Heap.leave/2` around the body, so the function's value is the body's own
+and Dialyzer can check its spec. As a function taking a closure, it made
+every exported function return `any()`. Generated modules start with
+`require TemperCore.Heap`. `Heap.run/1` does the same for a function
+value.
 
 That is a small generational collector. Objects made during the outermost
 call into a library are young. When the call returns, or raises, the
@@ -739,7 +818,7 @@ shared. The receiving process does not have to initialize anything: every
 exported function and constructor runs the library's `__temper_init__/0`
 first (entry 24).
 
-## 15. Actors
+## 16. Actors
 
 A class marked `@actor` has instances that are processes. Any number of
 processes can hold one and change it, and all of them see the same object.
@@ -852,10 +931,11 @@ read 4 and both write 5, because the read and the write are separate
 steps, and Temper has no locks. A counter shared across processes belongs
 in an actor, whose single process makes each update one step.
 
-Each call runs through `Heap.entry` inside the actor, so garbage from a
-method is freed when the method returns.
+Each call runs through `Heap.run` (entry's form for a function value)
+inside the actor, so garbage from a method is freed when the method
+returns.
 
-## 16. Using it in an app
+## 17. Using it in an app
 
 [Marginalia](https://github.com/notactuallytreyanastasio/marginalia), a
 Phoenix app, runs its core text logic from Temper this way: paragraph and
@@ -899,7 +979,7 @@ defp row(%Core.Row{kind: "same", left: l, right: r}), do: {:same, l, r}
 ```
 
 **Export only the API.** Every exported function runs the library's init
-check and `TemperCore.Heap.entry` (section 14). That is cheap once per call
+check and `TemperCore.Heap.entry` (section 15). That is cheap once per call
 from Elixir, but a helper called once per character pays it once per
 character. Un-exporting Marginalia's helpers was most of a 3x-to-5x
 slowdown.
@@ -936,7 +1016,7 @@ binaries. Entry 27 covers how the runtime's share of that shrank. PDF
 reflow, which the original did with a regex per line, is faster in
 Temper.
 
-## 17. Deliberate differences from js and py
+## 18. Deliberate differences from js and py
 
 Where js and py agree and this backend does not, it is a bug, with one
 exception, chosen for Elixir developers using a translated library:
@@ -960,7 +1040,7 @@ removed the case (entry 39).
 Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
 `"007".toFloat64()` fail where js and py accept them.
 
-## 18. Limits
+## 19. Limits
 
 - **Inheriting from another library's interface.** A class gets every
   inherited member it does not override, but only from types its own
@@ -976,12 +1056,22 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   stay consistent belongs in an `@actor`.
 - **A module-level mutable non-actor object is per process.** Each process
   gets its own copy on first read.
+- **Some return specs are not checked.** A result that comes out of a
+  loop is `any()` to Dialyzer, because the loop is a closure passed to
+  itself. So is a result typed by a spec's type variable, such as a map
+  value from `get_or`. A false return spec on such a function is not
+  caught. Its arguments are still checked at every call.
+- **A true spec can fail the check.** A function that returns a `List`
+  parameter after calling a list operation on it, such as
+  `if (xs.length > 0) { xs } else { null }`, gets `might also return
+  [any()]` from `dialyze.exs` (`:extra_return`), because temper-core also
+  accepts plain Elixir lists as `List`s.
 - **A rejected `==` panics with the frontend's internal message**
   (`` Operator member infix nym`==` should have been converted to dot-name
   form ``), not the type error the user saw. js throws the same text at run
   time.
 
-## 19. Where things are
+## 20. Where things are
 
 - Backend: `be-elixir/src/commonMain/kotlin/lang/temper/be/elixir/` in
   [notactuallytreyanastasio/temper](https://github.com/notactuallytreyanastasio/temper)
@@ -991,13 +1081,16 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   the decisions behind the backend:
   [notactuallytreyanastasio/temper#5](https://github.com/notactuallytreyanastasio/temper/pull/5)'s
   description
+- The Dialyzer check: `be-elixir/src/commonTest/resources/lang/temper/be/elixir/dialyze.exs`
+  in the fork, run by `ElixirTypespecTest`; negative controls in
+  `journal/probes/11_dialyzer/`
 - Probes, which check claims about Elixir and the BEAM: `journal/probes/`
 - Runnable examples: `journal/examples/bank/` (actors, a shared ledger,
   supervision, driven from Elixir) and `journal/examples/twolibs/` (one
   library using another), and `journal/examples/comparisons/`
   (comparisons after temperlang/temper#494)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
-  (section 16)
+  (section 17)
 - The interpreter fix that building it on today's Temper needs:
   [temper#6](https://github.com/notactuallytreyanastasio/temper/pull/6)
 - How each part came about: the dated entries in `journal/`, listed in

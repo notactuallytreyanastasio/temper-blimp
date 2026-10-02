@@ -6,8 +6,9 @@ guide that grows as the backend does.
 
 - [guide.md](guide.md) -- how the backend works as it stands: running it, what
   each Temper construct becomes in Elixir and why, and its limits.
-- [probes/](probes/) -- the Elixir scripts every claim about the target was
-  checked with. Run any of them with `elixir probes/<file>.exs`.
+- [probes/](probes/) -- the scripts every claim about the target was
+  checked with. Run an `.exs` one with `elixir probes/<file>.exs`; a
+  directory has a README saying how to run it.
 - [examples/](https://github.com/notactuallytreyanastasio/temper-blimp/tree/main/journal/examples) -- runnable Temper libraries with the Elixir that
   drives them, such as `bank/`, a set of `@actor` accounts.
 
@@ -53,3 +54,4 @@ guide that grows as the backend does.
 38. [2026-10-01: two differences, kept on purpose](2026-10-01-kept-on-purpose.md)
 39. [2026-10-01: the backend moves into Temper](2026-10-01-the-backend-moves-into-temper.md)
 40. [2026-10-01: a loop whose condition fails while compiling](2026-10-01-a-loop-whose-condition-fails.md)
+41. [2026-10-01: typespecs, and a Dialyzer that checks them](2026-10-01-typespecs-and-a-dialyzer-that-checks-them.md)
