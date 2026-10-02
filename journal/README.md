@@ -56,3 +56,4 @@ guide that grows as the backend does.
 40. [2026-10-01: a loop whose condition fails while compiling](2026-10-01-a-loop-whose-condition-fails.md)
 41. [2026-10-01: typespecs, and a Dialyzer that checks them](2026-10-01-typespecs-and-a-dialyzer-that-checks-them.md)
 42. [2026-10-01: one class is not another](2026-10-01-one-class-is-not-another.md)
+43. [2026-10-01: what Elixir can call, and what `h` shows](2026-10-01-what-elixir-can-call.md)

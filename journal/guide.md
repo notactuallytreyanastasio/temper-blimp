@@ -196,6 +196,15 @@ end
   level; every later one is a single ETS lookup, which costs nothing
   measurable across 100,000 GenServer requests. Code running inside the
   init itself skips the call, so there is no recursion.
+- **What Temper does not export, Elixir cannot call, mostly.** A
+  non-exported function has no init call. When only the root module calls
+  it, it is `defp`. When a class or a test calls it, it is `def` with
+  `@doc false`: hidden from `h` and ExDoc, but still callable, and still
+  able to run before init (`Temper.Lib.helper(...)` from Elixir can raise
+  `module-level ... read before it was set`). A private function whose
+  only calls were in code the frontend rejected, cut off by the tidy pass
+  at a raise, goes back to `def`, `@doc false`, so that it is not an
+  unused-function warning (entry 43).
 - A module-level variable lives in `TemperCore.Global`, keyed by library,
   because a `def` cannot see variables outside its own parameters. Every
   process on the node sees the same module values: a value that can be
@@ -356,10 +365,17 @@ def firstNegative(xs) do
 end
 ```
 
-**Calls.** A module function is always called qualified,
-`Temper.Tour.tick()`. That works from inside a class module and never
-collides with a Kernel import of the same name. An omitted optional
-argument is passed as `nil`. A function used as a value is a capture, `&Temper.Std.parseJson/1`.
+**Calls.** A module function is called qualified, `Temper.Lib.f()`,
+which works from inside a class module and never collides with a Kernel
+import of the same name. The exception is a function Temper does not
+export and that only the root module calls. That one is `defp` and is
+called locally: the tour's `tick` is `defp tick()`, and `__temper_init__`
+calls it as `tick()`. A capture of such a function is `&tick/0`. A
+non-exported function that a class or a test calls stays `def` under
+`@doc false`, because a class module and the test module are other
+modules, and a remote call cannot reach a `defp`. An omitted optional
+argument is passed as `nil`. A function used as a value is a capture,
+`&Temper.Std.parseJson/1`.
 
 ## 7. Closures
 
@@ -652,7 +668,7 @@ init raises before any test runs reports `0 of 30 (30 not run)`, not
 |--------|--------|
 | a local declared once in its function | its plain name: `xs`, `total`, `sourceText` |
 | a name declared more than once in one function | numbered in order: `t1`, `t2` |
-| a module function, global or test | its plain name: `tick`, `:"Temper.Tour.calls"`; a name the library declares twice is `fn`, `fn__2` in declaration order |
+| a module function, global or test | its plain name: `tick`, `:"Temper.Tour.calls"`; a name the library declares twice is `fn`, `fn__2` in declaration order; `defp` if not exported and only the root module calls it |
 | a field | its plain name, `:x`, since a class has one member of each name |
 | `if a ... else if b ... else ...` | one `cond` with an arm per branch |
 | a name Elixir reserves or Kernel imports | a trailing `_`: `length_` |
@@ -677,6 +693,17 @@ pattern that can never match, and ends the block at the raise. Elixir
 checks every variable a function reads, reachable or not, so a later read
 of `t` would not compile ("undefined variable"); nothing after a raise in
 its block can run anyway (`probes/10_unbound_after_raise.exs`).
+
+**Doc comments are docs.** An exported function's Temper doc comment is
+its `@doc`, a class's is its `@moduledoc`, and a member's is its `@doc`,
+written before the `@spec` as a `"""` heredoc indented with the module's
+items. Elixir strips the closing delimiter's indentation, so
+`Code.fetch_docs` gives the text back as written. `\`, `#{` and `"""` are
+escaped. A `defp` gets no `@doc`, since Elixir discards one with a
+warning, and a public non-exported function gets `@doc false`, which
+drops its doc comment. Property docs (getters and setters of fields),
+constructors and module values get no doc
+(`probes/12_doc_attributes.exs`).
 
 ## 14. Typespecs
 
@@ -1104,10 +1131,15 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   in the fork, run by `ElixirTypespecTest`; negative controls in
   `journal/probes/11_dialyzer/`
 - Probes, which check claims about Elixir and the BEAM: `journal/probes/`
-- Runnable examples: `journal/examples/bank/` (actors, a shared ledger,
-  supervision, driven from Elixir) and `journal/examples/twolibs/` (one
-  library using another), and `journal/examples/comparisons/`
-  (comparisons after temperlang/temper#494)
+- Runnable examples, in `journal/examples/`:
+  - `bank/`: actors, a shared ledger, supervision, driven from Elixir
+  - `twolibs/`: one library using another
+  - `comparisons/`: comparisons after temperlang/temper#494 (entry 39)
+  - `loopcond/`: loops the frontend runs while compiling (entry 40)
+  - `classtypes/`: each class its own type, and the spec swaps that show
+    what Dialyzer catches (entry 42)
+  - `shelf/`: which helper becomes `defp`, which stays `def` under
+    `@doc false`, and the docs (entry 43)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
   (section 17)
 - The interpreter fix that building it on today's Temper needs:
