@@ -327,23 +327,34 @@ Elixir has no mutable variables and no loops. Temper has both.
 `x = TemperCore.int32(x + 1)`. An `if` that assigns hands its variables
 back as a value: `x = if c do ...; x else x end`.
 
-**A loop is a function that calls itself.** It carries every variable it
-assigns, and hands them back when it ends:
+**A loop is a function that calls itself.** It is a `defp` of its own,
+named after the function it came from. It is passed the variables it
+reads, carries every variable it assigns, and hands those back when it
+ends:
 
 ```elixir
-ex_loop_1 = fn ex_loop_1, i, total ->
+{_i, total} = sum_loop_1(xs, i, total)
+
+@spec sum_loop_1(term(), term(), term()) :: term()
+defp sum_loop_1(xs, i, total) do
   if i < TemperCore.List.length(xs) do
     total = TemperCore.int32(total + TemperCore.List.get(xs, i))
     i = TemperCore.int32(i + 1)
-    ex_loop_1.(ex_loop_1, i, total)
+    sum_loop_1(xs, i, total)
   else
     {i, total}
   end
 end
-{_i, total} = ex_loop_1.(ex_loop_1, i, total)
 ```
 
-The recursive call is a tail call, so the stack does not grow.
+The recursive call is a tail call, so the stack does not grow. A loop
+was a closure passed to itself until Dialyzer showed what that cost: it
+types a call through a closure argument `any()`, so nothing that came
+out of a loop was checked. A named function it infers like any other,
+`term()` spec or not (entry 47). What a loop reads is found by tidy's
+liveness pass over the generated Elixir. A `while (true)` loop is its
+body alone, with no `if true`; when nothing breaks out of it, its call
+site has no clause for it ending.
 
 **Exits are folded where they can be.** A statement list is translated
 together with what falling off its end means: return `nil`, go round the
@@ -363,24 +374,25 @@ out of it. A `try` that is a function's last statement returns from its
 arms (entry 45):
 
 ```elixir
-ex_loop_2 = fn ex_loop_2, i, return ->
+case firstNegative_loop_1(xs, i, return) do
+  {:cont, {_i, _return}} ->
+    -1
+  {:temper_break, :ex_block_1, return} ->
+    return
+end
+
+defp firstNegative_loop_1(xs, i, return) do
   if i < TemperCore.List.length(xs) do
     if TemperCore.List.get(xs, i) < 0 do
       return = i
       {:temper_break, :ex_block_1, return}
     else
       i = TemperCore.int32(i + 1)
-      ex_loop_2.(ex_loop_2, i, return)
+      firstNegative_loop_1(xs, i, return)
     end
   else
     {:cont, {i, return}}
   end
-end
-case ex_loop_2.(ex_loop_2, i, return) do
-  {:cont, {_i, _return}} ->
-    -1
-  {:temper_break, :ex_block_1, return} ->
-    return
 end
 ```
 
@@ -705,8 +717,9 @@ init raises before any test runs reports `0 of 30 (30 not run)`, not
 | `if a ... else if b ... else ...` | one `cond` with an arm per branch |
 | a name Elixir reserves or Kernel imports | a trailing `_`: `length_` |
 | a name starting with a capital or `_` | a `v_` or `u` prefix |
-| the translator's own temporaries | `ex_loop_1`, `ex_return_0`, counted from 0 in each function, and prefixed `ex_`, which no Temper name can take |
-| a binding nothing reads | Elixir's `_` prefix: `{_i, total} = loop.(...)` |
+| the translator's own temporaries | `ex_return_0`, `ex_block_1`, counted from 0 in each function, and prefixed `ex_`, which no Temper name can take |
+| a loop | a `defp` named after its function, `sum_loop_1`, counted across the library |
+| a binding nothing reads | Elixir's `_` prefix: `{_i, total} = sum_loop_1(...)` |
 
 Names are per function: Elixir variables belong to their function, so a
 frontend id only has to separate names that share a base inside one
@@ -1144,11 +1157,11 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   stay consistent belongs in an `@actor`.
 - **A module-level mutable non-actor object is per process.** Each process
   gets its own copy on first read.
-- **Some return specs are not checked.** A result that comes out of a
-  loop is `any()` to Dialyzer, because the loop is a closure passed to
-  itself, whether the result leaves it through a `case` or a `catch`. So is a result typed by a spec's type variable, such as a map
-  value from `get_or`. A false return spec on such a function is not
-  caught. Its arguments are still checked at every call.
+- **Some return specs are not checked.** A result typed by a spec's type
+  variable, such as a map value from `get_or`, is `term()` to Dialyzer. A
+  false return spec on such a function is not caught. Its arguments are
+  still checked at every call. A result that comes out of a loop is
+  checked (entry 47).
 - **Interfaces and type parameters say little.** An interface's type
   admits any struct, and a type parameter is `term()`: a spec can carry
   `when t: var`, but Dialyzer checks that as `term()` too.

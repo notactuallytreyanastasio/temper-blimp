@@ -60,3 +60,4 @@ guide that grows as the backend does.
 44. [2026-10-01: an app you can change](2026-10-01-an-app-you-can-change.md)
 45. [2026-10-01: a return is not a throw](2026-10-01-a-return-is-not-a-throw.md)
 46. [2026-10-02: a plain list at the door](2026-10-02-a-plain-list-at-the-door.md)
+47. [2026-10-02: a loop is a named function](2026-10-02-a-loop-is-a-named-function.md)
