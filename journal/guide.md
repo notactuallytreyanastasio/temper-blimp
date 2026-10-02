@@ -300,13 +300,20 @@ copied, and 16,000 appends took 1.2 s. Now a million items build in 186 ms
 and sum by index in 20 ms.
 
 `TemperCore.Vec` is `Enumerable`, so Elixir code can `Enum` over a list a
-Temper library returns, and every Temper list operation also accepts a
-plain Elixir list:
+Temper library returns. Elixir code may pass a plain list where a
+function takes a `List`: an exported function, and a public method or
+constructor of an exported class, makes each `List` argument a Vec on
+entry, `xs = TemperCore.Vec.of(xs)`, and its spec says so,
+`TemperCore.List.list_in(integer())` (entry 46):
 
 ```elixir
 Temper.Lists.build(5)            #=> #TemperCore.Vec<[0, 1, 2, 3, 4]>
 Temper.Lists.sumIndexed([1, 2, 3])   #=> 6
 ```
+
+A `List` inside another value, a map's values or an object's field set by
+Elixir code, is not converted, and temper-core's list operations still
+accept a plain list there.
 
 **Strings.** A `StringIndex` is a byte offset into the UTF-8 binary, so
 `s[i]` is a binary match and stepping (`next`, `prev`) moves over a whole
@@ -1145,11 +1152,9 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
 - **Interfaces and type parameters say little.** An interface's type
   admits any struct, and a type parameter is `term()`: a spec can carry
   `when t: var`, but Dialyzer checks that as `term()` too.
-- **A true spec can fail the check.** A function that returns a `List`
-  parameter after calling a list operation on it, such as
-  `if (xs.length > 0) { xs } else { null }`, gets `might also return
-  [any()]` from `dialyze.exs` (`:extra_return`), because temper-core also
-  accepts plain Elixir lists as `List`s.
+- **A `List` inside another value is not converted.** A plain Elixir
+  list in a map's values or an object's field stays a plain list, so a
+  spec that says `Vec` there is optimistic (entry 46).
 - **A rejected `==` panics with the frontend's internal message**
   (`` Operator member infix nym`==` should have been converted to dot-name
   form ``), not the type error the user saw. js throws the same text at run
