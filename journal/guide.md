@@ -391,7 +391,11 @@ change:
 - **A class marked `@actor`** is a process per instance,
   `%TemperCore.Actor{class, id}`, that any process may hold (section 16).
 - **Any other class** is a `%TemperCore.Ref{class, id}` into a heap kept in
-  the process dictionary.
+  the process dictionary. A constructor builds that struct itself
+  (`this = %TemperCore.Ref{class: C, id: make_ref()}`, then
+  `TemperCore.Heap.init(this, fields)`) rather than getting it back from
+  `Heap.new/2`, so that the class appears in the constructor's type.
+  `Heap.new/2` and `Actor.start/2` remain for Elixir code.
 
 The choice follows the annotation, not the class body. If it were
 inferred, a later version of a library that added a setter would silently
@@ -420,7 +424,7 @@ defmodule Temper.Tour.Point do
 end
 
 defmodule Temper.Tour.Counter do
-  @type t() :: TemperCore.Ref.t()
+  @type t() :: %TemperCore.Ref{class: Temper.Tour.Counter, id: reference()}
   ...
   @spec bump(Temper.Tour.Counter.t()) :: nil
   def bump(this) do
@@ -430,7 +434,8 @@ defmodule Temper.Tour.Counter do
   end
   @spec new() :: Temper.Tour.Counter.t()
   def new() do
-    this = TemperCore.Heap.new(Temper.Tour.Counter, %{:count => nil})
+    this = %TemperCore.Ref{class: Temper.Tour.Counter, id: make_ref()}
+    TemperCore.Heap.init(this, %{:count => nil})
     ...
 ```
 
@@ -695,13 +700,21 @@ Every `def` in generated code has an `@spec`, and every class module an
 | `List<T>`, `Map<K, V>`, `Pair<K, V>` | `TemperCore.Vec.t(t)`, `TemperCore.Map.t(k, v)`, `TemperCore.Pair.t(k, v)` |
 | a builder, generator, promise or deque | `TemperCore.Ref.t()` |
 | an `@imu` class | its struct, field by field |
-| any other class, an `@actor` class | `TemperCore.Ref.t()`, `TemperCore.Actor.t()` |
-| an interface, a type parameter | `term()` |
+| any other class | `%TemperCore.Ref{class: Temper.Lib.C, id: reference()}` |
+| an `@actor` class | `%TemperCore.Actor{class: Temper.Lib.C, id: reference()}` |
+| an interface | `%TemperCore.Ref{} \| %TemperCore.Actor{} \| struct()`: any Temper object |
+| a type parameter | `term()` |
 | `Never`, an abstract method's result | `no_return()` |
 
 An omitted parameter gains `| nil`. A function that bubbles returns its
 pass type. A builtin type with no row fails the build by name rather than
 becoming `term()`.
+
+Each class is its own type, so a `Query` passed where a `Schema` is wanted
+breaks the contract at the call, and a constructor whose spec names
+another class is an `invalid_contract` at the constructor itself.
+`ElixirTypespecTest.dialyzerTellsOneClassFromAnother` checks the first
+(entry 42).
 
 `ElixirTypespecTest` runs Dialyzer over a library that reaches every row,
 and fails on any spec the code contradicts, any call that breaks one, or
@@ -845,11 +858,12 @@ BEAM:
 
 ```elixir
 def new(owner) do
-  TemperCore.Actor.start(Temper.Bank.Account, fn ->
+  Temper.Bank.__temper_init__()
+  %TemperCore.Actor{class: Temper.Bank.Account, id: TemperCore.Actor.start_id(Temper.Bank.Account, fn ->
     this = TemperCore.Actor.init_self(Temper.Bank.Account, %{:owner => nil, :balance => nil})
     ...
     this
-  end)
+  end)}
 end
 def deposit(this, n) do
   TemperCore.Actor.run(this, fn ->
@@ -858,7 +872,9 @@ def deposit(this, n) do
 end
 ```
 
-`new` starts a GenServer and runs the constructor inside it. The object
+`new` starts a GenServer and runs the constructor inside it. It builds
+the `%TemperCore.Actor{}` itself, around the id `Actor.start_id/2`
+returns, so the actor's class is in its type (section 14). The object
 is `%TemperCore.Actor{class, id}`: an ordinary term that can be sent,
 stored and compared. The id is registered to whichever process runs the
 actor now, so the identity survives a restart. Its fields exist only inside its own process. Each
@@ -1061,6 +1077,9 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   itself. So is a result typed by a spec's type variable, such as a map
   value from `get_or`. A false return spec on such a function is not
   caught. Its arguments are still checked at every call.
+- **Interfaces and type parameters say little.** An interface's type
+  admits any struct, and a type parameter is `term()`: a spec can carry
+  `when t: var`, but Dialyzer checks that as `term()` too.
 - **A true spec can fail the check.** A function that returns a `List`
   parameter after calling a list operation on it, such as
   `if (xs.length > 0) { xs } else { null }`, gets `might also return
