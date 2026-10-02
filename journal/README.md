@@ -58,3 +58,4 @@ guide that grows as the backend does.
 42. [2026-10-01: one class is not another](2026-10-01-one-class-is-not-another.md)
 43. [2026-10-01: what Elixir can call, and what `h` shows](2026-10-01-what-elixir-can-call.md)
 44. [2026-10-01: an app you can change](2026-10-01-an-app-you-can-change.md)
+45. [2026-10-01: a return is not a throw](2026-10-01-a-return-is-not-a-throw.md)

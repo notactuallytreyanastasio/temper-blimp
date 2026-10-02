@@ -344,28 +344,46 @@ loop again, or hand back the assigned variables. An `if` whose branch
 always exits pulls the rest of the list into its other branch, so most
 `return`, `break` and `continue` statements become a value or a call.
 
-**The rest throw.** `firstNegative` returns from inside a loop, and the
-loop is a function, so the `return` becomes a tagged `throw`. The function
-catches its own tag. The loop's recursive call stays outside any `try`,
-which would otherwise break the tail call:
+**A loop hands its exits back.** The frontend never leaves a `return`
+inside a loop: `firstNegative`'s becomes `return = i; break` out of a
+labeled block around the body, with `return -1` after the loop. A loop
+with an exit past it that the surrounding list can take returns that
+exit as a tuple, ends normally with `{:cont, vars}`, and its call site is
+a `case`: the rest of the list in the `:cont` clause, one clause per exit.
+The statements after a labeled block, when short (a `return`, an
+expression or an assignment of at most 8 nodes), are copied into each way
+out of it. A `try` that is a function's last statement returns from its
+arms (entry 45):
 
 ```elixir
-def firstNegative(xs) do
-  Temper.Tour.__temper_init__()
-  TemperCore.Heap.entry(fn ->
-    try do
-      ...
-              if TemperCore.List.get(xs, i) < 0 do
-                return = i
-                throw({:temper_break, :ex_block_1, return})
-      ...
-    catch
-      {:temper_return, :ex_return_0, ex_value_5} ->
-        ex_value_5
+ex_loop_2 = fn ex_loop_2, i, return ->
+  if i < TemperCore.List.length(xs) do
+    if TemperCore.List.get(xs, i) < 0 do
+      return = i
+      {:temper_break, :ex_block_1, return}
+    else
+      i = TemperCore.int32(i + 1)
+      ex_loop_2.(ex_loop_2, i, return)
     end
-  end)
+  else
+    {:cont, {i, return}}
+  end
+end
+case ex_loop_2.(ex_loop_2, i, return) do
+  {:cont, {_i, _return}} ->
+    -1
+  {:temper_break, :ex_block_1, return} ->
+    return
 end
 ```
+
+**The rest throw.** An exit from a loop inside an `if` in the middle of a
+list still becomes a tagged `throw`, caught by the function or block it
+leaves, because that `if` hands back variables rather than the function's
+result. So does a `break` out of a block whose following statements are
+too long to copy. The loop's recursive call stays outside any `try`,
+which would otherwise break the tail call; for the same reason a `try`
+inside a loop body never carries the loop's end into its arms.
 
 **Calls.** A module function is called qualified, `Temper.Lib.f()`,
 which works from inside a class module and never collides with a Kernel
@@ -1121,7 +1139,7 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
   gets its own copy on first read.
 - **Some return specs are not checked.** A result that comes out of a
   loop is `any()` to Dialyzer, because the loop is a closure passed to
-  itself. So is a result typed by a spec's type variable, such as a map
+  itself, whether the result leaves it through a `case` or a `catch`. So is a result typed by a spec's type variable, such as a map
   value from `get_or`. A false return spec on such a function is not
   caught. Its arguments are still checked at every call.
 - **Interfaces and type parameters say little.** An interface's type
@@ -1163,6 +1181,8 @@ Still open: number parsing follows JSON syntax, so `"+7".toInt32()` and
     `@doc false`, and the docs (entry 43)
   - `folding/`: which constant calls the frontend evaluates while compiling
     (entry 44)
+  - `loopret/`: returns and breaks out of loops, and the one `throw` left
+    (entry 45)
 - Used in an app: [marginalia#6](https://github.com/notactuallytreyanastasio/marginalia/pull/6)
   and [temper-elixir-example](https://github.com/notactuallytreyanastasio/temper-elixir-example)
   (section 17)
