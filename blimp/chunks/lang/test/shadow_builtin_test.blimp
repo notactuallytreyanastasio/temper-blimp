@@ -24,6 +24,6 @@ actor ShadowBuiltinTests do
   end
 
   test "builtins the program did not redefine still answer" do
-    assert_eq(length([1, 2]), 2)
+    assert_eq(json_encode([1]), "[1]")
   end
 end

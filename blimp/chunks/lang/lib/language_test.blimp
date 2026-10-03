@@ -692,6 +692,27 @@ actor MapLiteralTests do
     assert_eq(length(keys(m)), 0)
   end
 
+  test "runtime_snapshot shows actors and messages, never what a field holds" do
+    h = spawn Holder
+    h <- :set(%{password: "hunter2"})
+    snap = runtime_snapshot()
+    last = head(reverse(snap.messages))
+    assert_eq(last.message, "set")
+    assert_eq(last.from, nil)
+    holders = filter(snap.actors, fn(a: Map) -> Bool do a.ref == last.target end)
+    assert_eq(length(holders), 1)
+    assert_eq(head(holders).type, "Holder")
+    assert_eq(lookup(lookup(head(holders), "state"), "held"), "Map(1)")
+    refute(contains(json_encode(snap), "hunter2"))
+  end
+
+  test "a quoted map key is the string inside the quotes" do
+    m = %{"data-n": 3, "aria-label": "x", plain: 1}
+    assert_eq(lookup(m, "data-n"), 3)
+    assert_eq(lookup(m, "aria-label"), "x")
+    assert_eq(sort(keys(m)), ["aria-label", "data-n", "plain"])
+  end
+
   test "map with string values" do
     m = %{name: "alice", city: "nyc"}
     assert_eq(lookup(m, "name"), "alice")
@@ -767,6 +788,72 @@ actor StringInterpTests do
   test "interpolate function call" do
     result = "len is #{length([1, 2, 3])}"
     assert_eq(result, "len is 3")
+  end
+
+  test "escapes around an interpolation are processed" do
+    href = "/blog"
+    result = "<a href=\"#{href}\">\tblog</a>"
+    assert_eq(result, concat("<a href=", "\"", "/blog", "\"", ">", "\t", "blog</a>"))
+  end
+
+  test "a case pattern with an escape in it matches that character" do
+    kind = fn(c: String) -> String do
+      case c do
+        "\n" -> "newline"
+        "\t" -> "tab"
+        "\\" -> "backslash"
+        "\"" -> "quote"
+        _ -> "other"
+      end
+    end
+    assert_eq(kind("\n"), "newline")
+    assert_eq(kind("\t"), "tab")
+    assert_eq(kind("\\"), "backslash")
+    assert_eq(kind("\""), "quote")
+    assert_eq(kind("n"), "other")
+  end
+
+  test "a case arm's body may hold -> in a string" do
+    f = fn(c: Bool) -> String do
+      case c do
+        true ->
+          a = "x"
+          concat(a, "-->")
+        false -> "no"
+      end
+    end
+    assert_eq(f(true), "x-->")
+    assert_eq(f(false), "no")
+  end
+
+  test "a case arm's body may hold a lambda after its first line" do
+    f = fn(c: Int) -> List do
+      case c do
+        1 ->
+          a = 1
+          map([a], fn(v: Int) -> Int do v + 1 end)
+        _ -> []
+      end
+    end
+    assert_eq(f(1), [2])
+    assert_eq(f(0), [])
+  end
+
+  test "a backslash before # writes a literal #{" do
+    x = 1
+    assert_eq(length("\#{"), 2)
+    assert_eq("\#{x} is #{x}", concat("#", "{x} is 1"))
+  end
+
+  test "an escaped backslash before #{ still interpolates" do
+    x = 1
+    assert_eq("\\#{x}", concat("\\", "1"))
+  end
+
+  test "a string longer than 4096 bytes interpolates whole" do
+    long = reduce(range(1, 1000), "", fn(acc: String, n: Int) -> String do concat(acc, "abcde") end)
+    result = "[#{long}]"
+    assert_eq(length(result), length(long) + 2)
   end
 end
 

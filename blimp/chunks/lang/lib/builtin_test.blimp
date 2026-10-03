@@ -442,6 +442,18 @@ actor ListTests do
     assert_eq(elem(result, 4), 5)
   end
 
+  test "sort strings" do
+    assert_eq(sort(["pear", "apple", "fig"]), ["apple", "fig", "pear"])
+  end
+
+  test "sort date-stamped strings" do
+    assert_eq(sort(["2026-05-30", "2025-02-02", "2025-06-01"]), ["2025-02-02", "2025-06-01", "2026-05-30"])
+  end
+
+  test "sort floats and integers together" do
+    assert_eq(sort([2.5, 1, 3]), [1, 2.5, 3])
+  end
+
   # -- flat --
   test "flat nested lists" do
     result = flat([[1, 2], [3, 4]])
@@ -1217,6 +1229,709 @@ actor AssertionDetailTests do
 end
 
 # ============================================================
+# JSON
+# ============================================================
+
+# True when `code` fails at runtime. blimp_eval answers a map with
+# error: "runtime error" instead of stopping the test run, which is the only
+# way a Blimp test can watch a builtin refuse its arguments.
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor Utf8Tests do
+  # length, slice and upcase stay byte operations; these count characters.
+  test "length stays bytes; utf8_length counts code points; grapheme_length counts what a reader sees" do
+    assert_eq(length("❤️"), 6)
+    assert_eq(utf8_length("❤️"), 2)
+    assert_eq(grapheme_length("❤️"), 1)
+    assert_eq(grapheme_length("👨‍👩‍👧‍👦"), 1)
+    assert_eq(grapheme_length("🇺🇸🇫🇷"), 2)
+    assert_eq(grapheme_length(""), 0)
+  end
+
+  test "graphemes keeps combining marks, skin tones and flags whole" do
+    assert_eq(graphemes("éa"), ["é", "a"])
+    assert_eq(graphemes("👍🏽🇯🇵!"), ["👍🏽", "🇯🇵", "!"])
+    assert_eq(graphemes(""), [])
+  end
+
+  test "utf8_slice cuts by code point, grapheme_slice and grapheme_take by cluster" do
+    assert_eq(utf8_slice("héllo", 1, 3), "éll")
+    assert_eq(utf8_slice("héllo", 3, 99), "lo")
+    assert_eq(utf8_slice("héllo", 9, 1), "")
+    assert_eq(grapheme_slice("a👨‍👩‍👧b", 1, 1), "👨‍👩‍👧")
+    assert_eq(grapheme_take("Hi 👋🏽 there", 4), "Hi 👋🏽")
+    assert_eq(grapheme_take("ab", 5), "ab")
+    assert_eq(slice("❤️", 0, 2), concat(from_char_code(226), from_char_code(157)))
+  end
+
+  test "utf8_upcase and utf8_downcase map beyond ASCII" do
+    assert_eq(utf8_upcase("straße"), "STRASSE")
+    assert_eq(utf8_upcase("éxito ñandú"), "ÉXITO ÑANDÚ")
+    assert_eq(utf8_downcase("ΑΘΗΝΑ МОСКВА"), "αθηνα москва")
+    assert_eq(upcase("é"), "é")
+  end
+
+  test "utf8_valid and utf8_scrub" do
+    assert_eq(utf8_valid("日本語"), true)
+    assert_eq(utf8_valid(slice("❤️", 0, 2)), false)
+    assert_eq(utf8_scrub(slice("❤️", 0, 2)), "�")
+    assert_eq(utf8_scrub(concat("a", from_char_code(255))), "a�")
+  end
+
+  test "invalid UTF-8 and negative counts raise" do
+    refute(raises("utf8_length(\"ok\")"))
+    refute(raises("grapheme_take(\"abc\", 0)"))
+    assert(raises("utf8_length(from_char_code(255))"))
+    assert(raises("grapheme_length(slice(\"❤️\", 0, 2))"))
+    assert(raises("graphemes(from_char_code(200))"))
+    assert(raises("utf8_upcase(from_char_code(255))"))
+    assert(raises("grapheme_take(\"abc\", -1)"))
+    assert(raises("utf8_slice(\"abc\", -1, 1)"))
+    assert(raises("utf8_length(42)"))
+  end
+end
+
+actor JsonTests do
+  # -- json_encode --
+  test "json_encode scalars" do
+    assert_eq(json_encode(42), "42")
+    assert_eq(json_encode(-7), "-7")
+    assert_eq(json_encode(true), "true")
+    assert_eq(json_encode(false), "false")
+    assert_eq(json_encode(nil), "null")
+    assert_eq(json_encode("hi"), "\"hi\"")
+  end
+
+  test "json_encode atom is a string" do
+    assert_eq(json_encode(:ok), "\"ok\"")
+  end
+
+  test "json_encode floats keep a decimal point" do
+    assert_eq(json_encode(1.5), "1.5")
+    assert_eq(json_encode(2.0), "2.0")
+    assert_eq(json_encode(-0.25), "-0.25")
+  end
+
+  test "json_encode huge float uses an exponent" do
+    assert_eq(json_encode(1.0e300), "1e300")
+  end
+
+  test "json_encode non-finite float raises" do
+    assert_eq(json_encode(0.5), "0.5")
+    assert(raises("json_encode(1.0e300 * 1.0e300)"))
+    assert(raises("json_encode(sqrt(-1.0))"))
+  end
+
+  test "json_encode escapes per RFC 8259" do
+    assert_eq(json_encode("a\"b\\c"), "\"a\\\"b\\\\c\"")
+    assert_eq(json_encode("line\nnext\ttab\r"), "\"line\\nnext\\ttab\\r\"")
+    assert_eq(json_encode(from_char_code(1)), "\"\\u0001\"")
+    assert_eq(json_encode(from_char_code(31)), "\"\\u001f\"")
+  end
+
+  test "json_encode leaves UTF-8 and slashes alone" do
+    assert_eq(json_encode("café / ok"), "\"café / ok\"")
+  end
+
+  test "json_encode rejects invalid UTF-8" do
+    assert_eq(json_encode(from_char_code(127)), concat("\"", from_char_code(127), "\""))
+    assert(raises("json_encode(from_char_code(255))"))
+  end
+
+  test "json_encode lists and tuples are arrays" do
+    assert_eq(json_encode([1, "a", nil]), "[1,\"a\",null]")
+    assert_eq(json_encode({:ok, 1}), "[\"ok\",1]")
+    assert_eq(json_encode([]), "[]")
+  end
+
+  test "json_encode maps are objects in their own order" do
+    assert_eq(json_encode(%{b: 1, a: [true]}), "{\"b\":1,\"a\":[true]}")
+    assert_eq(json_encode(%{}), "{}")
+  end
+
+  test "json_encode escapes map keys" do
+    assert_eq(json_encode(put(%{}, "q\"k", 1)), "{\"q\\\"k\":1}")
+  end
+
+  test "json_encode rejects closures" do
+    assert_eq(json_encode([1]), "[1]")
+    assert(raises("json_encode(fn(x: Int) do x end)"))
+    assert(raises("json_encode([1, fn(x: Int) do x end])"))
+  end
+
+  test "json_encode rejects view nodes" do
+    assert_eq(json_encode("hi"), "\"hi\"")
+    assert(raises("json_encode(text(\"hi\"))"))
+  end
+
+  # -- json_decode --
+  test "json_decode scalars" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert_eq(json_decode("-3"), {:ok, -3})
+    assert_eq(json_decode("1.5"), {:ok, 1.5})
+    assert_eq(json_decode("true"), {:ok, true})
+    assert_eq(json_decode("false"), {:ok, false})
+    assert_eq(json_decode("null"), {:ok, nil})
+    assert_eq(json_decode("\"hi\""), {:ok, "hi"})
+  end
+
+  test "json_decode integer too big for Int is a Float" do
+    assert_eq(json_decode("9223372036854775807"), {:ok, 9223372036854775807})
+    assert_eq(json_decode("9223372036854775808"), {:ok, 9223372036854775808.0})
+  end
+
+  test "json_decode exponent is a Float" do
+    assert_eq(json_decode("1e2"), {:ok, 100.0})
+  end
+
+  test "json_decode unescapes strings" do
+    assert_eq(json_decode("\"a\\nb\\u00e9\\\"\""), {:ok, "a\nbé\""})
+  end
+
+  test "json_decode arrays are lists" do
+    assert_eq(json_decode("[1, [2, 3], \"x\"]"), {:ok, [1, [2, 3], "x"]})
+  end
+
+  test "json_decode objects are maps with string keys" do
+    case json_decode("{\"name\": \"bob\", \"tags\": [\"a\"], \"n\": {\"x\": null}}") do
+      {:ok, m} ->
+        assert_eq(lookup(m, "name"), "bob")
+        assert_eq(lookup(m, "tags"), ["a"])
+        assert_eq(lookup(lookup(m, "n"), "x"), nil)
+        assert_eq(keys(m), ["name", "tags", "n"])
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode duplicate key keeps the last" do
+    case json_decode("{\"a\": 1, \"a\": 2}") do
+      {:ok, m} -> assert_eq(lookup(m, "a"), 2)
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode invalid JSON is an error tuple" do
+    assert_eq(elem(json_decode("{"), 0), :error)
+    assert_eq(elem(json_decode(""), 0), :error)
+    assert_eq(elem(json_decode("[1,]"), 0), :error)
+    assert_eq(elem(json_decode("nul"), 0), :error)
+    assert_eq(elem(json_decode("1 2"), 0), :error)
+    assert_eq(elem(json_decode("'a'"), 0), :error)
+  end
+
+  test "json_decode error says where" do
+    assert_eq(json_decode("[1,\n  x]"), {:error, "SyntaxError at line 2, column 3"})
+  end
+
+  test "json_decode rejects a non-string" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert(raises("json_decode(42)"))
+  end
+
+  test "json round trip" do
+    v = %{name: "a\"b", n: [1, 2.5, true, nil], nested: %{k: "v"}}
+    assert_eq(json_decode(json_encode(v)), {:ok, v})
+  end
+
+  test "json_decode deep nesting is an error, not a crash" do
+    opens = join(map(range(1, 5000), fn(i: Int) do "[" end), "")
+    closes = join(map(range(1, 5000), fn(i: Int) do "]" end), "")
+    assert_eq(elem(json_decode(concat(opens, closes)), 0), :error)
+  end
+end
+
+# ============================================================
+# Hashing, encoding, randomness
+# ============================================================
+
+actor CryptoTests do
+  # -- sha256 --
+  test "sha256 of empty string" do
+    assert_eq(sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+  end
+
+  test "sha256 of abc" do
+    assert_eq(sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  end
+
+  test "sha256 rejects a non-string" do
+    assert_eq(length(sha256("x")), 64)
+    assert(raises("sha256(42)"))
+    assert(raises("sha256(:abc)"))
+  end
+
+  # -- hmac_sha256 --
+  test "hmac_sha256 known vector" do
+    assert_eq(hmac_sha256("key", "The quick brown fox jumps over the lazy dog"), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+  end
+
+  test "hmac_sha256 key longer than a block is hashed first" do
+    long_key = join(map(range(1, 100), fn(i: Int) do "k" end), "")
+    assert_eq(hmac_sha256(long_key, "m"), "0482265a92ce176b0374f2192380b21e2d40126432c52f865cc0957053ae7a14")
+  end
+
+  test "hmac_sha256 rejects non-strings" do
+    assert_eq(length(hmac_sha256("k", "m")), 64)
+    assert(raises("hmac_sha256(\"k\", 1)"))
+    assert(raises("hmac_sha256(nil, \"m\")"))
+  end
+
+  # -- base64 --
+  test "base64_encode pads" do
+    assert_eq(base64_encode(""), "")
+    assert_eq(base64_encode("f"), "Zg==")
+    assert_eq(base64_encode("fo"), "Zm8=")
+    assert_eq(base64_encode("foo"), "Zm9v")
+    assert_eq(base64_encode("hello"), "aGVsbG8=")
+  end
+
+  test "base64_encode uses + and /" do
+    assert_eq(base64_encode(concat(from_char_code(251), from_char_code(255))), "+/8=")
+  end
+
+  test "base64_decode round trips" do
+    assert_eq(base64_decode("aGVsbG8="), "hello")
+    assert_eq(base64_decode(""), "")
+    assert_eq(base64_decode("+/8="), concat(from_char_code(251), from_char_code(255)))
+  end
+
+  test "base64_decode rejects invalid input" do
+    assert_eq(base64_decode("Zg=="), "f")
+    assert(raises("base64_decode(\"Zg\")"))
+    assert(raises("base64_decode(\"Z!==\")"))
+    assert(raises("base64_decode(\"-_8=\")"))
+    assert(raises("base64_decode(42)"))
+  end
+
+  # -- base64url --
+  test "base64url_encode has no padding and uses - and _" do
+    assert_eq(base64url_encode(concat(from_char_code(251), from_char_code(255))), "-_8")
+    assert_eq(base64url_encode("f"), "Zg")
+    assert_eq(base64url_encode(""), "")
+  end
+
+  test "base64url_decode round trips" do
+    assert_eq(base64url_decode("-_8"), concat(from_char_code(251), from_char_code(255)))
+    assert_eq(base64url_decode("aGVsbG8"), "hello")
+  end
+
+  test "base64url_decode rejects padding and the standard alphabet" do
+    assert_eq(base64url_decode("Zg"), "f")
+    assert(raises("base64url_decode(\"Zg==\")"))
+    assert(raises("base64url_decode(\"+/8\")"))
+    assert(raises("base64url_decode(\"Z\")"))
+  end
+
+  # -- hex_encode --
+  test "hex_encode lowercase" do
+    assert_eq(hex_encode(concat(from_char_code(0), from_char_code(255), "A")), "00ff41")
+    assert_eq(hex_encode(""), "")
+  end
+
+  test "hex_encode rejects a non-string" do
+    assert_eq(hex_encode("a"), "61")
+    assert(raises("hex_encode([1, 2])"))
+  end
+
+  # -- el --
+  test "el renders as its own markup, attributes escaped, host instructions left out" do
+    v = el("div", %{class: "board board-8", "data-n": 3, click: :go, with: 8}, el("input", %{type: "checkbox", checked: true, disabled: false, value: "a\"<b>"}), "x < y")
+    assert_eq(to_html(v), "<div class=\"board board-8\" data-n=\"3\"><input type=\"checkbox\" checked value=\"a&quot;&lt;b&gt;\">x &lt; y</div>")
+  end
+
+  test "el refuses a tag it does not make, an on* attribute and a javascript: URL" do
+    assert(raises("el(\"script\", %{}, \"x\")"))
+    assert(raises("el(\"iframe\", %{src: \"/\"})"))
+    assert(raises("el(\"a\", %{onclick: \"x\"})"))
+    assert(raises("el(\"a\", %{\"OnMouseOver\": \"x\"})"))
+    assert(raises("el(\"a\", %{href: \" \\tJavaScript:alert(1)\"})"))
+    assert(raises("el(\"div\", %{class: [1]})"))
+    assert_eq(to_html(el("a", %{href: "/x?a=1&b=2"}, "ok")), "<a href=\"/x?a=1&amp;b=2\">ok</a>")
+  end
+
+  test "fetch takes a path on the page's own server, nothing else" do
+    assert_eq(to_html(el("div", %{}, fetch("/a.json", :got))), "<div></div>")
+    assert(raises("fetch(\"https://evil.example/x\", :got)"))
+    assert(raises("fetch(\"//evil.example/x\", :got)"))
+    assert(raises("fetch(\"/a\", \"got\")"))
+    assert_eq(to_html(el("div", %{}, location_query("a=1"))), "<div></div>")
+  end
+
+  test "http_start refuses what is not an http(s) request, and http_result a handle not in flight" do
+    assert(raises("http_start(\"GET\", \"file:///etc/passwd\", %{}, \"\")"))
+    assert(raises("http_start(\"FETCH\", \"https://example.com/\", %{}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"Accept\": 1}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"X-A\": \"a\\r\\nX-Injected: 1\"}, \"\")"))
+    assert(raises("http_result(31)"))
+    assert(raises("http_result(99)"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout: 5})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout_ms: 0})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{max_redirects: 21})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", 5)"))
+  end
+
+  test "tcp_write_some and tcp_poll_write: a count, never a wait; misuse raises" do
+    l = tcp_listen(47311)
+    c = tcp_connect("127.0.0.1", 47311)
+    s = tcp_accept(l)
+    assert_eq(tcp_write_some(s, ""), 0)
+    assert_eq(tcp_write_some(s, "hello"), 5)
+    assert_eq(tcp_poll_write([s], 0), [s])
+    assert_eq(tcp_read(c), "hello")
+    tcp_close(c)
+    tcp_close(s)
+    tcp_close(l)
+    assert(raises("tcp_write_some(-1, \"x\")"))
+    assert(raises("tcp_write_some(1, 2)"))
+    assert(raises("tcp_poll_write(3, 0)"))
+    assert(raises("tcp_poll_write([\"a\"], 0)"))
+  end
+
+  test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
+    assert(raises("ws_open(\"https://example.com/\", %{})"))
+    assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": 1})"))
+    assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": \"a\\r\\nInjected: 1\"})"))
+    assert(raises("ws_recv(3)"))
+    assert(raises("ws_recv(12345)"))
+    assert(raises("ws_send(12345, \"hi\")"))
+    assert(raises("ws_close(12345)"))
+    assert(raises("ws_stats(12345)"))
+  end
+
+  # -- hex_decode --
+  test "hex_decode undoes hex_encode, either case" do
+    raw = concat(from_char_code(0), from_char_code(255), "A")
+    assert_eq(hex_decode(hex_encode(raw)), raw)
+    assert_eq(hex_decode("00FF41"), raw)
+    assert_eq(hex_decode(""), "")
+    assert_eq(length(hex_decode(sha256("abc"))), 32)
+  end
+
+  test "hex_decode rejects an odd length and a non-digit" do
+    assert(raises("hex_decode(\"abc\")"))
+    assert(raises("hex_decode(\"zz\")"))
+    assert(raises("hex_decode(12)"))
+  end
+
+  # -- xor_bytes --
+  test "xor_bytes XORs byte by byte" do
+    assert_eq(hex_encode(xor_bytes(hex_decode("0ff0aa"), hex_decode("ff0f55"))), "f0ffff")
+    a = hex_decode(sha256("a"))
+    assert_eq(xor_bytes(xor_bytes(a, hex_decode(sha256("b"))), hex_decode(sha256("b"))), a)
+    assert_eq(xor_bytes("", ""), "")
+  end
+
+  test "xor_bytes rejects unequal lengths" do
+    assert(raises("xor_bytes(\"ab\", \"a\")"))
+  end
+
+  # -- random_bytes / random_token --
+  test "random_bytes answers n bytes" do
+    assert_eq(length(random_bytes(16)), 16)
+    assert_eq(random_bytes(0), "")
+  end
+
+  test "random_bytes differ between calls" do
+    assert_ne(random_bytes(32), random_bytes(32))
+  end
+
+  test "random_bytes does not move the seeded random" do
+    seed(7)
+    a = random(1, 1000000)
+    seed(7)
+    random_bytes(8)
+    assert_eq(random(1, 1000000), a)
+  end
+
+  test "random_bytes rejects a negative or non-integer count" do
+    assert_eq(length(random_bytes(1)), 1)
+    assert(raises("random_bytes(-1)"))
+    assert(raises("random_bytes(\"4\")"))
+  end
+
+  test "random_token is url-safe base64 of n bytes" do
+    t = random_token(32)
+    assert_eq(length(t), 43)
+    assert_eq(length(base64url_decode(t)), 32)
+    refute(contains(t, "="))
+    refute(contains(t, "+"))
+    refute(contains(t, "/"))
+  end
+
+  test "random_token rejects a negative count" do
+    assert_eq(length(random_token(3)), 4)
+    assert(raises("random_token(-1)"))
+  end
+end
+
+# ============================================================
+# Environment and file system
+# (paths are relative to chunks/lang, where the suite is run from)
+# ============================================================
+
+def repeat(s: String, n: Int) -> String do
+  join(map(range(1, n), fn(i: Int) do s end), "")
+end
+
+actor SystemTests do
+  # -- getenv --
+  test "getenv reads a set variable" do
+    home = getenv("PATH")
+    assert_eq(type_of(home), :string)
+    assert(length(home) > 0)
+  end
+
+  test "getenv of an unset variable is nil" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+  end
+
+  test "getenv rejects a non-string and an embedded NUL" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+    assert(raises("getenv(:PATH)"))
+    assert(raises("getenv(concat(\"PA\", from_char_code(0), \"TH\"))"))
+  end
+
+  # -- argv --
+  test "argv is the process's arguments as strings" do
+    args = argv()
+    assert(length(args) >= 3)
+    assert(contains(elem(args, 1), "builtin_test.blimp"))
+    assert_eq(elem(args, 2), "--test")
+  end
+
+  test "argv takes no arguments" do
+    assert_eq(type_of(argv()), :list)
+    assert(raises("argv(1)"))
+  end
+
+  # -- list_dir --
+  test "list_dir answers entry names" do
+    names = list_dir("lib")
+    assert(length(filter(names, fn(n: String) do n == "builtin_test.blimp" end)) == 1)
+    assert_eq(length(filter(names, fn(n: String) do n == "." or n == ".." end)), 0)
+  end
+
+  test "list_dir is sorted by bytes" do
+    names = list_dir("lib")
+    assert(length(names) > 3)
+    assert_eq(names, sort(names))
+  end
+
+  test "list_dir of a missing directory or a file is nil" do
+    assert_eq(type_of(list_dir("lib")), :list)
+    assert_eq(list_dir("lib/no_such_dir_here"), nil)
+    assert_eq(list_dir("lib/builtin_test.blimp"), nil)
+  end
+
+  test "list_dir rejects a non-string" do
+    assert_eq(type_of(list_dir(".")), :list)
+    assert(raises("list_dir(nil)"))
+  end
+
+  # -- file_exists? --
+  test "file_exists? for a file, a directory and nothing" do
+    assert_eq(file_exists?("lib/builtin_test.blimp"), true)
+    assert_eq(file_exists?("lib"), true)
+    assert_eq(file_exists?("lib/no_such_file_here"), false)
+    assert(raises("file_exists?(1)"))
+  end
+
+  # -- file_size --
+  test "file_size of a file just written" do
+    assert(write_file("/tmp/blimp_file_size_test.txt", "hello, size"))
+    assert_eq(file_size("/tmp/blimp_file_size_test.txt"), 11)
+  end
+
+  test "file_size of a missing file or a directory is nil" do
+    assert_eq(file_size("lib/no_such_file_here"), nil)
+    assert_eq(file_size("lib"), nil)
+    assert(raises("file_size(1)"))
+  end
+
+  # -- read_file --
+  test "read_file reads more than 1 MiB" do
+    kib = repeat("abcdefgh", 128)
+    big = repeat(kib, 2048)
+    assert_eq(length(big), 2097152)
+    assert(write_file("/tmp/blimp_read_file_big_test.txt", big))
+    got = read_file("/tmp/blimp_read_file_big_test.txt")
+    assert_eq(length(got), 2097152)
+    assert(got == big)
+  end
+end
+
+# ============================================================
+# format_time (UTC). Expected values from Python's
+# datetime.fromtimestamp(t, timezone.utc).strftime(...)
+# ============================================================
+
+actor TimeTests do
+  test "format_time epoch zero" do
+    assert_eq(format_time(0, "%Y-%m-%d %H:%M:%S"), "1970-01-01 00:00:00")
+    assert_eq(format_time(0, "%A %a %B %b %j"), "Thursday Thu January Jan 001")
+  end
+
+  test "format_time a known afternoon" do
+    assert_eq(format_time(1790699821, "%Y-%m-%d %H:%M:%S %Z"), "2026-09-29 16:37:01 UTC")
+    assert_eq(format_time(1790699821, "%a, %d %b %Y %H:%M:%S GMT"), "Tue, 29 Sep 2026 16:37:01 GMT")
+    assert_eq(format_time(1790699821, "%I:%M %p, %A %B %d (day %j)"), "04:37 PM, Tuesday September 29 (day 272)")
+  end
+
+  test "format_time leap days" do
+    assert_eq(format_time(1709164800, "%Y-%m-%d %A %j"), "2024-02-29 Thursday 060")
+    assert_eq(format_time(951782400, "%Y-%m-%d %A %j"), "2000-02-29 Tuesday 060")
+    assert_eq(format_time(1735603200, "%Y-%m-%d %j"), "2024-12-31 366")
+  end
+
+  test "format_time 1900 was not a leap year" do
+    assert_eq(format_time(-2203891200, "%Y-%m-%d %A %j"), "1900-03-01 Thursday 060")
+  end
+
+  test "format_time before the epoch" do
+    assert_eq(format_time(-1, "%Y-%m-%d %H:%M:%S %I %p %A %j"), "1969-12-31 23:59:59 11 PM Wednesday 365")
+  end
+
+  test "format_time far future" do
+    assert_eq(format_time(253402300799, "%Y-%m-%d %H:%M:%S %A"), "9999-12-31 23:59:59 Friday")
+  end
+
+  test "format_time 12-hour clock at midnight and noon" do
+    assert_eq(format_time(0, "%I %p"), "12 AM")
+    assert_eq(format_time(43200, "%I %p"), "12 PM")
+    assert_eq(format_time(46800, "%I %p"), "01 PM")
+  end
+
+  test "format_time minus flag drops the zero padding" do
+    assert_eq(format_time(1704067200, "%B %-d, %Y"), "January 1, 2024")
+    assert_eq(format_time(1704067200, "%-m/%-d %-I%p %-j"), "1/1 12AM 1")
+  end
+
+  test "format_time percent literal and plain text" do
+    assert_eq(format_time(0, "100%% at %Y"), "100% at 1970")
+    assert_eq(format_time(0, ""), "")
+    assert_eq(format_time(0, "no directives"), "no directives")
+  end
+
+  test "format_time rejects unknown directives" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(0, \"%Q\")"))
+    assert(raises("format_time(0, \"trailing %\")"))
+    assert(raises("format_time(0, \"%-Y\")"))
+  end
+
+  test "format_time rejects bad arguments" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(1.5, \"%Y\")"))
+    assert(raises("format_time(\"0\", \"%Y\")"))
+    assert(raises("format_time(0, :iso)"))
+  end
+
+  test "format_time of now() is this century" do
+    assert_eq(slice(format_time(now(), "%Y"), 0, 2), "20")
+  end
+end
+
+# ============================================================
+# sort at scale, and sorting by a key
+# ============================================================
+
+# What sort_by(list, f) is until the evaluator can call a closure from a
+# builtin: the keys are computed by map, which can, and sorted by the
+# builtin, which is stable.
+def sort_by(xs: List, f: Function) -> List do
+  sort_by_keys(xs, map(xs, f))
+end
+
+actor SortTests do
+  test "sort 100k descending ints in well under a second" do
+    xs = reverse(range(1, 100000))
+    t0 = now_ms()
+    ys = sort(xs)
+    elapsed = now_ms() - t0
+    assert_eq(head(ys), 1)
+    assert_eq(elem(ys, 99999), 100000)
+    assert(elapsed < 2000)
+  end
+
+  test "sort 100k strings" do
+    xs = reverse(map(range(100000, 199999), fn(i: Int) do to_string(i) end))
+    t0 = now_ms()
+    ys = sort(xs)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), "100000")
+    assert_eq(elem(ys, 99999), "199999")
+  end
+
+  test "sort keeps duplicates" do
+    assert_eq(sort([3, 1, 3, 2, 1, 3]), [1, 1, 2, 3, 3, 3])
+  end
+
+  test "sort negative and float mix" do
+    assert_eq(sort([0.5, -2, 3, -2.5, 0]), [-2.5, -2, 0, 0.5, 3])
+  end
+
+  test "sort strings by bytes, uppercase first" do
+    assert_eq(sort(["b", "B", "a", "A", ""]), ["", "A", "B", "a", "b"])
+  end
+
+  test "sort rejects a mix and other types" do
+    assert_eq(sort([2, 1]), [1, 2])
+    assert(raises("sort([1, \"a\"])"))
+    assert(raises("sort([:b, :a])"))
+    assert(raises("sort([[2], [1]])"))
+    assert(raises("sort(\"ba\")"))
+  end
+
+  test "sort rejects NaN" do
+    assert_eq(sort([2.0, 1.0]), [1.0, 2.0])
+    assert(raises("sort([1.0, sqrt(-1.0), 0.5])"))
+  end
+
+  # -- sort_by_keys --
+  test "sort_by_keys orders items by their keys" do
+    assert_eq(sort_by_keys(["pear", "fig", "apple"], [4, 3, 5]), ["fig", "pear", "apple"])
+  end
+
+  test "sort_by_keys is stable" do
+    items = [{:a, 2}, {:b, 1}, {:c, 2}, {:d, 1}, {:e, 2}]
+    assert_eq(sort_by_keys(items, [2, 1, 2, 1, 2]), [{:b, 1}, {:d, 1}, {:a, 2}, {:c, 2}, {:e, 2}])
+  end
+
+  test "sort_by_keys with string keys" do
+    assert_eq(sort_by_keys([1, 2, 3], ["c", "a", "b"]), [2, 3, 1])
+  end
+
+  test "sort_by_keys rejects mismatched lengths and bad keys" do
+    assert_eq(sort_by_keys([1], [1]), [1])
+    assert(raises("sort_by_keys([1, 2], [1])"))
+    assert(raises("sort_by_keys([1, 2], [1, \"a\"])"))
+    assert(raises("sort_by_keys([1, 2], [nil, nil])"))
+    assert(raises("sort_by_keys([1, 2], [1.0, sqrt(-1.0)])"))
+  end
+
+  test "sort_by via a user def and map" do
+    posts = [%{title: "b", date: "2025-06-01"}, %{title: "a", date: "2024-01-09"}, %{title: "c", date: "2026-01-01"}]
+    sorted = sort_by(posts, fn(p: Map) do lookup(p, "date") end)
+    assert_eq(map(sorted, fn(p: Map) do lookup(p, "title") end), ["a", "b", "c"])
+  end
+
+  test "sort_by_keys 100k in well under a second" do
+    xs = range(1, 100000)
+    keys = map(xs, fn(i: Int) do 0 - i end)
+    t0 = now_ms()
+    ys = sort_by_keys(xs, keys)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), 100000)
+  end
+end
+
+# ============================================================
 # index_of / replace
 # (test/shadow_builtin_test.blimp checks a user def still wins)
 # ============================================================
@@ -1245,6 +1960,12 @@ actor SearchReplaceTests do
     i = index_of(s, "!")
     assert_eq(i, 5)
     assert_eq(slice(s, i, 1), "!")
+  end
+
+  test "index_of rejects non-strings" do
+    assert_eq(index_of("a", "a"), 0)
+    assert(raises("index_of([1, 2], 2)"))
+    assert(raises("index_of(\"abc\", :b)"))
   end
 
   # -- replace --
@@ -1276,5 +1997,159 @@ actor SearchReplaceTests do
     s = "<a href=\"x\">&</a>"
     out = replace(replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
     assert_eq(out, "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;")
+  end
+
+  test "replace rejects an empty find and non-strings" do
+    assert_eq(replace("a", "a", "b"), "b")
+    assert(raises("replace(\"abc\", \"\", \"x\")"))
+    assert(raises("replace(\"abc\", \"b\", 1)"))
+    assert(raises("replace(:abc, \"b\", \"x\")"))
+  end
+end
+
+# ============================================================
+# P-256 and AES-128-GCM: what Web Push (RFC 8291/8292) needs.
+# Every String here is raw bytes; hex_decode/base64url_decode make them.
+# slice(s, start, len) takes a length, not an end.
+# ============================================================
+
+# RFC 8291 Appendix A inputs.
+def rfc8291_as_private() -> String do
+  base64url_decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")
+end
+
+def rfc8291_as_public() -> String do
+  base64url_decode("BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8")
+end
+
+def rfc8291_ua_private() -> String do
+  base64url_decode("q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94")
+end
+
+def rfc8291_ua_public() -> String do
+  base64url_decode("BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")
+end
+
+# The P-256 group order n: the first scalar that is not a private key.
+def p256_order() -> String do
+  hex_decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+end
+
+def zeros(n: Int) -> String do
+  hex_decode(join(map(range(1, n), fn(i: Int) do "00" end), ""))
+end
+
+actor P256Tests do
+  test "p256_public_key reproduces both RFC 8291 key pairs" do
+    assert_eq(p256_public_key(rfc8291_as_private()), rfc8291_as_public())
+    assert_eq(p256_public_key(rfc8291_ua_private()), rfc8291_ua_public())
+  end
+
+  test "p256_ecdh is the RFC 8291 ecdh_secret from either side" do
+    expected = base64url_decode("kyrL1jIIOHEzg3sM2ZWRHDRB62YACZhhSlknJ672kSs")
+    assert_eq(p256_ecdh(rfc8291_as_private(), rfc8291_ua_public()), expected)
+    assert_eq(p256_ecdh(rfc8291_ua_private(), rfc8291_as_public()), expected)
+  end
+
+  test "p256_keypair is a fresh 32-byte scalar and its 65-byte point" do
+    k1 = p256_keypair()
+    k2 = p256_keypair()
+    assert_eq(length(elem(k1, 0)), 32)
+    assert_eq(length(elem(k1, 1)), 65)
+    assert_eq(slice(elem(k1, 1), 0, 1), hex_decode("04"))
+    assert_eq(p256_public_key(elem(k1, 0)), elem(k1, 1))
+    assert_ne(elem(k1, 0), elem(k2, 0))
+    assert_eq(p256_ecdh(elem(k1, 0), elem(k2, 1)), p256_ecdh(elem(k2, 0), elem(k1, 1)))
+  end
+
+  test "a private key must be a 32-byte scalar in [1, n)" do
+    assert(raises("p256_public_key(\"short\")"))
+    assert(raises("p256_public_key(hex_decode(\"0000000000000000000000000000000000000000000000000000000000000000\"))"))
+    assert(raises("p256_public_key(hex_decode(\"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551\"))"))
+    assert(raises("p256_public_key(42)"))
+  end
+
+  test "p256_ecdh refuses a peer key that is not a point on the curve" do
+    good = rfc8291_ua_public()
+    # flip the last byte of y: still 65 bytes, no longer on the curve
+    bad = slice(good, 0, 64) ++ xor_bytes(slice(good, 64, 1), hex_decode("01"))
+    assert_eq(length(bad), 65)
+    assert(raises("p256_ecdh(base64url_decode(\"yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw\"), base64url_decode(\"" ++ base64url_encode(bad) ++ "\"))"))
+    # a 33-byte compressed point is not what Web Push sends; say so
+    assert(raises("p256_ecdh(base64url_decode(\"yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw\"), \"" ++ "x" ++ "\")"))
+  end
+
+  test "ecdsa_p256_sign makes a 64-byte r||s that ecdsa_p256_verify accepts" do
+    sig = ecdsa_p256_sign(rfc8291_as_private(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0")
+    assert_eq(length(sig), 64)
+    assert(ecdsa_p256_verify(rfc8291_as_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0", sig))
+    refute(ecdsa_p256_verify(rfc8291_as_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ5In0", sig))
+    refute(ecdsa_p256_verify(rfc8291_ua_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0", sig))
+  end
+
+  test "ecdsa_p256_sign is deterministic: same key and message, same signature" do
+    assert_eq(ecdsa_p256_sign(rfc8291_as_private(), "m"), ecdsa_p256_sign(rfc8291_as_private(), "m"))
+    assert_ne(ecdsa_p256_sign(rfc8291_as_private(), "m"), ecdsa_p256_sign(rfc8291_as_private(), "n"))
+  end
+
+  # Wycheproof ecdsa_secp256r1_sha256_p1363_test.json, first group.
+  test "ecdsa_p256_verify agrees with Wycheproof" do
+    pub = hex_decode("042927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c732838c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e")
+    msg = hex_decode("313233343030")
+    # tcId 1, valid
+    assert(ecdsa_p256_verify(pub, msg, hex_decode("2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e184cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76")))
+    # tcId 4, invalid: r replaced by n - r
+    refute(ecdsa_p256_verify(pub, msg, hex_decode("d45c5740946b2a147f59262ee6f5bc90bd01ed280528b62b3aed5fc93f06f739b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db")))
+    # r = 0 and s = 0 are never valid
+    refute(ecdsa_p256_verify(pub, msg, zeros(64)))
+    # r = n: out of range, not reduced to 0
+    refute(ecdsa_p256_verify(pub, msg, p256_order() ++ slice(hex_decode("2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e184cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76"), 32, 32)))
+  end
+
+  test "ecdsa_p256_verify: a signature that is not 64 bytes is an error, not false" do
+    assert(raises("ecdsa_p256_verify(base64url_decode(\"BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8\"), \"m\", \"short\")"))
+    assert(raises("ecdsa_p256_sign(\"short\", \"m\")"))
+  end
+end
+
+actor AesGcmTests do
+  # McGrew & Viega, "The Galois/Counter Mode of Operation", test case 2.
+  test "aes128gcm_encrypt: GCM spec test case 2 (zero key, one zero block)" do
+    out = aes128gcm_encrypt(zeros(16), zeros(12), zeros(16), "")
+    assert_eq(hex_encode(out), "0388dace60b6a392f328c2b971b2fe78" ++ "ab6e47d42cec13bdf53a67b21257bddf")
+  end
+
+  # Test case 4: 60-byte plaintext (not a whole block) and 20 bytes of AAD.
+  test "aes128gcm_encrypt: GCM spec test case 4 (partial block, AAD)" do
+    key = hex_decode("feffe9928665731c6d6a8f9467308308")
+    iv = hex_decode("cafebabefacedbaddecaf888")
+    pt = hex_decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+    aad = hex_decode("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    out = aes128gcm_encrypt(key, iv, pt, aad)
+    assert_eq(hex_encode(out), "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091" ++ "5bc94fbc3221a5db94fae95ae7121a47")
+    assert_eq(aes128gcm_decrypt(key, iv, out, aad), pt)
+  end
+
+  test "aes128gcm_decrypt answers nil for a forged tag, a changed byte or other AAD" do
+    key = hex_decode("feffe9928665731c6d6a8f9467308308")
+    iv = hex_decode("cafebabefacedbaddecaf888")
+    out = aes128gcm_encrypt(key, iv, "attack at dawn", "hdr")
+    assert_eq(aes128gcm_decrypt(key, iv, out, "hdr"), "attack at dawn")
+    assert_eq(aes128gcm_decrypt(key, iv, out, "HDR"), nil)
+    flipped = xor_bytes(slice(out, 0, 1), hex_decode("01")) ++ slice(out, 1, length(out) - 1)
+    assert_eq(aes128gcm_decrypt(key, iv, flipped, "hdr"), nil)
+    assert_eq(aes128gcm_decrypt(key, iv, slice(out, 0, length(out) - 1) ++ "x", "hdr"), nil)
+  end
+
+  test "aes128gcm: the empty plaintext is just the tag" do
+    assert_eq(hex_encode(aes128gcm_encrypt(zeros(16), zeros(12), "", "")), "58e2fccefa7e3061367f1d57a4e7455a")
+    assert_eq(aes128gcm_decrypt(zeros(16), zeros(12), hex_decode("58e2fccefa7e3061367f1d57a4e7455a"), ""), "")
+  end
+
+  test "aes128gcm: wrong-length key, nonce or a ciphertext shorter than a tag is an error" do
+    assert(raises("aes128gcm_encrypt(\"0123456789abcde\", \"0123456789ab\", \"p\", \"\")"))
+    assert(raises("aes128gcm_encrypt(\"0123456789abcdef\", \"0123456789a\", \"p\", \"\")"))
+    assert(raises("aes128gcm_decrypt(\"0123456789abcdef\", \"0123456789ab\", \"short\", \"\")"))
+    assert(raises("aes128gcm_encrypt(\"0123456789abcdef\", \"0123456789ab\", 1, \"\")"))
   end
 end

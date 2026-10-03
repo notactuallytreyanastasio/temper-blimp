@@ -20,6 +20,12 @@ const ioenv = @import("ioenv.zig");
 /// ever touched.
 const eval_stack_bytes = 512 * 1024 * 1024;
 
+/// The largest program file blimp reads. It was 1 MiB, and bobbby.online's
+/// server program passed that once /blinks moved in (1.28 MB), so every run
+/// stopped with "error.StreamTooLong" before parsing a line. Same as
+/// read_file's ceiling in builtins.zig.
+pub const source_file_max = 64 * 1024 * 1024;
+
 /// zig 0.16 stopped letting a program help itself to argv: `main` is handed a
 /// capability instead, and `std.process.argsAlloc` is gone.  The vector is
 /// passed down to the worker thread because it is the thread that reads it.
@@ -70,6 +76,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     // source, the argv and the ASTs do not: the ceiling is about the program's
     // appetite, not the tool's.
     var heap_limit = HeapLimit.fromEnv(allocator, environ);
+    @import("heap_limit.zig").current = &heap_limit;
     const program_heap = heap_limit.allocator();
 
     // Check for --repl flag
@@ -87,6 +94,25 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         } else {
             replPlain(allocator, &heap_limit, preload);
         }
+        return;
+    }
+
+    // blimp --serve site.blimp --tick "server <- :tick" [--control PATH]
+    // Run one program for as long as the process lives: boot the file once,
+    // then evaluate the tick forever, collecting garbage between ticks and
+    // taking code from a control socket. See `serve` below.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--serve")) {
+        const opts = parseServeArgs(args) orelse {
+            std.debug.print("usage: blimp --serve FILE --tick EXPR [--control PATH]\n", .{});
+            std.process.exit(2);
+        };
+        serve(allocator, &heap_limit, opts);
+        return;
+    }
+
+    // blimp --attach [PATH]: a prompt on a running --serve program.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--attach")) {
+        attach(allocator, if (args.len >= 3) args[2] else default_control_path);
         return;
     }
 
@@ -108,8 +134,10 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         return;
     }
 
-    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, args[1], allocator, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("Error reading '{s}': {}\n", .{ args[1], err });
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, args[1], allocator, .limited(source_file_max)) catch |err| {
+        if (err == error.StreamTooLong) {
+            std.debug.print("Error reading '{s}': larger than {d} bytes, the most blimp reads\n", .{ args[1], source_file_max });
+        } else std.debug.print("Error reading '{s}': {}\n", .{ args[1], err });
         std.process.exit(1);
     };
     defer allocator.free(source);
@@ -177,9 +205,13 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         return;
     }
 
-    // Default: evaluate the file
+    // Default: evaluate the file. --trace streams one line per spawn, send,
+    // cast and state change to stderr (scripts/trace_receipt.py reads it).
     var evaluator = Evaluator.init(arena.allocator());
     evaluator.setSource(source);
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--trace")) {
+        evaluator.trace_fn = traceToStderr;
+    }
     // Store the absolute path so the Hole operator can patch the source file
     // `realpathAlloc` is gone from the Dir API; libc's realpath still answers
     // the same question, and the Hole operator only needs something it can
@@ -426,8 +458,16 @@ fn countDepthChange(line: []const u8) i32 {
     while (i < line.len) {
         const c = line[i];
         // Brackets, parens, braces all contribute to depth
-        if (c == '[' or c == '(' or c == '{') { delta += 1; i += 1; continue; }
-        if (c == ']' or c == ')' or c == '}') { delta -= 1; i += 1; continue; }
+        if (c == '[' or c == '(' or c == '{') {
+            delta += 1;
+            i += 1;
+            continue;
+        }
+        if (c == ']' or c == ')' or c == '}') {
+            delta -= 1;
+            i += 1;
+            continue;
+        }
         // Skip whitespace
         if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
             i += 1;
@@ -524,12 +564,19 @@ const ValueHeap = struct {
     /// A failed copy leaves the evaluator on the heap it already has, so the
     /// session keeps working and merely keeps the garbage.
     fn compact(self: *ValueHeap, eval: *Evaluator) void {
+        _ = self.compactWith(eval, .keep_all);
+    }
+
+    /// The same, saying how many unreachable actors it dropped (always 0
+    /// with .keep_all, and when the copy fails).
+    fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
         const next = 1 - self.live;
-        gc.compact(eval, self.halves[next].allocator(), self.scratch) catch return;
+        const dropped = gc.compactWith(eval, self.halves[next].allocator(), self.scratch, actors) catch return 0;
         _ = self.halves[self.live].reset(.free_all);
         self.live = next;
         // Its details have already been formatted for the user.
         eval.last_error = null;
+        return dropped;
     }
 };
 
@@ -551,8 +598,10 @@ fn preloadInto(
 ) void {
     // Same ceiling as a file run directly, so the two entry points accept the
     // same files.
-    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("Error reading '{s}': {}\n", .{ path, err });
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(source_file_max)) catch |err| {
+        if (err == error.StreamTooLong) {
+            std.debug.print("Error reading '{s}': larger than {d} bytes, the most blimp reads\n", .{ path, source_file_max });
+        } else std.debug.print("Error reading '{s}': {}\n", .{ path, err });
         std.process.exit(1);
     };
     preloadSource(arena, evaluator, writer, source) catch std.process.exit(1);
@@ -614,6 +663,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
     defer heap.deinit();
 
     var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
@@ -654,7 +704,10 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
             var is_comment = false;
             for (line) |ch| {
                 if (ch == ' ' or ch == '\t') continue;
-                if (ch == '#') { is_comment = true; break; }
+                if (ch == '#') {
+                    is_comment = true;
+                    break;
+                }
                 break;
             }
             if (is_comment) continue;
@@ -761,7 +814,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
 
             // Print actor instances
             for (evaluator.registry.instances.items) |instance| {
-                stdout.print("  │ {s}#{d} = %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+                stdout.print("  │ {s}#{d} = %{{", .{ instance.ref.type_name, instance.ref.id }) catch {};
                 for (instance.state_fields, 0..) |field, i| {
                     if (i > 0) stdout.writeAll(", ") catch {};
                     stdout.print("{s}: ", .{field.key}) catch {};
@@ -815,7 +868,7 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
     };
 
     for (lib_files) |lib_path| {
-        const lib_source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, lib_path, gpa, .limited(1024 * 1024)) catch {
+        const lib_source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, lib_path, gpa, .limited(source_file_max)) catch {
             stderr.writeStreamingAll(ioenv.io, "Failed to load: ") catch {};
             stderr.writeStreamingAll(ioenv.io, lib_path) catch {};
             stderr.writeStreamingAll(ioenv.io, "\n") catch {};
@@ -924,7 +977,7 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
         stderr.writeStreamingAll(ioenv.io, filename) catch {};
         stderr.writeStreamingAll(ioenv.io, "\x1b[0m\n") catch {};
 
-        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, full_path, allocator, .limited(1024 * 1024)) catch {
+        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, full_path, allocator, .limited(source_file_max)) catch {
             stderr.writeStreamingAll(ioenv.io, "  \x1b[31mfailed to read file\x1b[0m\n") catch {};
             any_failed = true;
             continue;
@@ -972,6 +1025,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
     defer heap.deinit();
 
     var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
@@ -1198,7 +1252,7 @@ fn drawScreen(
     for (evaluator.registry.instances.items) |instance| {
         if (current_row >= content_rows) break;
         moveCursor(writer, current_row, left_cols + 3);
-        writer.print("\x1b[35m{s}#{d}\x1b[0m \x1b[90m=\x1b[0m %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+        writer.print("\x1b[35m{s}#{d}\x1b[0m \x1b[90m=\x1b[0m %{{", .{ instance.ref.type_name, instance.ref.id }) catch {};
 
         // Format state fields inline
         for (instance.state_fields, 0..) |field, i| {
@@ -1310,4 +1364,361 @@ test "preloadSource refuses a file whose top level fails" {
         ),
     );
     try std.testing.expect(evaluator.env.lookup("f") != null);
+}
+
+
+// ── blimp --serve ────────────────────────────────────────────
+//
+// A program that serves a website has to live for as long as the site does,
+// and the evaluator frees nothing on its own: a loop written in Blimp keeps
+// every request's garbage (measured on the blog: 0.86MB a request). The REPL
+// already knows the way out. Between two top-level evals nothing on the Zig
+// stack points at a value, so the heap can be compacted then.
+//
+// So the loop lives here, in Zig. The file is evaluated once (boot); then
+// `tick`, an expression such as `server <- :tick`, is evaluated at top level
+// again and again, and the program does one bounded piece of work per tick
+// (poll its sockets with a timeout, answer what is ready, return). Between
+// ticks this loop:
+//
+//   - puts the environment and the actor context back to top level, so a
+//     tick that failed half-way leaves nothing behind;
+//   - empties the message log, which otherwise fills once and stays full;
+//   - compacts when the heap has grown by as much as what survived the last
+//     compaction (and at least 16MB), not after every tick: a compaction
+//     costs time in proportion to what is live;
+//   - answers the control socket, where each message is Blimp source,
+//     evaluated at top level like a REPL line. That is how a person, or a
+//     tool, redefines part of the site while it runs.
+//
+// The control socket is a Unix socket, 0600, so reaching it means being on
+// the machine as that user. There is no other authentication.
+
+const default_control_path = "blimp.sock";
+
+const ServeOpts = struct {
+    path: []const u8,
+    tick: []const u8,
+    control: []const u8,
+};
+
+fn parseServeArgs(args: []const [:0]const u8) ?ServeOpts {
+    var opts = ServeOpts{ .path = "", .tick = "", .control = default_control_path };
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--tick") and i + 1 < args.len) {
+            i += 1;
+            opts.tick = args[i];
+        } else if (std.mem.eql(u8, a, "--control") and i + 1 < args.len) {
+            i += 1;
+            opts.control = args[i];
+        } else if (opts.path.len == 0) {
+            opts.path = a;
+        } else return null;
+    }
+    if (opts.path.len == 0 or opts.tick.len == 0) return null;
+    return opts;
+}
+
+const ServeStats = struct {
+    ticks: u64 = 0,
+    errors: u64 = 0,
+    compactions: u64 = 0,
+    compact_ms: i64 = 0,
+    live_after_compact: usize = 0,
+    actors_dropped: u64 = 0,
+    started_ms: i64 = 0,
+};
+
+fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) void {
+    // Source text and ASTs: the file, the tick, and everything the control
+    // socket is sent. They outlive every compaction.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var heap = ValueHeap.init(heap_limit.allocator());
+    defer heap.deinit();
+
+    var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
+
+    var err_buf: [4096]u8 = undefined;
+    var err_writer = std.Io.File.stderr().writer(ioenv.io, &err_buf);
+    const errw = &err_writer.interface;
+
+    preloadInto(arena.allocator(), &evaluator, errw, opts.path);
+
+    var tick_parser = Parser.init(arena.allocator(), opts.tick);
+    const tick = tick_parser.parseStatementPublic() catch {
+        std.debug.print("[serve] cannot parse the tick: {s}\n", .{opts.tick});
+        std.process.exit(2);
+    };
+
+    // A browser that goes away while a page is being written turns the next
+    // write into SIGPIPE, whose default is to end the process: the whole
+    // site, for one closed tab. Ignored, the write returns an error instead,
+    // which tcp_write reports as :error.
+    const ignore = std.posix.Sigaction{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
+
+    var stats = ServeStats{ .started_ms = nowMillis() };
+    serveResetToTop(&evaluator);
+    stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
+    stats.live_after_compact = heap_limit.used;
+    std.debug.print("[serve] booted {s}; live heap {d} bytes; control socket {s}\n", .{ opts.path, heap_limit.used, opts.control });
+
+    var control = Control.open(opts.control);
+    defer control.close();
+
+    while (true) {
+        _ = evaluator.eval(tick) catch {
+            stats.errors += 1;
+            if (evaluator.last_error) |e| e.formatPlain(errw) else errw.print("[serve] tick failed\n", .{}) catch {};
+            errw.flush() catch {};
+            evaluator.last_error = null;
+        };
+        stats.ticks += 1;
+        serveResetToTop(&evaluator);
+
+        control.service(arena.allocator(), &evaluator, heap_limit, &stats);
+        serveResetToTop(&evaluator);
+
+        const grown = heap_limit.used -| stats.live_after_compact;
+        if (grown >= @max(stats.live_after_compact, 16 * 1024 * 1024)) {
+            const c0 = nowMillis();
+            // A served program's only host is the tick, so an actor no value
+            // can name will never get another message: drop it. Temper's
+            // classes are actors, and a page that builds a query from them
+            // made thirty that nothing ever freed.
+            stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
+            stats.compact_ms += nowMillis() - c0;
+            stats.compactions += 1;
+            stats.live_after_compact = heap_limit.used;
+        }
+    }
+}
+
+/// Back to the state a top-level eval starts from: one scope, no actor
+/// running, an empty message log, no pending bubble.
+fn serveResetToTop(evaluator: *Evaluator) void {
+    evaluator.env.popTo(1);
+    evaluator.actor_ctx = null;
+    evaluator.msg_log_count = 0;
+    evaluator.bubble_reason = null;
+    evaluator.bubble_line = 0;
+    evaluator.bubble_col = 0;
+    evaluator.call_depth = 0;
+}
+
+/// The control socket: clients send Blimp source ending in a NUL byte and get
+/// the output back ending in one. A message that starts with ':' is a
+/// command instead (`:stats`).
+const Control = struct {
+    listen_fd: c_int = -1,
+    clients: [8]Client = [_]Client{.{}} ** 8,
+
+    const Client = struct {
+        fd: c_int = -1,
+        buf: std.ArrayListUnmanaged(u8) = .empty,
+    };
+
+    fn open(path: []const u8) Control {
+        var c = Control{};
+        const fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+        if (fd < 0) {
+            std.debug.print("[serve] no control socket: socket() failed\n", .{});
+            return c;
+        }
+        var addr = std.mem.zeroes(std.posix.sockaddr.un);
+        addr.family = std.posix.AF.UNIX;
+        if (path.len >= addr.path.len) {
+            std.debug.print("[serve] no control socket: path too long\n", .{});
+            _ = std.c.close(fd);
+            return c;
+        }
+        @memcpy(addr.path[0..path.len], path);
+        var zpath: [256]u8 = undefined;
+        @memcpy(zpath[0..path.len], path);
+        zpath[path.len] = 0;
+        _ = std.c.unlink(@ptrCast(&zpath)); // a socket left by a previous run
+        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0 or std.c.listen(fd, 4) < 0) {
+            std.debug.print("[serve] no control socket: cannot bind {s}\n", .{path});
+            _ = std.c.close(fd);
+            return c;
+        }
+        _ = std.c.chmod(@ptrCast(&zpath), 0o600);
+        c.listen_fd = fd;
+        return c;
+    }
+
+    fn close(self: *Control) void {
+        for (&self.clients) |*cl| if (cl.fd >= 0) {
+            _ = std.c.close(cl.fd);
+        };
+        if (self.listen_fd >= 0) _ = std.c.close(self.listen_fd);
+    }
+
+    /// Accept, read, and evaluate whatever is ready, without waiting.
+    fn service(self: *Control, code: std.mem.Allocator, evaluator: *Evaluator, heap_limit: *HeapLimit, stats: *ServeStats) void {
+        if (self.listen_fd < 0) return;
+        var pfds: [9]std.posix.pollfd = undefined;
+        pfds[0] = .{ .fd = self.listen_fd, .events = std.posix.POLL.IN, .revents = 0 };
+        for (self.clients, 0..) |cl, i| pfds[i + 1] = .{ .fd = cl.fd, .events = std.posix.POLL.IN, .revents = 0 };
+        const ready = std.posix.poll(&pfds, 0) catch return;
+        if (ready == 0) return;
+
+        if (pfds[0].revents != 0) {
+            const fd = std.c.accept(self.listen_fd, null, null);
+            if (fd >= 0) {
+                for (&self.clients) |*cl| {
+                    if (cl.fd < 0) {
+                        cl.* = .{ .fd = fd };
+                        break;
+                    }
+                } else _ = std.c.close(fd);
+            }
+        }
+
+        for (&self.clients, 0..) |*cl, i| {
+            if (cl.fd < 0 or pfds[i + 1].revents == 0) continue;
+            var chunk: [8192]u8 = undefined;
+            const got = std.c.read(cl.fd, &chunk, chunk.len);
+            if (got <= 0) {
+                _ = std.c.close(cl.fd);
+                cl.buf.deinit(std.heap.page_allocator);
+                cl.* = .{};
+                continue;
+            }
+            cl.buf.appendSlice(std.heap.page_allocator, chunk[0..@intCast(got)]) catch continue;
+            while (std.mem.indexOfScalar(u8, cl.buf.items, 0)) |end| {
+                const msg = code.dupe(u8, cl.buf.items[0..end]) catch return;
+                const rest = cl.buf.items[end + 1 ..];
+                std.mem.copyForwards(u8, cl.buf.items[0..rest.len], rest);
+                cl.buf.shrinkRetainingCapacity(rest.len);
+                var out = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+                defer out.deinit();
+                controlEval(msg, code, evaluator, heap_limit, stats, &out.writer);
+                serveResetToTop(evaluator);
+                out.writer.writeByte(0) catch {};
+                writeAll(cl.fd, out.written());
+            }
+        }
+    }
+};
+
+fn writeAll(fd: c_int, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n <= 0) return;
+        off += @intCast(n);
+    }
+}
+
+fn controlEval(src: []const u8, code: std.mem.Allocator, evaluator: *Evaluator, heap_limit: *HeapLimit, stats: *ServeStats, w: *std.Io.Writer) void {
+    const trimmed = std.mem.trim(u8, src, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, ":stats")) {
+        w.print("ticks {d}, errors {d}, compactions {d} ({d}ms), heap {d} bytes, live after last compaction {d}, actors {d} ({d} unreachable dropped), up {d}s\n", .{
+            stats.ticks, stats.errors, stats.compactions, stats.compact_ms, heap_limit.used, stats.live_after_compact, evaluator.registry.instances.items.len, stats.actors_dropped, @divTrunc(nowMillis() - stats.started_ms, 1000),
+        }) catch {};
+        return;
+    }
+    var parser = Parser.init(code, src);
+    const nodes = parser.parseFilePublic() catch {
+        errors.parseError(src).formatPlain(w);
+        return;
+    };
+    const saved = evaluator.source;
+    evaluator.setSource(src);
+    defer evaluator.setSource(saved);
+    for (nodes) |node| {
+        const v = evaluator.eval(node) catch {
+            if (evaluator.last_error) |e| e.formatPlain(w) else w.writeAll("error\n") catch {};
+            evaluator.last_error = null;
+            return;
+        };
+        w.writeAll("=> ") catch {};
+        v.format(w);
+        w.writeAll("\n") catch {};
+    }
+}
+
+// ── blimp --attach ───────────────────────────────────────────
+//
+// A prompt on a running `--serve` program: read a complete piece of Blimp
+// (lines are gathered until they parse, or until a blank line), send it,
+// print what comes back.
+
+fn attach(allocator: std.mem.Allocator, path: []const u8) void {
+    const fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    var addr = std.mem.zeroes(std.posix.sockaddr.un);
+    addr.family = std.posix.AF.UNIX;
+    if (fd < 0 or path.len >= addr.path.len) {
+        std.debug.print("cannot open a socket for {s}\n", .{path});
+        std.process.exit(1);
+    }
+    @memcpy(addr.path[0..path.len], path);
+    if (std.c.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0) {
+        std.debug.print("nothing is serving on {s}\n", .{path});
+        std.process.exit(1);
+    }
+    const tty = std.c.isatty(std.posix.STDIN_FILENO) != 0;
+    var in_buf: [4096]u8 = undefined;
+    var stdin = std.Io.File.stdin().reader(ioenv.io, &in_buf);
+    var pending: std.ArrayListUnmanaged(u8) = .empty;
+    defer pending.deinit(allocator);
+    if (tty) std.debug.print("attached to {s}. :stats for numbers; Ctrl-D to leave.\n", .{path});
+    while (true) {
+        if (tty) std.debug.print("{s}", .{if (pending.items.len == 0) "site> " else "  ... "});
+        // takeDelimiter consumes the newline itself, and answers a last line
+        // with no newline after it as a line. takeDelimiterExclusive plus a
+        // toss(1) of the newline panicked on exactly that line, since zig 0.16
+        // returns it too and there was no newline to toss: `printf ':stats' |
+        // blimp --attach` crashed instead of asking.
+        const line = (stdin.interface.takeDelimiter('\n') catch break) orelse break;
+        const blank = std.mem.trim(u8, line, " \t\r").len == 0;
+        if (blank and pending.items.len == 0) continue;
+        if (!blank) {
+            pending.appendSlice(allocator, line) catch break;
+            pending.append(allocator, '\n') catch break;
+        }
+        // Send when it parses, or on a blank line (let the server say why not).
+        if (!blank and pending.items[0] != ':' and !parsesWhole(allocator, pending.items)) continue;
+        pending.append(allocator, 0) catch break;
+        writeAll(fd, pending.items);
+        pending.clearRetainingCapacity();
+        // print the reply up to its NUL
+        var got: [8192]u8 = undefined;
+        reply: while (true) {
+            const n = std.c.read(fd, &got, got.len);
+            if (n <= 0) {
+                std.debug.print("the server closed the socket\n", .{});
+                return;
+            }
+            const part = got[0..@intCast(n)];
+            if (std.mem.indexOfScalar(u8, part, 0)) |end| {
+                std.debug.print("{s}", .{part[0..end]});
+                break :reply;
+            }
+            std.debug.print("{s}", .{part});
+        }
+    }
+    if (pending.items.len > 0) {
+        pending.append(allocator, 0) catch return;
+        writeAll(fd, pending.items);
+    }
+}
+
+fn parsesWhole(allocator: std.mem.Allocator, src: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(), src);
+    _ = parser.parseFilePublic() catch return false;
+    return true;
+}
+
+fn traceToStderr(_: ?*anyopaque, line: []const u8) void {
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(ioenv.io, line) catch return;
+    stderr.writeStreamingAll(ioenv.io, "\n") catch {};
 }

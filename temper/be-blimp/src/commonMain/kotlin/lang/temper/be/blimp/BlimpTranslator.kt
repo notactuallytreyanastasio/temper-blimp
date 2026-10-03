@@ -1193,10 +1193,23 @@ internal class BlimpTranslator(
                 true
             }
         }
-        val params = mentioned
+        val ownParams = mentioned
             .filter { it in enclosing }
-            .sortedBy { names.outName(it).outputNameText }
             .map { Blimp.Id(pos, names.outName(it)) }
+        // Not only the names the tail mentions. A path through it can end in
+        // the enclosing loop's `[:fall, carried...]` or `[:escape, carried...]`,
+        // or hand on to [outer] with outer's parameters, and every one of those
+        // names has to be a parameter here too. Left out, they were free names
+        // in a top-level def, found by Blimp's dynamic scope in the caller's
+        // frame. That held until Blimp c47e653 (2026-09-29), which has a
+        // top-level def look in the top level as it is now before the caller:
+        // a program whose top-level code also has an `i__19` or `n__14` then
+        // gives the continuation those, and functional test controlFlowLoops
+        // printed "row 1 = 1 0" forever.
+        val signalled = loops.lastOrNull()?.carried.orEmpty() + outer?.params.orEmpty()
+        val params = (ownParams + signalled.map { it.deepCopy() })
+            .distinctBy { it.outName.outputNameText }
+            .sortedBy { it.outName.outputNameText }
         val id = Blimp.Id(pos, names.gensym("cont"))
         val body = mutableListOf<Blimp.Statement>()
         val terminated = translateBody(tail, body, outer)

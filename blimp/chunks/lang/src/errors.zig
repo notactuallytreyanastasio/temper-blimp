@@ -51,6 +51,17 @@ pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col:
 ///
 /// `error.TypeError` on its own used to reach the top as
 /// `Runtime error: error.TypeError`, with no line and nothing to look at.
+/// A builtin refused an argument and said why ("p256_ecdh: peer_public must
+/// be 65 bytes, got 33"). The text is copied: the builtin's buffer is reused
+/// by the next failure. `locate` fills in the line as the error unwinds.
+pub fn builtinFailure(why: []const u8, source: []const u8) BlimpError {
+    return .{
+        .title = "BAD ARGUMENT",
+        .message = std.heap.page_allocator.dupe(u8, why) catch "a builtin refused its arguments",
+        .source_line = source,
+    };
+}
+
 pub fn runtimeError(err: anyerror, source: []const u8, line: u32, col: u32) BlimpError {
     return .{
         .title = "RUNTIME ERROR",
@@ -458,12 +469,20 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         "lookup",  "put",     "keys",     "now",     "concat",
         "split",   "join",    "contains", "to_string", "to_int", "slice",
         "upcase",  "downcase", "range",    "head",    "tail",
+        "utf8_valid", "utf8_scrub", "utf8_length", "utf8_slice", "utf8_upcase", "utf8_downcase",
+        "graphemes", "grapheme_length", "grapheme_slice", "grapheme_take",
         "sort",    "merge",   "values",   "type_of",  "print",
         "rem",     "abs",     "nil?",     "elem",    "floor",
         "ceil",    "round",   "not",      "size",    "empty?",
         "flat",    "zip",     "uniq",     "sum",
         "map",     "filter",  "reduce",   "each",
-        "index_of", "replace",
+        "json_encode", "json_decode",
+        "sha256", "hmac_sha256", "hex_encode", "hex_decode", "xor_bytes", "base64_encode", "base64_decode",
+        "base64url_encode", "base64url_decode", "random_bytes", "random_token",
+        "p256_keypair", "p256_public_key", "p256_ecdh", "ecdsa_p256_sign", "ecdsa_p256_verify",
+        "aes128gcm_encrypt", "aes128gcm_decrypt",
+        "getenv", "argv", "list_dir", "file_exists?", "file_size", "read_file", "write_file",
+        "format_time", "now_ms", "utc_offset", "show", "sort_by_keys", "index_of", "replace",
     };
 
     var best_match: ?[]const u8 = null;
@@ -483,7 +502,7 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         hint.appendSlice(alloc, match) catch {};
         hint.appendSlice(alloc, "`?\n\n") catch {};
     }
-    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each,\n      join, index_of, replace") catch {};
+    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each,\n      json_encode, json_decode, sha256, hmac_sha256, hex_encode,\n      hex_decode, xor_bytes, base64_encode, base64_decode, base64url_encode, base64url_decode,\n      random_bytes, random_token, getenv, argv, list_dir, file_exists?,\n      file_size, read_file, write_file, format_time, now_ms,\n      sort_by_keys, index_of, replace") catch {};
 
     return .{
         .title = "UNKNOWN FUNCTION",
