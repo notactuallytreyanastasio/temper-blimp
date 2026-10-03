@@ -11,7 +11,7 @@ import lang.temper.name.Temporary
  * Note what is absent: `not`, `if`, `while`, `return` and `import` are not
  * keywords, because Blimp has no such constructs.
  */
-private val blimpKeywords = setOf(
+internal val blimpKeywords = setOf(
     "actor", "and", "become", "bubble", "bubbles", "case", "catch", "def", "do", "end", "false", "fn",
     "for", "given", "in", "nil", "on", "or", "orelse", "property", "reply", "self", "situation",
     "spawn", "state", "test", "true", "try", "when",
@@ -38,7 +38,7 @@ private val blimpKeywords = setOf(
  * [notIdentifierChar] rewrites `?` to `_` before this set is consulted, so a
  * Temper name can never come out spelled like either of them.
  */
-private val blimpBuiltins = setOf(
+internal val blimpBuiltins = setOf(
     "abs", "acos", "actor_name", "append", "asin", "assert",
     "assert_eq", "assert_ne", "atan", "atan2", "blockquote", "bold", "button", "canvas", "ceil",
     "char_at", "char_code", "code", "code_block", "concat", "contains", "cos", "cosh", "divider",
@@ -61,6 +61,25 @@ private val blimpBuiltins = setOf(
     // `filter` would have turned every list filter in the program into a call
     // to it.
     "each", "filter", "index_of", "join", "map", "reduce", "replace",
+    // Read off Blimp main at 01b5e2c (2026-10-02), 63 names this list had
+    // fallen behind by: the crypto and encoding builtins, json, graphemes and
+    // utf8, http and the WebSocket client, sleep_ms and read_line (which
+    // temper-core itself calls), and the browser's view and effects -- el,
+    // draw, fetch, location_query, and from this week show, stored, store,
+    // socket and utc_offset. blimp_eval, blimp_test, runtime_snapshot,
+    // schedule and show are eval.zig's own, dispatched by name like map.
+    // BlimpNamesTest reads blimp/'s builtins.zig and eval.zig and fails
+    // when a name there is missing here.
+    "aes128gcm_decrypt", "aes128gcm_encrypt", "argv", "base64_decode", "base64_encode",
+    "base64url_decode", "base64url_encode", "blimp_eval", "blimp_test", "draw", "ecdsa_p256_sign",
+    "ecdsa_p256_verify", "el", "fetch", "file_size", "format_time", "getenv", "grapheme_length",
+    "grapheme_slice", "grapheme_take", "graphemes", "hex_decode", "hex_encode", "hmac_sha256",
+    "http_result", "http_start", "json_decode", "json_encode", "list_dir", "location_query",
+    "now_ms", "p256_ecdh", "p256_keypair", "p256_public_key", "process_stats", "random_bytes",
+    "random_token", "read_line", "runtime_snapshot", "schedule", "sha256", "show", "sleep_ms",
+    "socket", "sort_by_keys", "store", "stored", "tcp_connect", "tcp_poll_write", "tcp_write_some",
+    "utc_offset", "utf8_downcase", "utf8_length", "utf8_scrub", "utf8_slice", "utf8_upcase",
+    "utf8_valid", "ws_close", "ws_open", "ws_recv", "ws_send", "ws_stats", "xor_bytes",
 )
 
 /** Blimp identifiers are ASCII letters, digits and underscore, not starting with a digit. */
