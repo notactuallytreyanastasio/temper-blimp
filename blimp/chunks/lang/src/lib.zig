@@ -19,9 +19,15 @@ pub const Registry = @import("registry.zig").Registry;
 pub const CompletionEngine = @import("complete.zig").CompletionEngine;
 pub const gc = @import("gc.zig");
 pub const HeapLimit = @import("heap_limit.zig").HeapLimit;
+pub const wasm_bufs = @import("wasm_bufs.zig");
+pub const wasm_json = @import("wasm_json.zig");
 
 test {
     // Pull in tests from all modules
     @import("std").testing.refAllDecls(@This());
     _ = @import("memory_test.zig");
+    _ = @import("websocket.zig");
+    _ = @import("unicode_builtins.zig");
+    _ = @import("vendor/zig_std/tls_client.zig");
+    _ = @import("vendor/zig_std/flate_decompress.zig");
 }

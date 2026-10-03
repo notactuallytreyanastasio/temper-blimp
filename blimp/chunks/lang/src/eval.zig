@@ -15,8 +15,43 @@ pub const BlimpError = errors.BlimpError;
 pub const EvalError = builtins_mod.EvalError;
 
 /// Tree-walking interpreter for Blimp expressions.
+/// True when `s` has a `#{` that is not written `\\#{`.
+fn hasInterpolation(s: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < s.len) : (i += 1) {
+        if (s[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '#' and s[i + 1] == '{') return true;
+    }
+    return false;
+}
+
+/// The first `#{` or `\\#` at or after `from`, or the end of `s`.
+fn nextInterpOrEscapedHash(s: []const u8, from: usize) usize {
+    var j = from;
+    while (j + 1 < s.len) {
+        if (s[j] == '\\') {
+            if (s[j + 1] == '#') return j;
+            j += 2; // an escape pair: `\\#{` is a backslash, then `#{`
+            continue;
+        }
+        if (s[j] == '#' and s[j + 1] == '{') return j;
+        j += 1;
+    }
+    return s.len;
+}
+
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
+    /// Where code parsed while the program runs goes: blimp_eval, blimp_test
+    /// and a filled Hole. The ASTs that come out of those are pointed at by
+    /// handlers and closures for as long as they exist, and a host that
+    /// compacts (the REPL, the WASM build, a long-lived server) frees
+    /// `allocator` from under them. Such a host points this at an arena that
+    /// outlives every compaction; otherwise it is `allocator`.
+    code_allocator: std.mem.Allocator,
     env: Environment,
     builtins: BuiltinRegistry,
     registry: Registry,
@@ -29,6 +64,10 @@ pub const Evaluator = struct {
     actor_ctx: ?*ActorContext = null,
     msg_log: [msg_log_cap]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
+    /// Live trace sink (blimp --trace). One tab-separated line per event:
+    /// spawn/send/cast/state, see traceSend and evalBecomeStmt.
+    trace_fn: ?TraceFn = null,
+    trace_ctx: ?*anyopaque = null,
     bubble_reason: ?*const Value = null,
     /// Where the innermost `bubble` of the one currently in flight was, so an
     /// uncaught one can say where it started. Zero means none in flight.
@@ -45,6 +84,8 @@ pub const Evaluator = struct {
     reductions: i32 = 4_000_000, // high default for non-scheduled mode
     /// Scheduler instance (null in non-scheduled mode)
     scheduler: ?*@import("scheduler.zig").Scheduler = null,
+
+    pub const TraceFn = *const fn (ctx: ?*anyopaque, line: []const u8) void;
 
     // Message log for canvas rays. Each send records its target and, when it
     // happens inside a handler, the actor that sent it. Cleared by the host
@@ -73,6 +114,7 @@ pub const Evaluator = struct {
     pub fn init(allocator: std.mem.Allocator) Evaluator {
         return .{
             .allocator = allocator,
+            .code_allocator = allocator,
             .env = Environment.init(allocator),
             .builtins = BuiltinRegistry.init(allocator),
             .registry = Registry.init(allocator),
@@ -410,50 +452,13 @@ pub const Evaluator = struct {
                 else
                     raw;
                 // Check for interpolation: #{expr}
-                if (std.mem.indexOf(u8, s, "#{") != null) {
+                if (hasInterpolation(s)) {
                     return self.evalStringInterp(s);
                 }
                 // Process escape sequences if any backslashes present
                 if (std.mem.indexOf(u8, s, "\\") != null) {
                     var buf: std.ArrayListUnmanaged(u8) = .empty;
-                    var i: usize = 0;
-                    while (i < s.len) {
-                        if (s[i] == '\\' and i + 1 < s.len) {
-                            switch (s[i + 1]) {
-                                'n' => {
-                                    buf.append(self.allocator, '\n') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                'r' => {
-                                    buf.append(self.allocator, '\r') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                't' => {
-                                    buf.append(self.allocator, '\t') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                'e' => {
-                                    buf.append(self.allocator, 0x1b) catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                '\\' => {
-                                    buf.append(self.allocator, '\\') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                '"' => {
-                                    buf.append(self.allocator, '"') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                else => {
-                                    buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                                    i += 1;
-                                },
-                            }
-                        } else {
-                            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                            i += 1;
-                        }
-                    }
+                    try self.appendUnescaped(&buf, s);
                     const v = self.allocator.create(Value) catch return error.OutOfMemory;
                     v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
                     return v;
@@ -657,6 +662,59 @@ pub const Evaluator = struct {
         return v;
     }
 
+    // ── Live trace ──────────────────────────────────────────
+    // Values are capped like the wasm state JSON so a board full of rows
+    // stays one line on the receipt.
+    const trace_value_cap = 80;
+
+    fn traceValue(buf: []u8, val: *const Value) []const u8 {
+        var fbs = std.Io.Writer.fixed(buf[0..trace_value_cap]);
+        val.format(&fbs);
+        if (fbs.end < trace_value_cap) return buf[0..fbs.end];
+        @memcpy(buf[trace_value_cap .. trace_value_cap + 3], "...");
+        return buf[0 .. trace_value_cap + 3];
+    }
+
+    fn traceArgs(buf: []u8, args: []const *const Value) []const u8 {
+        var fbs = std.Io.Writer.fixed(buf);
+        const w = &fbs;
+        var vbuf: [trace_value_cap + 3]u8 = undefined;
+        for (args, 0..) |arg, i| {
+            if (i > 0) w.writeAll(", ") catch {};
+            w.writeAll(traceValue(&vbuf, arg)) catch {};
+        }
+        return buf[0..fbs.end];
+    }
+
+    fn traceSpawn(self: *Evaluator, ref: registry_mod.ActorRef) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "spawn\t{s}#{d}", .{ ref.type_name, ref.id }) catch return;
+        fn_ptr(self.trace_ctx, line);
+    }
+
+    fn traceSend(self: *Evaluator, to: registry_mod.ActorRef, message: []const u8, args: []const *const Value, reply: ?*const Value) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var abuf: [1024]u8 = undefined;
+        var rbuf: [trace_value_cap + 3]u8 = undefined;
+        var buf: [1600]u8 = undefined;
+        var fbs = std.Io.Writer.fixed(&buf);
+        const w = &fbs;
+        w.writeAll(if (reply != null) "send\t" else "cast\t") catch return;
+        if (self.actor_ctx) |ctx| w.print("{s}#{d}", .{ ctx.entry.ref.type_name, ctx.entry.ref.id }) catch return;
+        w.print("\t{s}#{d}\t{s}\t{s}", .{ to.type_name, to.id, message, traceArgs(&abuf, args) }) catch return;
+        if (reply) |r| w.print("\t{s}", .{traceValue(&rbuf, r)}) catch return;
+        fn_ptr(self.trace_ctx, buf[0..fbs.end]);
+    }
+
+    fn traceState(self: *Evaluator, ref: registry_mod.ActorRef, field: []const u8, val: *const Value) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var vbuf: [trace_value_cap + 3]u8 = undefined;
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "state\t{s}#{d}\t{s}\t{s}", .{ ref.type_name, ref.id, field, traceValue(&vbuf, val) }) catch return;
+        fn_ptr(self.trace_ctx, line);
+    }
+
     fn evalSpawnExpr(self: *Evaluator, se: ast.Node.SpawnExpr) EvalError!*const Value {
         // Look up the template in the registry
         const template = self.registry.lookupTemplate(se.actor_name) orelse {
@@ -677,6 +735,7 @@ pub const Evaluator = struct {
 
         // Spawn a new instance
         const ref = self.registry.spawn(template, overrides);
+        self.traceSpawn(ref);
 
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
@@ -781,11 +840,42 @@ pub const Evaluator = struct {
         return error.Bubble;
     }
 
+    /// Append `s` to `buf`, turning \\n \\r \\t \\e \\\\ \\" and \\# into the bytes they
+    /// name. Any other backslash is kept as written.
+    fn appendUnescaped(self: *Evaluator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) EvalError!void {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                const byte: ?u8 = switch (s[i + 1]) {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'e' => 0x1b,
+                    '\\' => '\\',
+                    '"' => '"',
+                    '#' => '#',
+                    else => null,
+                };
+                if (byte) |b| {
+                    buf.append(self.allocator, b) catch return error.OutOfMemory;
+                    i += 2;
+                    continue;
+                }
+            }
+            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
+            i += 1;
+        }
+    }
+
     fn evalStringInterp(self: *Evaluator, s: []const u8) EvalError!*const Value {
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < s.len) {
-            if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
+            if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '#') {
+                // `\#{` is the way to write a literal `#{`.
+                result.append(self.allocator, '#') catch return error.OutOfMemory;
+                i += 2;
+            } else if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
                 // Find the closing }
                 const start = i + 2;
                 var depth: u32 = 1;
@@ -804,22 +894,25 @@ pub const Evaluator = struct {
                 const expr_node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
                 const val = try self.eval(expr_node);
 
-                // Format the value into the string
-                var buf: [4096]u8 = undefined;
-                var fbs = std.Io.Writer.fixed(&buf);
-                val.format(&fbs);
-                const formatted = fbs.buffered();
-                // Strip quotes from string values
-                if (formatted.len >= 2 and formatted[0] == '"' and formatted[formatted.len - 1] == '"') {
-                    result.appendSlice(self.allocator, formatted[1 .. formatted.len - 1]) catch return error.OutOfMemory;
-                } else {
-                    result.appendSlice(self.allocator, formatted) catch return error.OutOfMemory;
+                // A string goes in as it is. Anything else is formatted, into
+                // a buffer that grows: a fixed one cut every value at 4096
+                // bytes without a word, which a rendered page passes easily.
+                switch (val.*) {
+                    .string => |str| result.appendSlice(self.allocator, str) catch return error.OutOfMemory,
+                    else => {
+                        var aw = std.Io.Writer.Allocating.init(self.allocator);
+                        val.format(&aw.writer);
+                        result.appendSlice(self.allocator, aw.written()) catch return error.OutOfMemory;
+                    },
                 }
 
                 i = j + 1; // skip past }
             } else {
-                result.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                i += 1;
+                // The literal text up to the next #{ gets the same escapes as
+                // a string with no interpolation in it.
+                const next = nextInterpOrEscapedHash(s, i);
+                try self.appendUnescaped(&result, s[i..next]);
+                i = next;
             }
         }
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -828,8 +921,24 @@ pub const Evaluator = struct {
     }
 
     fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
+        // A def at top level captures nothing; see Closure.top_level.
+        if (self.env.depth() == 1 and self.actor_ctx == null) {
+            const tc = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
+            tc.* = .{
+                .params = ds.params,
+                .body = ds.body,
+                .env = &.{},
+                .top_level = true,
+                .return_type = ds.return_type,
+            };
+            const tv = self.allocator.create(Value) catch return error.OutOfMemory;
+            tv.* = Value{ .closure = tc };
+            self.env.define(ds.name, tv);
+            return tv;
+        }
+
         // def is sugar for: name = fn(params) do body end
-        const bindings = self.env.allBindings(self.allocator);
+        const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
@@ -843,6 +952,7 @@ pub const Evaluator = struct {
             .body = ds.body,
             .env = captured,
             .env_names = captured_names,
+            .globals_mark = self.env.globalsMark(),
             .return_type = ds.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -919,13 +1029,14 @@ pub const Evaluator = struct {
         const overrides = overrides_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
 
         const ref = self.registry.spawn(template, overrides);
+        self.traceSpawn(ref);
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
         return v;
     }
 
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
-        const bindings = self.env.allBindings(self.allocator);
+        const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
@@ -939,6 +1050,7 @@ pub const Evaluator = struct {
             .body = fe.body,
             .env = captured,
             .env_names = captured_names,
+            .globals_mark = self.env.globalsMark(),
             .return_type = fe.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -1004,6 +1116,7 @@ pub const Evaluator = struct {
                         args[i] = try self.eval(arg);
                     }
                     if (log_idx) |li| self.msg_log[li].args = args;
+                    self.traceSend(ref, ms.message, args, null);
                     const MailboxMsg = @import("mailbox.zig").Message;
                     entry.mailbox.enqueue(self.allocator, MailboxMsg{
                         .name = ms.message,
@@ -1112,6 +1225,7 @@ pub const Evaluator = struct {
                         break :blk nil_val;
                     };
                     if (log_idx) |li| self.msg_log[li].reply = reply_val;
+                    self.traceSend(ref, ms.message, arg_vals, reply_val);
                     return reply_val;
                 }
 
@@ -1161,6 +1275,7 @@ pub const Evaluator = struct {
             for (ctx.entry.state_fields) |*state_field| {
                 if (std.mem.eql(u8, state_field.key, field.key)) {
                     state_field.val = new_val;
+                    self.traceState(ctx.entry.ref, field.key, new_val);
                     break;
                 }
             }
@@ -1217,6 +1332,21 @@ pub const Evaluator = struct {
 
     fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
         const left = try self.eval(op.left.*);
+
+        // `and` and `or` stop at the left side when it decides the answer,
+        // so `i < length(s) and char_at(s, i) == " "` never reads past the end.
+        switch (op.op) {
+            .and_op => {
+                if (!left.truthy()) return self.make(.{ .boolean = false });
+                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+            },
+            .or_op => {
+                if (left.truthy()) return self.make(.{ .boolean = true });
+                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+            },
+            else => {},
+        }
+
         const right = try self.eval(op.right.*);
 
         switch (op.op) {
@@ -1309,12 +1439,7 @@ pub const Evaluator = struct {
                 }
                 return self.evalCompareOp(left.*, right.*, .gte);
             },
-            .and_op => {
-                return self.make(.{ .boolean = left.truthy() and right.truthy() });
-            },
-            .or_op => {
-                return self.make(.{ .boolean = left.truthy() or right.truthy() });
-            },
+            .and_op, .or_op => unreachable,
         }
     }
 
@@ -1456,6 +1581,14 @@ pub const Evaluator = struct {
         }
     }
 
+    fn evalShow(self: *Evaluator, args: []const ast.Node) EvalError!*const Value {
+        if (args.len != 2) return error.TypeError;
+        const cond = try self.eval(args[0]);
+        if (cond.* != .boolean) return error.TypeError;
+        if (!cond.boolean) return self.make(.nil);
+        return self.eval(args[1]);
+    }
+
     fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
         // First check if the name refers to a closure in the environment
         if (self.env.lookup(call.name)) |val| {
@@ -1469,9 +1602,17 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, call.name, "filter")) return self.builtinFilter(call.args);
         if (std.mem.eql(u8, call.name, "reduce")) return self.builtinReduce(call.args);
         if (std.mem.eql(u8, call.name, "each")) return self.builtinEach(call.args);
+        // show(cond, node) is lazy, like `and`: node is evaluated only when
+        // cond is true, so it may read what cond guards (show(q != nil,
+        // el("p", %{}, q.content))).
+        if (std.mem.eql(u8, call.name, "show")) return self.evalShow(call.args);
 
         // Runtime eval/test -- needs evaluator context, can't be a plain builtin
         if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
+        if (std.mem.eql(u8, call.name, "runtime_snapshot")) {
+            if (call.args.len != 0) return error.TypeError;
+            return self.runtimeSnapshot();
+        }
         if (std.mem.eql(u8, call.name, "blimp_test")) return self.runtimeTest(call.args);
         if (std.mem.eql(u8, call.name, "schedule")) return self.builtinSchedule(call.args);
         // send_async removed: use <-- operator instead
@@ -1492,7 +1633,14 @@ pub const Evaluator = struct {
             args[i] = try self.eval(arg);
         }
 
-        return func(self.allocator, args);
+        return func(self.allocator, args) catch |err| {
+            // A builtin that can say which argument was wrong left it here;
+            // without this the report is a bare "TypeError while evaluating".
+            if (builtins_mod.takeFailure()) |why| {
+                if (self.last_error == null) self.last_error = errors.builtinFailure(why, self.source);
+            }
+            return err;
+        };
     }
 
     // ── Higher-order builtins ─────────────────────────────
@@ -1692,7 +1840,7 @@ pub const Evaluator = struct {
             }
 
             // Lent, not copied. See Environment.Scope.captured.
-            self.env.lendCaptured(c.env, c.env_names);
+            self.env.lendCaptured(c.env, c.env_names, @intFromPtr(c), if (c.top_level) Environment.live else c.globals_mark);
 
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {
@@ -1776,13 +1924,77 @@ pub const Evaluator = struct {
         return self.make(.{ .atom = "ok" });
     }
 
+    /// runtime_snapshot() -> %{actors: [...], messages: [...]}: the program as
+    /// Blimp's canvas draws it (the shape the WebAssembly build's state JSON
+    /// has), for a host that shows a running program to people who are not
+    /// its author -- the blog draws its own server on every page with it.
+    ///
+    /// So it says what is running and what it is saying, never what it
+    /// holds. Each actor is its ref, its type and its state fields, but a
+    /// field's value is kept only when it is a number, a boolean, an atom or
+    /// nil; a string, list, map or tuple becomes "String(n)" / "List(n)" /
+    /// "Map(n)" / "Tuple(n)", anything else its type. A message is its
+    /// target, its sender (nil from outside any actor) and its name: no
+    /// arguments, no reply. Messages are the ones logged since the host last
+    /// cleared the log (a --serve host clears it before every tick).
+    fn runtimeSnapshot(self: *Evaluator) EvalError!*const Value {
+        const a = self.allocator;
+        const actors = a.alloc(*const Value, self.registry.instances.items.len) catch return error.OutOfMemory;
+        for (self.registry.instances.items, 0..) |entry, i| {
+            const fields = a.alloc(Value.MapEntry, entry.state_fields.len) catch return error.OutOfMemory;
+            for (entry.state_fields, 0..) |f, fi| {
+                fields[fi] = .{ .key = f.key, .val = try self.summarize(f.val) };
+            }
+            const e = a.alloc(Value.MapEntry, 3) catch return error.OutOfMemory;
+            e[0] = .{ .key = "ref", .val = try self.makeRef(entry.ref.type_name, entry.ref.id) };
+            e[1] = .{ .key = "type", .val = try self.make(.{ .string = entry.ref.type_name }) };
+            e[2] = .{ .key = "state", .val = try self.make(.{ .map = fields }) };
+            actors[i] = try self.make(.{ .map = e });
+        }
+        const msgs = a.alloc(*const Value, self.msg_log_count) catch return error.OutOfMemory;
+        for (0..self.msg_log_count) |i| {
+            const m = self.msg_log[i];
+            const e = a.alloc(Value.MapEntry, 3) catch return error.OutOfMemory;
+            e[0] = .{ .key = "target", .val = try self.makeRef(m.target_type, m.target_id) };
+            e[1] = .{ .key = "from", .val = if (m.source_type) |st| try self.makeRef(st, m.source_id.?) else try self.make(.nil) };
+            e[2] = .{ .key = "message", .val = try self.make(.{ .string = m.message }) };
+            msgs[i] = try self.make(.{ .map = e });
+        }
+        const top = a.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
+        top[0] = .{ .key = "actors", .val = try self.make(.{ .list = actors }) };
+        top[1] = .{ .key = "messages", .val = try self.make(.{ .list = msgs }) };
+        return self.make(.{ .map = top });
+    }
+
+    fn makeRef(self: *Evaluator, type_name: []const u8, id: u64) EvalError!*const Value {
+        const text = std.fmt.allocPrint(self.allocator, "ref<{s}:{d}>", .{ type_name, id }) catch return error.OutOfMemory;
+        return self.make(.{ .string = text });
+    }
+
+    fn summarize(self: *Evaluator, v: *const Value) EvalError!*const Value {
+        const label: []const u8 = switch (v.*) {
+            .integer, .float, .boolean, .atom, .nil => return v,
+            .string => |x| std.fmt.allocPrint(self.allocator, "String({d})", .{x.len}) catch return error.OutOfMemory,
+            .list => |x| std.fmt.allocPrint(self.allocator, "List({d})", .{x.len}) catch return error.OutOfMemory,
+            .map => |x| std.fmt.allocPrint(self.allocator, "Map({d})", .{x.len}) catch return error.OutOfMemory,
+            .tuple => |x| std.fmt.allocPrint(self.allocator, "Tuple({d})", .{x.len}) catch return error.OutOfMemory,
+            .actor_ref => "ActorRef",
+            .closure => "Function",
+            .view_node => "View",
+            .hole => "Hole",
+        };
+        return self.make(.{ .string = label });
+    }
+
     fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 1) return error.TypeError;
         const code_val = try self.eval(arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
-        const code = code_val.string;
+        // The AST points into its source, and both have to outlive the next
+        // compaction: a handler defined here keeps pointing at them.
+        const code = self.code_allocator.dupe(u8, code_val.string) catch return error.OutOfMemory;
 
-        var parser = Parser.init(self.allocator, code);
+        var parser = Parser.init(self.code_allocator, code);
         const nodes = parser.parseFile() catch {
             // Parse error -- return error map
             const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
@@ -1826,9 +2038,9 @@ pub const Evaluator = struct {
         if (arg_nodes.len != 1) return error.TypeError;
         const code_val = try self.eval(arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
-        const code = code_val.string;
+        const code = self.code_allocator.dupe(u8, code_val.string) catch return error.OutOfMemory;
 
-        var parser = Parser.init(self.allocator, code);
+        var parser = Parser.init(self.code_allocator, code);
         const nodes = parser.parseFile() catch {
             return self.makeTestResult(false, 0, 0, "parse error");
         };
@@ -2367,8 +2579,8 @@ pub const Evaluator = struct {
         }
 
         // Parse and evaluate the response as Blimp statements
-        const src_copy = self.allocator.dupe(u8, response) catch return error.OutOfMemory;
-        var hole_parser = Parser.init(self.allocator, src_copy);
+        const src_copy = self.code_allocator.dupe(u8, response) catch return error.OutOfMemory;
+        var hole_parser = Parser.init(self.code_allocator, src_copy);
         const nodes = hole_parser.parseHandlerBodyPublic() catch {
             std.debug.print("[Hole] Failed to parse Claude response as Blimp\n", .{});
             return self.make(.nil);
@@ -2411,7 +2623,7 @@ pub const Evaluator = struct {
     /// Preserves the indentation of the original hole line.
     fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8, directive: []const u8) !void {
         // Read the file
-        const file_source = try std.Io.Dir.cwd().readFileAlloc(ioenv.io, file_path, self.allocator, .limited(4 * 1024 * 1024));
+        const file_source = try std.Io.Dir.cwd().readFileAlloc(ioenv.io, file_path, self.allocator, .limited(64 * 1024 * 1024));
         defer self.allocator.free(file_source);
 
         // Split into lines, find the hole line (1-indexed)
@@ -2526,7 +2738,17 @@ pub const Evaluator = struct {
                     raw[1 .. raw.len - 1]
                 else
                     raw;
-                if (subject.* == .string and std.mem.eql(u8, subject.string, s)) return &.{};
+                if (subject.* != .string) return null;
+                // The pattern is written the way a string expression is, so
+                // it gets the same escapes: "\n" is a newline here too.
+                // Comparing the raw lexeme meant "\n" matched the two
+                // characters backslash and n, which no string ever was.
+                if (std.mem.indexOfScalar(u8, s, '\\') == null) {
+                    return if (std.mem.eql(u8, subject.string, s)) &.{} else null;
+                }
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                self.appendUnescaped(&buf, s) catch return null;
+                if (std.mem.eql(u8, subject.string, buf.items)) return &.{};
                 return null;
             },
             .atom_lit => |lit| {
@@ -3189,6 +3411,117 @@ test "message log records args of an async send without a reply" {
     try std.testing.expect(put.reply == null);
 }
 
+const TraceCapture = struct {
+    lines: std.ArrayList([]const u8),
+    alloc: std.mem.Allocator,
+
+    fn onLine(ctx: ?*anyopaque, line: []const u8) void {
+        const self: *TraceCapture = @ptrCast(@alignCast(ctx.?));
+        const copy = self.alloc.dupe(u8, line) catch return;
+        self.lines.append(self.alloc, copy) catch {};
+    }
+
+    fn has(self: *TraceCapture, needle: []const u8) bool {
+        for (self.lines.items) |l| if (std.mem.eql(u8, l, needle)) return true;
+        return false;
+    }
+
+    fn indexOf(self: *TraceCapture, needle: []const u8) ?usize {
+        for (self.lines.items, 0..) |l, i| if (std.mem.eql(u8, l, needle)) return i;
+        return null;
+    }
+};
+
+test "trace callback reports spawns, sends, replies and state changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .empty, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Account do
+        \\  state balance: Int :: 0
+        \\  on :withdraw(amount: Int) do
+        \\    become balance: balance - amount
+        \\    reply balance - amount
+        \\  end
+        \\  on :get do reply balance end
+        \\end
+        \\actor Bank do
+        \\  on :take(from: Any, amount: Int) do
+        \\    from <- :withdraw(amount)
+        \\    reply from <- :get
+        \\  end
+        \\end
+        \\alice = spawn Account, balance: 1000
+        \\bank = spawn Bank
+        \\bank <- :take(alice, 200)
+    );
+
+    try std.testing.expect(cap.has("spawn\tAccount#1"));
+    try std.testing.expect(cap.has("spawn\tBank#2"));
+    // nested sends are reported as they complete, the outer one last
+    const inner = cap.indexOf("send\tBank#2\tAccount#1\twithdraw\t200\t800").?;
+    const state = cap.indexOf("state\tAccount#1\tbalance\t800").?;
+    const get = cap.indexOf("send\tBank#2\tAccount#1\tget\t\t800").?;
+    const outer = cap.indexOf("send\t\tBank#2\ttake\tref<Account:1>, 200\t800").?;
+    try std.testing.expect(state < inner);
+    try std.testing.expect(inner < get);
+    try std.testing.expect(get < outer);
+}
+
+test "trace callback reports async sends without a reply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .empty, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Sink do
+        \\  state seen: Int :: 0
+        \\  on :put(n: Int) do become seen: n end
+        \\end
+        \\s = spawn Sink
+        \\s <-- :put(7)
+    );
+    try std.testing.expect(cap.has("cast\t\tSink#1\tput\t7"));
+    try std.testing.expect(cap.has("state\tSink#1\tseen\t7"));
+}
+
+test "trace formats long values capped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .empty, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Big do
+        \\  on :len(l: List) do reply length(l) end
+        \\end
+        \\b = spawn Big
+        \\b <- :len(range(1, 200))
+    );
+    var found = false;
+    for (cap.lines.items) |l| {
+        if (std.mem.startsWith(u8, l, "send\t\tBig#1\tlen\t")) {
+            found = true;
+            try std.testing.expect(l.len < 200);
+            try std.testing.expect(std.mem.indexOf(u8, l, "...") != null);
+            try std.testing.expect(std.mem.endsWith(u8, l, "\t200"));
+        }
+    }
+    try std.testing.expect(found);
+}
+
 test "message log stops at its capacity" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3610,4 +3943,26 @@ test "an error nothing described still says where it happened" {
     const err = evaluator.last_error.?;
     try std.testing.expectEqualStrings("RUNTIME ERROR", err.title);
     try std.testing.expectEqual(@as(u32, 2), err.line.?);
+}
+
+test "a builtin that refuses an argument says which one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const source = "x = 1\naes128gcm_encrypt(\"0123456789abcdef\", \"short\", \"p\", \"\")";
+    evaluator.setSource(source);
+    const result = evalProgram(alloc, &evaluator, source);
+    try std.testing.expectError(error.TypeError, result);
+
+    const err = evaluator.last_error.?;
+    try std.testing.expectEqualStrings("BAD ARGUMENT", err.title);
+    try std.testing.expectEqualStrings("aes128gcm_encrypt: nonce must be 12 bytes, got 5", err.message);
+    try std.testing.expectEqual(@as(u32, 2), err.line.?);
+
+    // Taken once: the next failure without a message is not given this one.
+    var again = Evaluator.init(alloc);
+    try std.testing.expectError(error.TypeError, evalProgram(alloc, &again, "concat(\"a\")"));
+    try std.testing.expectEqualStrings("RUNTIME ERROR", again.last_error.?.title);
 }
