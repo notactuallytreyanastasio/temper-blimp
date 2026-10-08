@@ -38,6 +38,13 @@ class AsmProgram {
     /** A label whose row index is past every row, so jumping to it halts. */
     val halt = Label("halt")
 
+    /**
+     * Where a call that is not expected to bubble goes if it does anyway. The
+     * runtime points it at its panic routine, so that the surprise is reported
+     * instead of looking like a normal end.
+     */
+    var unexpectedFailure: Label = halt
+
     fun link(entry: Label): DispatchLayout {
         val pieces = blocks.flatMap { split(it) }
         val index = mutableMapOf<Label, Int>()

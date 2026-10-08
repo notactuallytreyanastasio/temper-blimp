@@ -15,15 +15,18 @@ import lang.temper.name.ResolvedName
 import lang.temper.type.TypeDefinition
 import lang.temper.type.TypeFormal
 import lang.temper.type.WellKnownTypes
+import lang.temper.type.excludeBubble
 import lang.temper.type.isVoidLike
 import lang.temper.type2.Nullity
 import lang.temper.type2.Signature2
 import lang.temper.type2.Type2
 import lang.temper.value.TBoolean
+import lang.temper.value.TFloat64
 import lang.temper.value.TInt
 import lang.temper.value.TInt64
 import lang.temper.value.TNull
 import lang.temper.value.TString
+import lang.temper.value.TType
 import lang.temper.value.TVoid
 
 /**
@@ -45,6 +48,17 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     private val globals = mutableMapOf<ResolvedName, Int>()
     private val functions = mutableMapOf<ResolvedName, FnInfo>()
     private val builtins = mutableMapOf<ResolvedName, PietBuiltin>()
+
+    /** What each panic site number means, for the debug dump. */
+    private val panicSites = mutableListOf<String>()
+
+    private fun panicSite(what: String): Int {
+        panicSites.add(what)
+        return panicSites.size
+    }
+
+    /** A number for each type used as a value. */
+    private val typeIds = mutableMapOf<String, Int>()
 
     /** The global holding each string literal. */
     private val literalGlobals = mutableMapOf<String, Int>()
@@ -202,7 +216,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     private val fieldOffsets = mutableMapOf<ResolvedName, Int>()
 
     /** Method keys called through an interface, which need a dispatcher. */
-    private val dispatchers = mutableMapOf<String, Label>()
+    private val dispatchers = mutableMapOf<Pair<TypeDefinition, String>, Label>()
 
     private fun fnInfo(name: ResolvedName, parameters: TmpL.Parameters, body: TmpL.BlockStatement?, sig: Signature2) =
         FnInfo(
@@ -211,7 +225,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
             body,
             !sig.returnType2.isVoidLike,
             rest = parameters.restParameter?.name?.name,
-            returnType = sig.returnType2,
+            // What a normal return carries: `T? | Bubble` returns a T?.
+            returnType = excludeBubble(sig.returnType2),
         )
 
     private fun registerType(decl: TmpL.TypeDeclaration) {
@@ -267,7 +282,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         var level = listOf(info)
         val seen = mutableSetOf<TypeInfo>()
         while (level.isNotEmpty()) {
-            level.firstNotNullOfOrNull { t -> t.own[key]?.takeIf { !concrete || it.body != null } }?.let { return it }
+            level.firstNotNullOfOrNull { t -> t.own[key]?.takeIf { !concrete || !isAbstract(it) } }?.let { return it }
             seen.addAll(level)
             level = level.flatMap { t ->
                 t.decl.superTypes.mapNotNull { types[it.typeName.sourceDefinition] }
@@ -279,6 +294,20 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     /** Whether every [from] is a [to], from declared super types alone. */
     private fun staticSubtype(from: TypeDefinition, to: TypeDefinition): Boolean =
         from == to || from.superTypes.any { staticSubtype(it.definition, to) }
+
+    /**
+     * Whether a member is abstract: no body, or a body that only calls
+     * pureVirtual, which is how TmpL writes an interface method without a
+     * default. Lookup must pass over these, or `class C extends A & B` with
+     * B overriding A's abstract `m` would call A's.
+     */
+    private fun isAbstract(fn: FnInfo): Boolean {
+        val body = fn.body ?: return true
+        val only = body.statements.singleOrNull() ?: return false
+        val call = (only as? TmpL.ExpressionStatement)?.expression as? TmpL.CallExpression ?: return false
+        val callee = (call.fn as? TmpL.FnReference)?.id?.name ?: return false
+        return builtins[callee] == PietBuiltin.PureVirtual
+    }
 
     /** Whether [c] is [target] or has it among its super types. */
     private fun isSubtype(c: TypeInfo, target: TypeDefinition): Boolean {
@@ -359,8 +388,11 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         while (pendingClosures.isNotEmpty()) translateFunction(pendingClosures.removeFirst())
         // Translating can ask for more dispatchers only from function
         // bodies, which are all done by now.
-        for ((key, label) in dispatchers) writeDispatcher(key, label)
-        if (debugDump) println("ASM>>>\n$program")
+        for ((key, label) in dispatchers) writeDispatcher(key.first, key.second, label)
+        if (debugDump) {
+            println("ASM>>>\n$program")
+            panicSites.forEachIndexed { i, what -> println("PANIC SITE ${i + 1}: $what") }
+        }
         return program.link(main.entry)
     }
 
@@ -371,12 +403,23 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
      * `(id == k) * (row_k - halt)` over every class that has [key], plus
      * halt, so an unknown class halts rather than running row 0.
      */
-    private fun writeDispatcher(key: String, label: Label) {
-        val impls = types.values.filter { it.classId != null }.mapNotNull { c ->
+    private fun writeDispatcher(through: TypeDefinition, key: String, label: Label) {
+        // Only classes that are the type the call goes through: a method name
+        // alone is shared by unrelated interfaces, with unrelated arities.
+        val impls = types.values.filter { it.classId != null && isSubtype(it, through) }.mapNotNull { c ->
             resolve(c, key)?.let {
                 c.classId!! to
                     it
             }
+        }
+        if (impls.isEmpty()) {
+            // No class that implements it is reachable, so no object can
+            // arrive here; if one somehow does, say so.
+            val e = Emitter(program)
+            e.startBlock(label, 0)
+            e.const(panicSite("no reachable class has $key"))
+            e.jumpAway(rt.panicAt)
+            return
         }
         val paramCount = impls.map { it.second.parameters.size }.distinct().singleOrNull()
             ?: TODO("dispatch $key over ${impls.map { it.second.name }}")
@@ -431,7 +474,10 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 // not happen in TmpL; if it does, say so here.
                 // TmpL can fall off the end of a function the frontend has
                 // already flagged as missing a return.
-                if (e.reachable) e.jumpAway(rt.panic)
+                if (e.reachable) {
+                    e.const(panicSite("${fn.name} fell off its end"))
+                    e.jumpAway(rt.panicAt)
+                }
             } else {
                 writer.ret(false)
             }
@@ -546,7 +592,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
          */
         fun garbage(text: String) {
             if ("not supported by Piet Backend" in text) TODO(text)
-            e.jumpAway(rt.panic)
+            e.const(panicSite("garbage: $text"))
+            e.jumpAway(rt.panicAt)
         }
 
         /** Bubbles from here. */
@@ -566,7 +613,10 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     }
                     writer != null -> writer.fail()
                     // Uncaught at the top level: the module failed to load.
-                    else -> e.jumpAway(rt.panic)
+                    else -> {
+                        e.const(panicSite("uncaught bubble at depth $depth, landing $landing"))
+                        e.jumpAway(rt.panicAt)
+                    }
                 }
             }
         }
@@ -598,7 +648,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                         !stmt.sig.returnType2.isVoidLike,
                         captured,
                         name,
-                        returnType = stmt.sig.returnType2,
+                        returnType = excludeBubble(stmt.sig.returnType2),
                     )
                     pendingClosures.addLast(fn)
                     e.pushLabel(fn.label)
@@ -702,7 +752,10 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     if (e.knows(end)) e.startBlock(end)
                 }
                 is TmpL.ThrowStatement -> bubble()
-                is TmpL.ModuleInitFailed -> e.jumpAway(rt.panic)
+                is TmpL.ModuleInitFailed -> {
+                    e.const(panicSite("module init failed: $stmt"))
+                    e.jumpAway(rt.panicAt)
+                }
                 is TmpL.GarbageStatement -> garbage("$stmt")
                 is TmpL.EmbeddedComment, is TmpL.BoilerplateCodeFoldBoundary -> {}
                 else -> TODO("${stmt::class.simpleName}: $stmt")
@@ -767,6 +820,13 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                         TString -> frame.loadGlobal(literalGlobals.getValue(TString.unpack(v)))
                         TVoid -> return false
                         TNull -> e.const(NULL)
+                        // A type as a value: only ever compared, so a number per type.
+                        TType -> e.const(typeIds.getOrPut("$v") { typeIds.size + 1 })
+                        TFloat64 -> {
+                            val d = TFloat64.unpack(v)
+                            e.const(if (d.isNaN()) 0x7FF8000000000000L else d.toRawBits())
+                            frame.pack64()
+                        }
                         TInt64 -> {
                             val n = TInt64.unpack(v)
                             if (n == Long.MIN_VALUE) e.constMin64() else e.const(n)
@@ -814,6 +874,14 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                         when (subject.sourceDefinition to name) {
                             WellKnownTypes.stringTypeDefinition to "begin" -> e.const(0)
                             WellKnownTypes.stringIndexTypeDefinition to "none" -> e.const(NULL)
+                            WellKnownTypes.float64TypeDefinition to "e" -> {
+                                e.const(Math.E.toRawBits())
+                                frame.pack64()
+                            }
+                            WellKnownTypes.float64TypeDefinition to "pi" -> {
+                                e.const(Math.PI.toRawBits())
+                                frame.pack64()
+                            }
                             else -> TODO("static $expr")
                         }
                     }
@@ -832,7 +900,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     }
                     else -> TODO("${subject::class.simpleName}: $expr")
                 }
-                is TmpL.GetAbstractProperty -> return methodCall(expr.subject, "g:${dotName(expr.property)}", listOf())
+                is TmpL.GetAbstractProperty ->
+                    return methodCall(expr.subject, "g:${dotName(expr.property)}", listOf(), expr.type)
                 is TmpL.InfixOperation -> infix(expr)
                 is TmpL.PrefixOperation -> {
                     // Bang is the only prefix operator TmpL has.
@@ -852,16 +921,29 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
          */
         fun valueAs(expr: TmpL.Expression, to: Type2?): Boolean {
             if (!value(expr)) return false
-            if (to != null) coerce(expr.type, to)
+            // null is null in every representation; never box or unbox it.
+            val isNull = (expr as? TmpL.ValueReference)?.value?.typeTag == TNull
+            if (to != null && !isNull) coerce(excludeBubble(expr.type), excludeBubble(to))
             return true
         }
 
+        /**
+         * Boxing at type boundaries. A nullable Int is a box, and so is any
+         * value of a nullable type parameter `T?`: inside generic code there is
+         * no knowing whether T is Int, and a box is the one representation of
+         * "a T or null" that cannot be mistaken for a value. The two agree when
+         * T is Int, so `Int?` and `T?` pass between each other unchanged.
+         */
         fun coerce(from: Type2, to: Type2) {
-            val fromBoxed = isNullableInt(from)
-            val toBoxed = isNullableInt(to)
+            val fromBoxed = isNullableInt(from) || isGenericNullable(from)
+            val toBoxed = isNullableInt(to) || isGenericNullable(to)
+            val fromNull = from.definition == WellKnownTypes.nullTypeDefinition
             when {
-                toBoxed && !fromBoxed && from.definition == WellKnownTypes.intTypeDefinition -> frame.alloc(1)
-                fromBoxed && !toBoxed && to.definition == WellKnownTypes.intTypeDefinition -> frame.heapLoad()
+                fromBoxed == toBoxed || fromNull -> {}
+                toBoxed && from.nullity != Nullity.OrNull -> frame.alloc(1)
+                toBoxed -> call(frame, rt.boxIfNotNull, 1, true) { e.pick(4) }.also { e.dropUnder(1) }
+                to.nullity != Nullity.OrNull -> frame.heapLoad()
+                else -> call(frame, rt.unboxIfNotNull, 1, true) { e.pick(4) }.also { e.dropUnder(1) }
             }
         }
 
@@ -919,6 +1001,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     call(frame, info.label, info.arity, info.returnsValue, landing) {
                         argsFor(info, expr.parameters)
                     }
+                    if (info.returnsValue) info.returnType?.let { coerce(it, excludeBubble(expr.type)) }
                     return info.returnsValue
                 }
                 is TmpL.FunInterfaceCallable -> return callValue(expr) { check(value(fn.expr)) }
@@ -929,6 +1012,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 is TmpL.MethodReference if fn.subject is TmpL.TypeName -> {
                     val type = (fn.subject as TmpL.TypeName).sourceDefinition
                     val info = staticMethods[type to fn.methodName.dotNameText]
+                        ?.takeIf { !isAbstract(it) }
                         ?: return staticBuiltin(type, fn.methodName.dotNameText, expr)
                     call(frame, info.label, info.arity, info.returnsValue, bubbleLanding()) {
                         argsFor(info, expr.parameters)
@@ -937,7 +1021,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 }
                 is TmpL.MethodReference -> {
                     val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
-                    return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters)
+                    return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters, expr.type)
                 }
                 is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.dequeTypeDefinition -> {
                     e.const(0)
@@ -1034,7 +1118,12 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
          * its static type is a class, which Temper does not let anything
          * extend, and through a dispatcher when it is an interface.
          */
-        fun methodCall(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+        fun methodCall(
+            subject: TmpL.Expression,
+            key: String,
+            actuals: List<TmpL.Actual>,
+            contextType: Type2? = null,
+        ): Boolean {
             val type = subject.type.definition
             val info = types[type]
                 ?: (type as? TypeFormal)?.upperBounds?.firstNotNullOfOrNull { types[it.definition] }
@@ -1042,25 +1131,46 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
             // An interface's member may be abstract; its signature is what matters here.
             val impl = resolve(info, key, concrete = info.classId != null) ?: TODO("$key on ${info.decl.name}")
             val target = when (info.classId) {
-                null -> dispatchers.getOrPut(key) { Label("dispatch_$key") }
+                null -> dispatchers.getOrPut(info.decl.typeShape to key) {
+                    Label("dispatch_${info.decl.name.name}_$key")
+                }
                 else -> impl.label
             }
             call(frame, target, impl.arity, impl.returnsValue, bubbleLanding()) {
                 check(value(subject))
                 argsFor(impl, actuals, skip = 1)
             }
+            if (impl.returnsValue && contextType != null) {
+                impl.returnType?.let { coerce(it, excludeBubble(contextType)) }
+            }
             return impl.returnsValue
+        }
+
+        /** `new T(args)`: an object with zeroed fields, given to T's constructor. */
+        private fun newObject(info: TypeInfo, args: () -> Unit) {
+            val ctor = info.constructor ?: TODO("no constructor for ${info.decl.name}")
+            e.const(info.classId ?: TODO("new interface ${info.decl.name}"))
+            repeat(info.fieldCount) { e.const(0) }
+            frame.alloc(1 + info.fieldCount)
+            call(frame, ctor.label, ctor.arity, false, bubbleLanding()) {
+                e.pick(4)
+                args()
+            }
         }
 
         /** Static methods of types the runtime provides. */
         private fun staticBuiltin(type: TypeDefinition, name: String, expr: TmpL.CallExpression): Boolean {
+            val info = types[type]
             when {
+                // The date comes in on stdin: the runner pipes `date -u '+%Y %m %d'`.
+                info != null && name == "today" && "${info.decl.name}" == "Date" ->
+                    newObject(info) { repeat(3) { e.op(PietOp.InNumber) } }
                 type == WellKnownTypes.listTypeDefinition && name == "of" -> listOf(expr.parameters)
                 type == WellKnownTypes.stringTypeDefinition && name == "fromCodePoint" ->
                     call(frame, rt.stringFromCodePoint, 1, true, bubbleLanding()) { args(expr.parameters) }
                 type == WellKnownTypes.stringTypeDefinition && name == "fromCodePoints" ->
                     call(frame, rt.stringFromCodePoints, 1, true, bubbleLanding()) { args(expr.parameters) }
-                else -> TODO("static $name on $type: $expr")
+                else -> TODO("static $name on $type (known as ${info?.decl?.name}): $expr")
             }
             return true
         }
@@ -1115,6 +1225,9 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     frame.pack64()
                 }
                 type == WellKnownTypes.int64TypeDefinition -> return int64Method(subject, key, actuals)
+                type == WellKnownTypes.float64TypeDefinition -> return float64Method(subject, key, actuals)
+                type == WellKnownTypes.intTypeDefinition && key == "m:toFloat64" ->
+                    call(frame, rt.floatFromInt, 1, true) { check(value(subject)) }
                 type == WellKnownTypes.intTypeDefinition && key == "m:toString" ->
                     call(frame, rt.intToStringRadix, 2, true) {
                         check(value(subject))
@@ -1246,13 +1359,66 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     0 -> rtCall(rt.stringToInt64, subject, actuals, true, { e.const(10) })
                     else -> rtCall(rt.stringToInt64, subject, actuals, true)
                 }
+                "m:toFloat64" -> return rtCall(rt.floatParse, subject, actuals, true)
                 else -> TODO("$key on String")
+            }
+            return true
+        }
+
+        private fun float64Method(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            val name = key.removePrefix("m:")
+            val unary = mapOf(
+                "toString" to rt.floatToString,
+                "toInt32" to rt.floatToInt32(true),
+                "toInt32Unsafe" to rt.floatToInt32(false),
+                "toInt64" to rt.floatToInt64(true),
+                "toInt64Unsafe" to rt.floatToInt64(false),
+                "abs" to rt.floatAbs,
+                "floor" to rt.floatRounding("floor"),
+                "ceil" to rt.floatRounding("ceil"),
+                "round" to rt.floatRounding("round"),
+                "sqrt" to rt.floatSqrt,
+                "exp" to rt.floatExp,
+                "log" to rt.floatLog,
+                "sin" to rt.floatTrig(false),
+                "cos" to rt.floatTrig(true),
+                "atan" to rt.floatAtan,
+            )
+            unary[name]?.let { target ->
+                val bubbles = name == "toInt32" || name == "toInt64"
+                call(frame, target, 1, true, if (bubbles) bubbleLanding() else null) { check(value(subject)) }
+                return true
+            }
+            when (name) {
+                "acos", "asin", "cosh", "expm1", "log10", "log1p", "sign", "sinh", "tan", "tanh" ->
+                    call(frame, rt.floatFunction(name), 1, true) { check(value(subject)) }
+                "atan2", "max", "min" -> call(frame, rt.floatFunction(name), 2, true) {
+                    check(value(subject))
+                    args(actuals)
+                }
+                "near" -> call(frame, rt.floatNear, 4, true) {
+                    check(value(subject))
+                    check(value(actuals[0] as TmpL.Expression))
+                    for ((i, default) in listOf(1 to 1e-9, 2 to 0.0)) {
+                        val actual = actuals.getOrNull(i) as TmpL.Expression?
+                        val absent = actual == null || (actual as? TmpL.ValueReference)?.value?.typeTag == TNull
+                        if (absent) {
+                            e.const(default.toRawBits())
+                            frame.pack64()
+                        } else {
+                            check(value(actual!!))
+                        }
+                    }
+                }
+                else -> TODO("$key on Float64")
             }
             return true
         }
 
         private fun int64Method(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
             when (key) {
+                "m:toFloat64" -> return rtCall(rt.int64ToFloat(true), subject, actuals, true)
+                "m:toFloat64Unsafe" -> return rtCall(rt.int64ToFloat(false), subject, actuals, true)
                 "m:toString" -> return when (actuals.size) {
                     0 -> rtCall(rt.int64ToString, subject, actuals, true, { e.const(10) })
                     else -> rtCall(rt.int64ToString, subject, actuals, true)
@@ -1493,6 +1659,10 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     // There is one console; it is not a value anyone inspects.
                     e.const(0)
                 }
+                PietBuiltin.Empty -> {
+                    // The one Empty value; nothing ever looks inside it.
+                    e.const(0)
+                }
                 PietBuiltin.Ignore -> {
                     repeat(args(ps)) { e.op(Pop) }
                     return false
@@ -1587,6 +1757,12 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     // Strings are interned, so equality on every type except Int64,
                     // whose boxes differ for equal values, is equality of cells.
                     val (l, r) = ps.map { it as TmpL.Expression }
+                    if (l.type.definition == WellKnownTypes.float64TypeDefinition) {
+                        call(frame, rt.floatCompare, 2, true) { args(ps) }
+                        e.op(Not)
+                        if (b == PietBuiltin.NeGeneric) e.op(Not)
+                        return true
+                    }
                     if (l.type.definition == WellKnownTypes.int64TypeDefinition) {
                         args(ps)
                         frame.unpackPair64(reversed = false)
@@ -1620,6 +1796,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                             args(ps)
                             compareBoxes64()
                         }
+                        WellKnownTypes.float64TypeDefinition -> call(frame, rt.floatCompare, 2, true) { args(ps) }
                         WellKnownTypes.stringTypeDefinition -> call(frame, rt.stringCompare, 2, true) { args(ps) }
                         WellKnownTypes.intTypeDefinition, in INDEX_TYPES -> {
                             args(ps)
@@ -1640,6 +1817,32 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 PietBuiltin.BitwiseAnd32 -> call(frame, rt.bitwise("and", 0, 1), 2, true) { args(ps) }
                 PietBuiltin.BitwiseOr32 -> call(frame, rt.bitwise("or", 1, -1), 2, true) { args(ps) }
                 PietBuiltin.BitwiseXor32 -> call(frame, rt.bitwise("xor", 1, -2), 2, true) { args(ps) }
+                PietBuiltin.PlusFltFlt -> call(frame, rt.floatAdd, 2, true) { args(ps) }
+                PietBuiltin.MinusFltFlt -> call(frame, rt.floatAdd, 2, true) {
+                    check(value(ps[0] as TmpL.Expression))
+                    call(frame, rt.floatNegate, 1, true) { check(value(ps[1] as TmpL.Expression)) }
+                }
+                PietBuiltin.TimesFltFlt -> call(frame, rt.floatMul, 2, true) { args(ps) }
+                PietBuiltin.DivFltFlt -> call(frame, rt.floatDiv, 2, true) { args(ps) }
+                PietBuiltin.ModFltFlt -> call(frame, rt.floatRem, 2, true) { args(ps) }
+                PietBuiltin.MinusFlt -> call(frame, rt.floatNegate, 1, true) { args(ps) }
+                PietBuiltin.PowFltFlt -> call(frame, rt.floatFunction("pow"), 2, true) { args(ps) }
+                PietBuiltin.LtFltFlt, PietBuiltin.LeFltFlt, PietBuiltin.GtFltFlt, PietBuiltin.GeFltFlt,
+                PietBuiltin.EqFltFlt, PietBuiltin.NeFltFlt, PietBuiltin.CmpFltFlt,
+                -> {
+                    call(frame, rt.floatCompare, 2, true) { args(ps) }
+                    compareResult(
+                        when (b) {
+                            PietBuiltin.LtFltFlt -> PietBuiltin.LtStrStr
+                            PietBuiltin.LeFltFlt -> PietBuiltin.LeStrStr
+                            PietBuiltin.GtFltFlt -> PietBuiltin.GtStrStr
+                            PietBuiltin.GeFltFlt -> PietBuiltin.GeStrStr
+                            PietBuiltin.EqFltFlt -> PietBuiltin.EqStrStr
+                            PietBuiltin.NeFltFlt -> PietBuiltin.NeStrStr
+                            else -> PietBuiltin.CmpStrStr
+                        },
+                    )
+                }
                 PietBuiltin.PlusIntInt64, PietBuiltin.MinusIntInt64, PietBuiltin.TimesIntInt64 -> {
                     args(ps)
                     frame.unpackPair64(reversed = false)
@@ -1719,7 +1922,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 }
                 PietBuiltin.PureVirtual, PietBuiltin.Panic -> {
                     repeat(args(ps)) { e.op(Pop) }
-                    e.jumpAway(rt.panic)
+                    e.const(panicSite("$b: ${expr.pos}"))
+                    e.jumpAway(rt.panicAt)
                     return false
                 }
             }
@@ -1883,6 +2087,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         private fun identityComparable(x: TmpL.Expression) {
             if (isNullableInt(x.type)) TODO("== on Int?: $x")
             if (x.type.definition == WellKnownTypes.int64TypeDefinition) TODO("identity == on Int64: $x")
+            if (x.type.definition == WellKnownTypes.float64TypeDefinition) TODO("identity == on Float64: $x")
         }
 
         private fun int2(ps: List<TmpL.Actual>, op: PietOp) {
@@ -1955,6 +2160,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
 
     companion object {
         fun isNullableInt(t: Type2) = t.nullity == Nullity.OrNull && t.definition == WellKnownTypes.intTypeDefinition
+
+        fun isGenericNullable(t: Type2) = t.nullity == Nullity.OrNull && t.definition is TypeFormal
 
         private val INDEX_TYPES = setOf(
             WellKnownTypes.stringIndexTypeDefinition,

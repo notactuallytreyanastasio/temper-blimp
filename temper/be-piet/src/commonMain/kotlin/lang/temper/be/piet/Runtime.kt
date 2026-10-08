@@ -20,6 +20,20 @@ import lang.temper.be.piet.PietOp.Subtract
 class Runtime(val program: AsmProgram) {
     private val placed = mutableMapOf<String, Label>()
 
+    init {
+        // Placed up front: every call that cannot bubble names it as its failure row.
+        program.unexpectedFailure = panic
+    }
+
+    /** A block outside any frame, placed once: for code that is jumped to and never returns. */
+    internal fun placedBlock(name: String, write: (Emitter) -> Unit): Label = placed.getOrPut(name) {
+        val label = Label("rt_$name")
+        val e = Emitter(program)
+        e.startBlock(label, 1)
+        write(e)
+        label
+    }
+
     internal fun routine(name: String, paramCount: Int, write: FunctionWriter.() -> Unit): Label =
         placed.getOrPut(name) {
             val writer = FunctionWriter(program, "rt_$name", paramCount)
@@ -379,9 +393,54 @@ const val PANIC_MARKER = "\u0000PANIC"
 
 val Runtime.panic: Label get() = routine("panic", 0) {
     begin(0)
-    for (c in PANIC_MARKER) {
+    // Reached as the failure row of a call that was not expected to bubble.
+    for (c in "$PANIC_MARKER: an unexpected bubble") {
         e.const(c.code)
         e.op(OutChar)
     }
+    e.jumpAway(program.halt)
+}
+
+/** `[v] -> [box of v, or null]`: a nullable value entering a generic `T?`. */
+val Runtime.boxIfNotNull: Label get() = routine("box_nn", 1) {
+    begin(0)
+    e.ifElseValue(label("null").hint, {
+        frame.load(param(0))
+        e.const(PietTranslator.NULL)
+        e.op(PietOp.Subtract)
+        e.op(PietOp.Not)
+    }, { e.const(PietTranslator.NULL) }) {
+        frame.load(param(0))
+        frame.alloc(1)
+    }
+    ret(true)
+}
+
+/** `[box or null] -> [v or null]`: a generic `T?` leaving for a concrete nullable type. */
+val Runtime.unboxIfNotNull: Label get() = routine("unbox_nn", 1) {
+    begin(0)
+    e.ifElseValue(label("null").hint, {
+        frame.load(param(0))
+        e.const(PietTranslator.NULL)
+        e.op(PietOp.Subtract)
+        e.op(PietOp.Not)
+    }, { e.const(PietTranslator.NULL) }) {
+        frame.load(param(0))
+        frame.heapLoad()
+    }
+    ret(true)
+}
+
+/**
+ * A panic that says where: jumped to (not called) with a site number on
+ * top of the stack, which it writes after the marker. PietTranslator keeps
+ * the numbers' meanings, printed with its debug dump.
+ */
+val Runtime.panicAt: Label get() = placedBlock("panic_at") { e ->
+    for (c in "$PANIC_MARKER at site ") {
+        e.const(c.code)
+        e.op(OutChar)
+    }
+    e.op(PietOp.OutNumber)
     e.jumpAway(program.halt)
 }
