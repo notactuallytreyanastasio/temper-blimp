@@ -13,9 +13,12 @@ import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.name.ResolvedName
 import lang.temper.type.TypeDefinition
+import lang.temper.type.TypeFormal
 import lang.temper.type.WellKnownTypes
 import lang.temper.type.isVoidLike
+import lang.temper.type2.Nullity
 import lang.temper.type2.Signature2
+import lang.temper.type2.Type2
 import lang.temper.value.TBoolean
 import lang.temper.value.TInt
 import lang.temper.value.TNull
@@ -39,6 +42,15 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     private val functions = mutableMapOf<ResolvedName, FnInfo>()
     private val builtins = mutableMapOf<ResolvedName, PietBuiltin>()
 
+    /**
+     * Import aliases to the names they import. An imported name's
+     * ResolvedName is the exporting module's own, so after this one lookup
+     * it is found like any other module-level name.
+     */
+    private val aliases = mutableMapOf<ResolvedName, ResolvedName>()
+
+    private fun canon(name: ResolvedName): ResolvedName = aliases[name] ?: name
+
     private class FnInfo(
         val name: String,
         val parameters: List<TmpL.Formal>,
@@ -47,9 +59,14 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         /** For a local function: what it captures, in environment order, and its own name. */
         val captured: List<ResolvedName>? = null,
         val selfName: ResolvedName? = null,
+        /** A rest parameter, which arrives as one List after the others. */
+        val rest: ResolvedName? = null,
     ) {
         val label = Label(name)
         val isClosure get() = captured != null
+
+        /** Arguments a caller pushes, not counting a closure's own block. */
+        val arity get() = parameters.size + if (rest != null) 1 else 0
     }
 
     /** Local functions met while translating, translated after everything else. */
@@ -167,6 +184,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
 
     private val types = mutableMapOf<TypeDefinition, TypeInfo>()
 
+    /** Static properties, which are globals, and static methods, by type and dot name. */
+    private val staticProperties = mutableMapOf<Pair<TypeDefinition, String>, ResolvedName>()
+    private val staticMethods = mutableMapOf<Pair<TypeDefinition, String>, FnInfo>()
+
     /** Heap offset of each backed property within its object. */
     private val fieldOffsets = mutableMapOf<ResolvedName, Int>()
 
@@ -174,7 +195,13 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     private val dispatchers = mutableMapOf<String, Label>()
 
     private fun fnInfo(name: ResolvedName, parameters: TmpL.Parameters, body: TmpL.BlockStatement?, sig: Signature2) =
-        FnInfo(name.toString(), parameters.parameters, body, !sig.returnType2.isVoidLike)
+        FnInfo(
+            name.toString(),
+            parameters.parameters,
+            body,
+            !sig.returnType2.isVoidLike,
+            rest = parameters.restParameter?.name?.name,
+        )
 
     private fun registerType(decl: TmpL.TypeDeclaration) {
         val classId = if (decl.kind ==
@@ -198,6 +225,12 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     fnInfo(member.name.name, member.parameters, member.body, member.sig)
                 is TmpL.Setter -> info.own["s:${member.dotName.dotNameText}"] =
                     fnInfo(member.name.name, member.parameters, member.body, member.sig)
+                is TmpL.StaticProperty -> {
+                    globals[member.name.name] = globals.size
+                    staticProperties[decl.typeShape to member.dotName.dotNameText] = member.name.name
+                }
+                is TmpL.StaticMethod -> staticMethods[decl.typeShape to member.dotName.dotNameText] =
+                    fnInfo(member.name.name, member.parameters, member.body, member.sig)
                 else -> TODO("${member::class.simpleName}: $member")
             }
         }
@@ -215,11 +248,11 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
      *
      * D's a() is C's; depth first finds A's through B.
      */
-    private fun resolve(info: TypeInfo, key: String): FnInfo? {
+    private fun resolve(info: TypeInfo, key: String, concrete: Boolean = true): FnInfo? {
         var level = listOf(info)
         val seen = mutableSetOf<TypeInfo>()
         while (level.isNotEmpty()) {
-            level.firstNotNullOfOrNull { it.own[key] }?.let { return it }
+            level.firstNotNullOfOrNull { t -> t.own[key]?.takeIf { !concrete || it.body != null } }?.let { return it }
             seen.addAll(level)
             level = level.flatMap { t ->
                 t.decl.superTypes.mapNotNull { types[it.typeName.sourceDefinition] }
@@ -228,10 +261,25 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         return null
     }
 
+    /** Whether [c] is [target] or has it among its super types. */
+    private fun isSubtype(c: TypeInfo, target: TypeDefinition): Boolean {
+        if (c.decl.typeShape == target) return true
+        return c.decl.superTypes.any { st ->
+            types[st.typeName.sourceDefinition]?.let { isSubtype(it, target) } == true
+        }
+    }
+
     private fun allFunctions(): List<FnInfo> =
-        functions.values.toList() + types.values.flatMap { listOfNotNull(it.constructor) + it.own.values }
+        functions.values.toList() + staticMethods.values +
+            types.values.flatMap { listOfNotNull(it.constructor) + it.own.values }
 
     fun translate(): DispatchLayout {
+        for (module in modules) {
+            for (import in module.imports) {
+                val local = import.localName?.name ?: continue
+                aliases[local] = import.externalName.name
+            }
+        }
         val topLevels = modules.flatMap { it.topLevels }
         for (topLevel in topLevels) {
             when (topLevel) {
@@ -258,6 +306,12 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                         if (value(init)) frame.storeGlobal(globals.getValue(topLevel.name.name))
                     }
                     is TmpL.ModuleInitBlock -> statement(topLevel.body)
+                    // Static properties initialize where their type is declared.
+                    is TmpL.TypeDeclaration -> for (member in topLevel.members) {
+                        if (member is TmpL.StaticProperty && value(member.expression)) {
+                            frame.storeGlobal(globals.getValue(member.name.name))
+                        }
+                    }
                     else -> {}
                 }
             }
@@ -265,7 +319,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             finish()
         }
 
-        for (fn in allFunctions()) translateFunction(fn)
+        // An abstract member has no body and is never jumped to.
+        for (fn in allFunctions()) if (fn.body != null) translateFunction(fn)
         while (pendingClosures.isNotEmpty()) translateFunction(pendingClosures.removeFirst())
         // Translating can ask for more dispatchers only from function
         // bodies, which are all done by now.
@@ -314,12 +369,13 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         val params = fn.parameters
         // A closure's first parameter is itself: the block holding its row and environment.
         val envSlots = if (fn.isClosure) 1 else 0
-        val writer = FunctionWriter(program, fn.label.hint, envSlots + params.size, fn.label)
+        val restSlots = if (fn.rest != null) 1 else 0
+        val writer = FunctionWriter(program, fn.label.hint, envSlots + params.size + restSlots, fn.label)
         val body = fn.body ?: TODO("${fn.name} has no body")
         val locals = localsOf(body)
         writer.begin(locals.size)
-        val slots = slotsFrom(params.map { it.name.name }, writer.param(envSlots)) +
-            slotsFrom(locals, writer.param(envSlots + params.size))
+        val slots = slotsFrom(params.map { it.name.name } + listOfNotNull(fn.rest), writer.param(envSlots)) +
+            slotsFrom(locals, writer.param(envSlots + params.size + restSlots))
         val env = if (fn.isClosure) writer.param(0) else null
         Scope(writer.e, writer.frame, writer, slots, fn.returnsValue, env, fn.captured.orEmpty(), fn.selfName).apply {
             allocateEntryBoxes(locals)
@@ -400,11 +456,12 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     frame.heapLoad(offset)
                 }
                 name == selfName -> frame.load(envSlot!!)
-                else -> frame.loadGlobal(globals[name] ?: TODO("reference to $name"))
+                else -> frame.loadGlobal(globals[canon(name)] ?: TODO("reference to $name"))
             }
         }
 
-        fun load(name: ResolvedName) {
+        fun load(local: ResolvedName) {
+            val name = canon(local)
             val fn = functions[name]
             if (fn != null && name !in slots && name !in globals) {
                 // A module function as a value: a block holding its adapter's row.
@@ -562,6 +619,34 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     val subject = stmt.left.subject as? TmpL.Expression ?: TODO("static set $stmt")
                     methodCall(subject, "s:${dotName(stmt.left.property)}", listOf(stmt.right))
                 }
+                is TmpL.ComputedJumpStatement -> {
+                    // A chain of tests. Each case pops the value first.
+                    check(value(stmt.caseExpr))
+                    val end = label("endwhen")
+                    val d0 = e.depth
+                    for (case in stmt.cases) {
+                        val body = label("case")
+                        val next = label("nextcase")
+                        e.const(0)
+                        for (v in case.values) {
+                            e.pick(2)
+                            e.const(v.index)
+                            e.op(Subtract)
+                            e.op(Not)
+                            e.op(Add)
+                        }
+                        e.branch(body, next)
+                        e.startBlock(body, d0)
+                        e.op(Pop)
+                        statement(case.body)
+                        e.jump(end)
+                        e.startBlock(next, d0)
+                    }
+                    e.op(Pop)
+                    statement(stmt.elseCase.body)
+                    e.jump(end)
+                    if (e.knows(end)) e.startBlock(end)
+                }
                 is TmpL.ThrowStatement -> bubble()
                 is TmpL.ModuleInitFailed -> e.jumpAway(program.halt)
                 is TmpL.EmbeddedComment, is TmpL.BoilerplateCodeFoldBoundary -> {}
@@ -598,7 +683,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             when (val slot = slots[name]) {
                 null -> {
                     check(name !in envOffsets) { "assigning captured $name, which is not boxed" }
-                    frame.storeGlobal(globals[name] ?: TODO("store to $name"))
+                    frame.storeGlobal(globals[canon(name)] ?: TODO("store to $name"))
                 }
                 else -> frame.store(slot)
             }
@@ -630,9 +715,41 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 }
                 is TmpL.CallExpression -> return callExpression(expr)
                 is TmpL.This -> frame.load(slots[expr.id.name] ?: TODO("this outside a method: $expr"))
-                is TmpL.GetBackedProperty -> {
-                    check(value(expr.subject as? TmpL.Expression ?: TODO("static get $expr")))
-                    frame.heapLoad(fieldOffset(expr.property))
+                is TmpL.UncheckedNotNullExpression -> return value(expr.expression)
+                is TmpL.InstanceOfExpression -> {
+                    check(value(expr.expr))
+                    typeTest(expr.expr, expr.checkedFrontendType)
+                }
+                is TmpL.CastExpression -> {
+                    check(value(expr.expr))
+                    e.op(PietOp.Duplicate)
+                    typeTest(expr.expr, expr.checkedFrontendType)
+                    val ok = label("cast")
+                    if (expr.canFail) {
+                        val landing = bubbleLanding(e.depth - 1)
+                        e.branch(ok, landing)
+                        e.startBlock(ok)
+                    } else {
+                        // A safe cast is one the frontend proved; check it anyway.
+                        e.branch(ok, bubbleLanding(e.depth - 1))
+                        e.startBlock(ok)
+                    }
+                }
+                is TmpL.GetBackedProperty -> when (val subject = expr.subject) {
+                    is TmpL.TypeName -> {
+                        val name = when (val p = expr.property) {
+                            is TmpL.InternalPropertyId -> p.name.name
+                            is TmpL.ExternalPropertyId ->
+                                staticProperties[subject.sourceDefinition to p.name.dotNameText]
+                                    ?: TODO("static $expr")
+                        }
+                        frame.loadGlobal(globals[name] ?: TODO("static $expr"))
+                    }
+                    is TmpL.Expression -> {
+                        check(value(subject))
+                        frame.heapLoad(fieldOffset(expr.property))
+                    }
+                    else -> TODO("${subject::class.simpleName}: $expr")
                 }
                 is TmpL.GetAbstractProperty -> return methodCall(expr.subject, "g:${dotName(expr.property)}", listOf())
                 is TmpL.InfixOperation -> infix(expr)
@@ -646,6 +763,34 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             return true
         }
 
+        /** Pushes [actuals] for [fn], gathering any past its parameters into its rest List. */
+        private fun argsFor(fn: FnInfo, actuals: List<TmpL.Actual>, skip: Int = 0) {
+            val fixed = fn.parameters.size - skip
+            if (fn.rest == null) {
+                args(actuals)
+                return
+            }
+            args(actuals.take(fixed))
+            listOf(actuals.drop(fixed))
+        }
+
+        /** Pushes a new List of [actuals]. */
+        private fun listOf(actuals: List<TmpL.Actual>) {
+            val n = args(actuals)
+            if (n == 0) {
+                e.const(0)
+                e.const(0)
+                e.const(NULL)
+            } else {
+                frame.alloc(n)
+                e.const(n)
+                e.const(n)
+                e.pick(3)
+            }
+            frame.alloc(3)
+            if (n != 0) e.dropUnder(1)
+        }
+
         private fun args(actuals: List<TmpL.Actual>): Int {
             for (actual in actuals) {
                 check(value(actual as? TmpL.Expression ?: TODO("actual $actual"))) { "void argument $actual" }
@@ -656,19 +801,28 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         private fun callExpression(expr: TmpL.CallExpression): Boolean {
             when (val fn = expr.fn) {
                 is TmpL.FnReference -> {
-                    val name = fn.id.name
+                    val name = canon(fn.id.name)
                     builtins[name]?.let { return builtin(it, expr) }
                     val info = functions[name]
                     if (info == null || name in slots || name in envOffsets || name == selfName) {
                         return callValue(expr) { load(name) }
                     }
                     val landing = bubbleLanding()
-                    call(frame, info.label, expr.parameters.size, info.returnsValue, landing) {
-                        args(expr.parameters)
+                    call(frame, info.label, info.arity, info.returnsValue, landing) {
+                        argsFor(info, expr.parameters)
                     }
                     return info.returnsValue
                 }
                 is TmpL.FunInterfaceCallable -> return callValue(expr) { check(value(fn.expr)) }
+                is TmpL.MethodReference if fn.subject is TmpL.TypeName -> {
+                    val type = (fn.subject as TmpL.TypeName).sourceDefinition
+                    val info = staticMethods[type to fn.methodName.dotNameText]
+                        ?: return staticBuiltin(type, fn.methodName.dotNameText, expr)
+                    call(frame, info.label, info.arity, info.returnsValue, bubbleLanding()) {
+                        argsFor(info, expr.parameters)
+                    }
+                    return info.returnsValue
+                }
                 is TmpL.MethodReference -> {
                     val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
                     return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters)
@@ -687,10 +841,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     e.const(info.classId ?: TODO("new interface $expr"))
                     repeat(info.fieldCount) { e.const(0) }
                     frame.alloc(1 + info.fieldCount)
-                    call(frame, ctor.label, 1 + expr.parameters.size, false, bubbleLanding()) {
+                    call(frame, ctor.label, ctor.arity, false, bubbleLanding()) {
                         // ret, fail and D are above the new object.
                         e.pick(4)
-                        args(expr.parameters)
+                        argsFor(ctor, expr.parameters, skip = 1)
                     }
                     return true
                 }
@@ -735,17 +889,29 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
          */
         fun methodCall(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
             val type = subject.type.definition
-            val info = types[type] ?: return builtinMethod(subject, key, actuals)
-            val impl = resolve(info, key) ?: TODO("$key on ${info.decl.name}")
+            val info = types[type]
+                ?: (type as? TypeFormal)?.upperBounds?.firstNotNullOfOrNull { types[it.definition] }
+                ?: return builtinMethod(subject, key, actuals)
+            // An interface's member may be abstract; its signature is what matters here.
+            val impl = resolve(info, key, concrete = info.classId != null) ?: TODO("$key on ${info.decl.name}")
             val target = when (info.classId) {
                 null -> dispatchers.getOrPut(key) { Label("dispatch_$key") }
                 else -> impl.label
             }
-            call(frame, target, 1 + actuals.size, impl.returnsValue, bubbleLanding()) {
+            call(frame, target, impl.arity, impl.returnsValue, bubbleLanding()) {
                 check(value(subject))
-                args(actuals)
+                argsFor(impl, actuals, skip = 1)
             }
             return impl.returnsValue
+        }
+
+        /** Static methods of types the runtime provides. */
+        private fun staticBuiltin(type: TypeDefinition, name: String, expr: TmpL.CallExpression): Boolean {
+            when {
+                type == WellKnownTypes.listTypeDefinition && name == "of" -> listOf(expr.parameters)
+                else -> TODO("static $name on $type: $expr")
+            }
+            return true
         }
 
         /** Methods of types the runtime provides. */
@@ -930,21 +1096,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     args(ps)
                     e.op(Not)
                 }
-                PietBuiltin.Listify -> {
-                    val n = args(ps)
-                    if (n == 0) {
-                        e.const(0)
-                        e.const(0)
-                        e.const(NULL)
-                    } else {
-                        frame.alloc(n)
-                        e.const(n)
-                        e.const(n)
-                        e.pick(3)
-                    }
-                    frame.alloc(3)
-                    if (n != 0) e.dropUnder(1)
-                }
+                PietBuiltin.Listify -> listOf(ps)
                 PietBuiltin.IsNull, PietBuiltin.NotNull -> {
                     val x = ps.single() as TmpL.Expression
                     requireNullable(x)
@@ -1008,6 +1160,70 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 }
             }
             return true
+        }
+
+        /**
+         * `[v] -> [ok]`: whether v, whose static type is [source]'s, is a
+         * [target]. Only values known to be objects or null can be tested:
+         * an object's first cell is its class id, but an Int in an AnyValue
+         * has no first cell, and reading one would read whatever is there.
+         */
+        private fun typeTest(source: TmpL.Expression, target: Type2) {
+            val from = source.type
+            val to = target.definition
+            val targetInfo = types[to]
+            val fromIsObject = types[from.definition] != null
+            when {
+                targetInfo != null && fromIsObject -> {
+                    val classes = types.values.filter { it.classId != null && isSubtype(it, to) }.map { it.classId!! }
+                    nullGuarded(from) {
+                        frame.heapLoad()
+                        // Class ids are distinct, so the sum is 0 or 1.
+                        e.const(0)
+                        for (id in classes) {
+                            e.pick(2)
+                            e.const(id)
+                            e.op(Subtract)
+                            e.op(Not)
+                            e.op(Add)
+                        }
+                        e.dropUnder(1)
+                    }
+                }
+                to == from.definition && from.nullity == Nullity.OrNull -> {
+                    requireNullable(source)
+                    e.const(NULL)
+                    e.op(Subtract)
+                    e.op(Not)
+                    e.op(Not)
+                }
+                else -> TODO("type test from $from to $target: $source")
+            }
+        }
+
+        /** `[v] -> [0]` if v is null, else [test] of v. */
+        private fun nullGuarded(type: Type2, test: () -> Unit) {
+            if (type.nullity != Nullity.OrNull) {
+                test()
+                return
+            }
+            val isNull = label("isnull")
+            val notNull = label("notnull")
+            val join = label("endnull")
+            e.op(PietOp.Duplicate)
+            e.const(NULL)
+            e.op(Subtract)
+            e.op(Not)
+            val d0 = e.depth - 1
+            e.branch(isNull, notNull)
+            e.startBlock(isNull, d0)
+            e.op(Pop)
+            e.const(0)
+            e.jump(join)
+            e.startBlock(notNull, d0)
+            test()
+            e.jump(join)
+            e.startBlock(join)
         }
 
         /** `[a, b] -> (a > b) - (b > a)` */
