@@ -19,6 +19,7 @@ import lang.temper.be.cli.ToolchainResult
 import lang.temper.be.cli.maybeLogBeforeRunning
 import lang.temper.common.RFailure
 import lang.temper.common.RResult
+import lang.temper.common.RSuccess
 import lang.temper.fs.OutDir
 import lang.temper.library.relativeOutputDirectoryForLibrary
 import lang.temper.log.FilePath
@@ -80,6 +81,16 @@ private fun unavailable(cliEnv: CliEnv, message: String) =
         ),
     )
 
+/** A run whose output carries [PANIC_MARKER] failed, whatever npiet's exit status says. */
+private fun panicked(result: RResult<EffortSuccess, CliFailure>, cliEnv: CliEnv): RResult<EffortSuccess, CliFailure> {
+    val stdout = (result as? RSuccess)?.result?.stdout ?: return result
+    val at = stdout.indexOf(PANIC_MARKER)
+    if (at < 0) return result
+    return RFailure(
+        CliFailure("panic", effort = Effort(stdout = stdout.substring(0, at), exitCode = 1, cliEnv = cliEnv)),
+    )
+}
+
 private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult {
     val runDir = relativeOutputDirectoryForLibrary(PietBackend.Factory.backendId, libraryName)
     val npiet = this[NpietCommand]
@@ -98,5 +109,5 @@ private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): Tool
         cwd = runDir,
     )
     command.maybeLogBeforeRunning(npiet, shellPreferences)
-    return ToolchainResult(libraryName = libraryName, result = npiet.run(command))
+    return ToolchainResult(libraryName = libraryName, result = panicked(npiet.run(command), this))
 }

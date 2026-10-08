@@ -291,6 +291,7 @@ val Runtime.listJoin: Label get() {
         }
         frame.fillLength { frame.load(header) }
         frame.load(header)
+        this@listJoin.internTop(frame)
         ret(true)
         end()
     }
@@ -694,4 +695,74 @@ val Runtime.listReduceFrom: Label get() = routine("list_reduce_from", 4) {
     ld(acc)
     ret(true)
     end()
+}
+
+/*
+ * A Deque is a list with a fourth cell, the index of its first element:
+ * add appends as a ListBuilder does, removeFirst advances the head.
+ */
+const val DEQUE_HEAD = 3
+
+val Runtime.dequeRemoveFirst: Label get() = routine("deque_remove_first", 1) {
+    begin(0)
+    val d = param(0)
+    val ok = label("nonempty")
+    length(d)
+    field(d, DEQUE_HEAD)
+    e.op(Greater)
+    e.branch(ok, failLanding(e.depth - 1))
+    e.startBlock(ok)
+    element(d) { field(d, DEQUE_HEAD) }
+    setField(d, DEQUE_HEAD) {
+        field(d, DEQUE_HEAD)
+        e.const(1)
+        e.op(Add)
+    }
+    ret(true)
+    end()
+}
+
+/*
+ * A DenseBitVector is a list of 0s and 1s that grows when set past its end;
+ * reading past the end is false.
+ */
+val Runtime.bitVectorGet: Label get() = routine("bits_get", 2) {
+    begin(0)
+    val v = param(0)
+    val i = param(1)
+    e.ifElseValue(label("in").hint, {
+        e.const(0)
+        ld(i)
+        e.op(Greater)
+        e.op(Not)
+        length(v)
+        ld(i)
+        e.op(Greater)
+        e.op(PietOp.Multiply)
+    }, { element(v) { ld(i) } }) { e.const(0) }
+    ret(true)
+}
+
+val Runtime.bitVectorSet: Label get() {
+    val add = listBuilderAdd
+    return routine("bits_set", 3) {
+        begin(0)
+        val v = param(0)
+        val i = param(1)
+        val b = param(2)
+        e.whileLoop(label("grow").hint, {
+            length(v)
+            ld(i)
+            e.op(Greater)
+            e.op(Not)
+        }) {
+            call(frame, add, 2, false) {
+                ld(v)
+                e.const(0)
+            }
+        }
+        ld(b)
+        setElement(v) { ld(i) }
+        ret(false)
+    }
 }
