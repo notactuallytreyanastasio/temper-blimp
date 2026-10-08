@@ -55,12 +55,18 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
             val path = module.codeLocation.codeLocation.sourceFile.resolveFile(Pasm.CONNECTED_FILE)
             rawBackendFiles[path]?.let { Pasm(it) }
         }
-        val image = PietTranslator(
+        fun image(tests: Boolean) = PietTranslator(
             moduleSets.flatMap { it.modules },
             finished.modules.toSet(),
             connected.flatMap { it.routines.values }.associateBy { it.name },
-        ).translate().render()
-        return listOf(ByteArrayFileSpecification(filePath(MAIN_FILE), image.toPpm()))
+            tests,
+        ).translate().render().toPpm()
+        // Tests get an image of their own, which runs them instead.
+        val hasTests = finished.modules.any { m -> m.topLevels.any { it is TmpL.Test } }
+        return listOfNotNull(
+            ByteArrayFileSpecification(filePath(MAIN_FILE), image(false)),
+            if (hasTests) ByteArrayFileSpecification(filePath(TEST_FILE), image(true)) else null,
+        )
     }
 
     /**
@@ -103,6 +109,7 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
 
         /** A library is one image: Piet has nothing to link with. */
         const val MAIN_FILE = "main.ppm"
+        const val TEST_FILE = "test.ppm"
 
         val mimeType = MimeType("image", "x-portable-pixmap")
 

@@ -14,7 +14,12 @@ import lang.temper.type.TypeDefinition
  * a library pulls in all of `std`, and all of `std` would make every image
  * huge and drag in Float64 code that nothing calls.
  */
-fun reachableTopLevels(modules: List<TmpL.Module>, roots: Set<TmpL.Module>): List<TmpL.TopLevel> {
+fun reachableTopLevels(
+    modules: List<TmpL.Module>,
+    roots: Set<TmpL.Module>,
+    /** Keep the roots' tests, and [TEST_RUNNER] to run them; otherwise tests go. */
+    tests: Boolean = false,
+): List<TmpL.TopLevel> {
     val aliases = mutableMapOf<ResolvedName, ResolvedName>()
     for (module in modules) {
         for (import in module.imports) {
@@ -74,7 +79,11 @@ fun reachableTopLevels(modules: List<TmpL.Module>, roots: Set<TmpL.Module>): Lis
         }
     }
 
-    for ((topLevel, module) in all) if (module in roots) keep(topLevel)
+    for ((topLevel, module) in all) if (module in roots && (tests || topLevel !is TmpL.Test)) keep(topLevel)
+    if (tests) {
+        byName.entries.firstOrNull { it.key.displayName == TEST_RUNNER }?.let { keep(it.value) }
+            ?: TODO("tests, but no $TEST_RUNNER in std/testing")
+    }
     drain()
     // Dependency init blocks that touch anything kept, until nothing changes.
     var changed = true
@@ -93,3 +102,6 @@ fun reachableTopLevels(modules: List<TmpL.Module>, roots: Set<TmpL.Module>): Lis
     }
     return all.map { it.first }.filter { it in kept }
 }
+
+/** std/testing's function that runs test cases and reports them as JUnit XML. */
+const val TEST_RUNNER = "runTestCases"

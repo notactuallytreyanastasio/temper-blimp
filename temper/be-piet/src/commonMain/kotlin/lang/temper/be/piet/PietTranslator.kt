@@ -47,6 +47,11 @@ class PietTranslator(
     private val roots: Set<TmpL.Module> = modules.toSet(),
     /** A library's own Piet assembly for its @connected functions, by name. */
     private val connected: Map<String, Pasm.Routine> = mapOf(),
+    /**
+     * Run the roots' tests instead of their module code's end: main hands
+     * every test to std/testing's runner and prints its JUnit XML.
+     */
+    private val tests: Boolean = false,
 ) {
     private val program = AsmProgram()
     private val rt = Runtime(program)
@@ -238,7 +243,7 @@ class PietTranslator(
             name.toString(),
             parameters.parameters,
             body,
-            !sig.returnType2.isVoidLike,
+            !excludeBubble(sig.returnType2).isVoidLike,
             rest = parameters.restParameter?.name?.name,
             // What a normal return carries: `T? | Bubble` returns a T?.
             returnType = excludeBubble(sig.returnType2),
@@ -343,7 +348,8 @@ class PietTranslator(
                 aliases[local] = import.externalName.name
             }
         }
-        val topLevels = reachableTopLevels(modules, roots)
+        val topLevels = reachableTopLevels(modules, roots, tests)
+        val testCases = topLevels.filterIsInstance<TmpL.Test>()
         for (topLevel in topLevels) {
             when (topLevel) {
                 is TmpL.SupportCodeDeclaration ->
@@ -359,6 +365,9 @@ class PietTranslator(
                 is TmpL.TypeDeclaration -> registerType(topLevel)
                 is TmpL.ModuleLevelDeclaration -> globals[topLevel.name.name] = globals.size
                 is TmpL.ModuleInitBlock -> {}
+                // A test is a function of its Test, which bubbles on a hard failure.
+                is TmpL.Test -> functions[topLevel.name.name] =
+                    FnInfo(topLevel.name.name.toString(), topLevel.parameters.parameters, topLevel.body, false)
                 else -> TODO("$topLevel")
             }
         }
@@ -371,6 +380,7 @@ class PietTranslator(
             for (i in 0 until node.childCount) node.childOrNull(i)?.let { findLiterals(it) }
         }
         topLevels.forEach { findLiterals(it) }
+        testCases.forEach { literals.add(it.rawName) }
         for (literal in literals) literalGlobals[literal] = globals.size + literalGlobals.size
         val main = MainWriter(program, globals.size + literalGlobals.size)
         val mainLocals = topLevels.filterIsInstance<TmpL.ModuleInitBlock>().flatMap { localsOf(it.body) }
@@ -398,6 +408,28 @@ class PietTranslator(
                         }
                     }
                     else -> {}
+                }
+            }
+            if (tests) {
+                // log(runTestCases([new Pair(name, test), ...]))
+                val runner = functions.values.first { it.simpleName == TEST_RUNNER }
+                call(frame, rt.log, 1, false) {
+                    call(frame, runner.label, 1, true) {
+                        for (test in testCases) {
+                            e.const(0)
+                            frame.loadGlobal(literalGlobals.getValue(test.rawName))
+                            load(test.name.name)
+                            frame.alloc(3)
+                        }
+                        val n = testCases.size
+                        check(n > 0) { "a test image with no tests" }
+                        frame.alloc(n)
+                        e.const(n)
+                        e.const(n)
+                        e.pick(3)
+                        frame.alloc(3)
+                        e.dropUnder(1)
+                    }
                 }
             }
             main.halt()
