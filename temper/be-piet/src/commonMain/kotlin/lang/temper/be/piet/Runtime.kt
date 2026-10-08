@@ -318,15 +318,15 @@ val Runtime.stringCompare: Label get() = routine("str_cmp", 2) {
  * 32-bit and, or, xor, one bit at a time from the bottom. Each bit's result
  * is `c1 * (a + b) + c2 * a * b`. Bit 31 weighs -2^31, so every partial
  * result fits in 32 bits and survives being stored.
+ *
+ * Unrolled: a loop would jump through the trunk 32 times per call, and a
+ * jump costs as much as all of a bit's arithmetic many times over.
  */
 fun Runtime.bitwise(name: String, c1: Int, c2: Int): Label = routine("bit_$name", 2) {
-    begin(4)
+    begin(1)
     val a = param(0)
     val b = param(1)
     val r = param(2)
-    val weight = param(3)
-    val i = param(4)
-    val bits = param(5)
     fun lowBit(slot: Int) {
         // ((x mod 2) + 2) mod 2, then x = (x - bit) / 2
         frame.load(slot)
@@ -344,7 +344,9 @@ fun Runtime.bitwise(name: String, c1: Int, c2: Int): Label = routine("bit_$name"
         e.op(PietOp.Divide)
         frame.store(slot)
     }
-    fun combine() {
+    for (i in 0 until 32) {
+        lowBit(a)
+        lowBit(b)
         // [x, y] -> c1 * (x + y) + c2 * x * y
         e.pick(2)
         e.pick(2)
@@ -358,46 +360,13 @@ fun Runtime.bitwise(name: String, c1: Int, c2: Int): Label = routine("bit_$name"
         e.op(PietOp.Multiply)
         e.op(PietOp.Add)
         e.dropUnder(2)
-    }
-    e.const(1)
-    frame.store(weight)
-    e.whileLoop(label("bits").hint, {
-        e.const(31)
-        frame.load(i)
-        e.op(PietOp.Greater)
-    }) {
-        lowBit(a)
-        lowBit(b)
-        combine()
-        frame.load(weight)
+        e.const(if (i == 31) -(1L shl 31) else 1L shl i)
         e.op(PietOp.Multiply)
         frame.load(r)
         e.op(PietOp.Add)
         frame.store(r)
-        frame.load(i)
-        e.const(1)
-        e.op(PietOp.Add)
-        frame.store(i)
-        e.ifThen(label("double").hint, {
-            e.const(31)
-            frame.load(i)
-            e.op(PietOp.Greater)
-        }) {
-            frame.load(weight)
-            e.const(2)
-            e.op(PietOp.Multiply)
-            frame.store(weight)
-        }
     }
-    lowBit(a)
-    lowBit(b)
-    combine()
-    frame.store(bits)
     frame.load(r)
-    frame.load(bits)
-    e.const(1L shl 31)
-    e.op(PietOp.Multiply)
-    e.op(PietOp.Subtract)
     ret(true)
 }
 

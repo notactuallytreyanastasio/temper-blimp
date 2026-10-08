@@ -8,7 +8,7 @@ fun runNpiet(image: PietImage, stdin: String = ""): String {
     val file = File.createTempFile("piet", ".ppm")
     try {
         file.writeBytes(image.toPpm())
-        val process = ProcessBuilder("npiet", "-q", "-cs", "1", file.path)
+        val process = ProcessBuilder("npiet", "-q", "-cs", "1", "-e", "200000000", file.path)
             .redirectErrorStream(true)
             .start()
         process.outputStream.use { it.write(stdin.toByteArray()) }

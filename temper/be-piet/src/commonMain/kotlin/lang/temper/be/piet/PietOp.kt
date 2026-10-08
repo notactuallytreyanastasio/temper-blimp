@@ -88,9 +88,14 @@ private fun MutableList<Step>.pushConst(n: Long) {
     }
 }
 
+/**
+ * floor(sqrt(n)). Compares by division, not by squaring: for n near
+ * Long.MAX_VALUE, `(a + 1) * (a + 1)` overflows, goes negative, and a loop
+ * written that way never ends.
+ */
 private fun isqrt(n: Long): Long {
     var a = kotlin.math.sqrt(n.toDouble()).toLong()
-    while (a * a > n) a -= 1
-    while ((a + 1) * (a + 1) <= n) a += 1
+    while (a > 0 && a > n / a) a -= 1
+    while ((a + 1) <= n / (a + 1)) a += 1
     return a
 }

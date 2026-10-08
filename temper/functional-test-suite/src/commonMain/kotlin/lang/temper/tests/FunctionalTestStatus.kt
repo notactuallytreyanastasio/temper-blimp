@@ -151,6 +151,8 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.TypesDenseBitVector,
         Ft.TypesDeque,
         Ft.TypesIntBasics,
+        Ft.TypesIntLimits,
+        Ft.TypesIntShifty,
         Ft.TypesListEmpty,
         Ft.TypesListOperations,
         Ft.TypesListReduce,

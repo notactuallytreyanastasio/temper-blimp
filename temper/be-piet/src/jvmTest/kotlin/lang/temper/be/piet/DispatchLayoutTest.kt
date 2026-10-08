@@ -51,3 +51,24 @@ class DispatchLayoutTest {
         assertEquals(values.joinToString(" ", postfix = " "), runNpiet(DispatchLayout(listOf(body), 0).render()))
     }
 }
+
+class ExpressLaneTest {
+    @Test
+    fun jumpsAcrossManyRowsUseTheLane() {
+        // 40 rows; row i prints i and jumps to (i + 17) % 40, a single cycle through every row, from row 0, for 40 hops.
+        val n = 40
+        val order = generateSequence(0) { (it + 17) % n }.take(n).toList()
+        val rows = (0 until n).map { i ->
+            val next = if (i == order.last()) n else (i + 17) % n
+            listOf(
+                PietInstr.Const(i.toLong()),
+                PietInstr.Op(PietOp.OutNumber),
+                PietInstr.Const(' '.code.toLong()),
+                PietInstr.Op(PietOp.OutChar),
+                PietInstr.Const(next.toLong()),
+            )
+        }
+        val want = order.joinToString("") { "$it " }
+        kotlin.test.assertEquals(want, runNpiet(DispatchLayout(rows, 0).render()))
+    }
+}
