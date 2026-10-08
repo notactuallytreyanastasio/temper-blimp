@@ -8,6 +8,7 @@ import lang.temper.common.MimeType
 import lang.temper.frontend.Module
 import lang.temper.fs.ResourceDescriptor
 import lang.temper.log.FilePath
+import lang.temper.log.filePath
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
 import lang.temper.name.FileType
@@ -40,7 +41,8 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
         )
 
     override fun translate(finished: TmpL.ModuleSet): List<OutputFileSpecification> {
-        TODO("$finished")
+        val image = PietTranslator(finished.modules).translate().render()
+        return listOf(ByteArrayFileSpecification(filePath(MAIN_FILE), image.toPpm()))
     }
 
     override val supportNetwork = PietSupportNetwork
