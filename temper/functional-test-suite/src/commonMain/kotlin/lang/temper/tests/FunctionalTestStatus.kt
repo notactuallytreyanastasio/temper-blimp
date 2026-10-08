@@ -116,6 +116,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.AlgosHelloFromClassToTop,
         Ft.AlgosHelloWorld,
         Ft.AlgosHelloWorldObject,
+        Ft.ClassesCallOverrideFromSubtype,
         Ft.ClassesDirectGetter,
         Ft.ClassesInheritedGetter,
         Ft.ClassesPrivateMethod,
@@ -123,14 +124,19 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.ControlFlowIfReturn,
         Ft.ControlFlowLoopReenterable,
         Ft.ControlFlowLoops,
+        Ft.FunctionsAsValues,
         Ft.FunctionsConstructorCallbacks,
+        Ft.FunctionsLocals,
         Ft.FunctionsSimpleLocals,
         Ft.ImportsTypes,
         Ft.InterfacesPureVirtual,
         Ft.NamesNonascii,
         Ft.SemanticsConstness,
+        Ft.SemanticsMutuallyReferencingTypes,
         Ft.SemanticsTypeCheckedLocals,
         Ft.TypesIntBasics,
+        Ft.TypesListEmpty,
+        Ft.TypesStringIsEmpty,
     )
 }.mapValues { it.value.toList() }
 

@@ -14,6 +14,9 @@ import lang.temper.log.FilePath
 import lang.temper.name.ModuleName
 import lang.temper.tests.FunctionalTestBase
 
+/** About a minute of npiet on a laptop. */
+private const val MAX_STEPS = 1_000_000_000L
+
 class PietFunctionalTest : FunctionalTestRunner<PietBackend>(PietBackend.Factory) {
     override fun runGeneratedCode(
         backend: PietBackend,
@@ -26,7 +29,7 @@ class PietFunctionalTest : FunctionalTestRunner<PietBackend>(PietBackend.Factory
     ) {
         CliEnv.using(factory.specifics, ShellPreferences.functionalTests(console), cancelGroup) {
             copyOutputDir(outputRoot, FilePath.emptyPath)
-            val result = runPiet(this, request).first().result
+            val result = runPiet(this, request, maxSteps = MAX_STEPS).first().result
             var pass = false
             try {
                 test.assertRunOutput(result)
