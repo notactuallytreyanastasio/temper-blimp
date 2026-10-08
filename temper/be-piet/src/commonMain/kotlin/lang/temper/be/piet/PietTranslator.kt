@@ -382,7 +382,10 @@ class PietTranslator(
         topLevels.forEach { findLiterals(it) }
         testCases.forEach { literals.add(it.rawName) }
         for (literal in literals) literalGlobals[literal] = globals.size + literalGlobals.size
-        val main = MainWriter(program, globals.size + literalGlobals.size)
+        // A program that uses async gets one more global, its run queue.
+        val usesAsync = PietBuiltin.Async in builtins.values
+        if (usesAsync) rt.runQueueGlobal = globals.size + literalGlobals.size
+        val main = MainWriter(program, globals.size + literalGlobals.size + if (usesAsync) 1 else 0)
         val mainLocals = topLevels.filterIsInstance<TmpL.ModuleInitBlock>().flatMap { localsOf(it.body) }
         Scope(main.e, main.frame, writer = null, slotsFrom(mainLocals, 0)).apply {
             // The intern table must be the first allocation: it lives at address 0.
@@ -392,6 +395,10 @@ class PietTranslator(
                 frame.stringLiteral(literal)
                 rt.internTop(frame)
                 frame.storeGlobal(global)
+            }
+            if (usesAsync) {
+                frame.newRunQueue()
+                frame.storeGlobal(rt.runQueueGlobal)
             }
             repeat(mainLocals.size) { e.const(0) }
             allocateEntryBoxes(mainLocals)
@@ -408,6 +415,21 @@ class PietTranslator(
                         }
                     }
                     else -> {}
+                }
+            }
+            if (usesAsync) {
+                // Step whatever async has queued until nothing is.
+                e.whileLoop("main.async", {
+                    frame.loadGlobal(rt.runQueueGlobal)
+                    frame.heapLoad(LIST_LENGTH)
+                    frame.loadGlobal(rt.runQueueGlobal)
+                    frame.heapLoad(DEQUE_HEAD)
+                    e.op(Greater)
+                }) {
+                    call(frame, rt.generatorNext, 1, true) {
+                        call(frame, rt.dequeRemoveFirst, 1, true) { frame.loadGlobal(rt.runQueueGlobal) }
+                    }
+                    e.op(Pop)
                 }
             }
             if (tests) {
@@ -1114,6 +1136,17 @@ class PietTranslator(
                     val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
                     return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters, expr.type)
                 }
+                is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.promiseBuilderTypeDefinition -> {
+                    check(expr.parameters.isEmpty())
+                    frame.newPromise()
+                    return true
+                }
+                is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.valueResultTypeDefinition -> {
+                    // A box; a DoneResult is null.
+                    check(args(expr.parameters) == 1)
+                    frame.alloc(1)
+                    return true
+                }
                 is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.dequeTypeDefinition -> {
                     e.const(0)
                     e.const(0)
@@ -1344,6 +1377,47 @@ class PietTranslator(
                     "m:get" -> return rtCall(rt.bitVectorGet, subject, actuals, true)
                     "m:set" -> return rtCall(rt.bitVectorSet, subject, actuals, false)
                     else -> TODO("$key on DenseBitVector")
+                }
+                type in GENERATOR_TYPES -> when (key) {
+                    // next(), which can bubble, is not done: it would need
+                    // the bubble landing passed through gen_next.
+                    "m:nextSafe" -> return rtCall(rt.generatorNext, subject, actuals, true)
+                    "g:done" -> {
+                        check(value(subject))
+                        frame.heapLoad(GEN_DONE)
+                    }
+                    "m:close" -> {
+                        e.const(1)
+                        check(value(subject))
+                        frame.heapStore(GEN_DONE)
+                        return false
+                    }
+                    else -> TODO("$key on ${subject.type}")
+                }
+                // A builder is its own promise.
+                type == WellKnownTypes.promiseBuilderTypeDefinition -> when (key) {
+                    "g:promise" -> check(value(subject))
+                    "m:complete" -> {
+                        call(frame, rt.promiseSettle, 3, false) {
+                            check(value(subject))
+                            e.const(PROMISE_KEPT)
+                            check(args(actuals) == 1)
+                        }
+                        return false
+                    }
+                    "m:breakPromise" -> {
+                        call(frame, rt.promiseSettle, 3, false) {
+                            check(value(subject))
+                            e.const(PROMISE_BROKEN)
+                            e.const(0)
+                        }
+                        return false
+                    }
+                    else -> TODO("$key on ${subject.type}")
+                }
+                type == WellKnownTypes.valueResultTypeDefinition && key == "g:value" -> {
+                    check(value(subject))
+                    frame.heapLoad()
                 }
                 type == WellKnownTypes.pairTypeDefinition && key == "g:key" -> {
                     check(value(subject))
@@ -1750,6 +1824,27 @@ class PietTranslator(
                     // There is one console; it is not a value anyone inspects.
                     e.const(0)
                 }
+                PietBuiltin.AdaptGeneratorFn, PietBuiltin.SafeAdaptGeneratorFn -> {
+                    // [fn] -> a generator block `fn, done`
+                    check(args(ps) == 1)
+                    e.const(0)
+                    frame.alloc(2)
+                }
+                PietBuiltin.DoneResult -> e.const(NULL)
+                PietBuiltin.Async -> {
+                    // Make the block's generator and queue it; main steps it later.
+                    check(ps.size == 1)
+                    call(frame, rt.enqueue, 1, false) {
+                        callClosure(frame, 0, true, null, { check(value(ps[0] as TmpL.Expression)) }) {}
+                    }
+                    return false
+                }
+                PietBuiltin.AwakeUpon -> {
+                    call(frame, rt.awakeUpon, 2, false) { check(args(ps) == 2) }
+                    return false
+                }
+                PietBuiltin.GetPromiseResultSync ->
+                    call(frame, rt.promiseResult, 1, true, bubbleLanding()) { check(args(ps) == 1) }
                 PietBuiltin.Empty -> {
                     // The one Empty value; nothing ever looks inside it.
                     e.const(0)
@@ -2068,6 +2163,15 @@ class PietTranslator(
                         e.dropUnder(1)
                     }
                 }
+                // A ValueResult is a box and a DoneResult is null.
+                from.definition == WellKnownTypes.generatorResultTypeDefinition &&
+                    (to == WellKnownTypes.valueResultTypeDefinition || to == WellKnownTypes.doneResultTypeDefinition) -> {
+                    if (from.nullity == Nullity.OrNull) TODO("a nullable GeneratorResult, whose null is a DoneResult: $source")
+                    e.const(NULL)
+                    e.op(Subtract)
+                    e.op(Not)
+                    if (to == WellKnownTypes.valueResultTypeDefinition) e.op(Not)
+                }
                 from.definition in INDEX_TYPES && to == WellKnownTypes.stringIndexTypeDefinition -> {
                     // An index is never negative; none is -1.
                     e.const(-1)
@@ -2302,6 +2406,10 @@ class PietTranslator(
             WellKnownTypes.mappedTypeDefinition,
         )
 
+        private val GENERATOR_TYPES = setOf(
+            WellKnownTypes.generatorTypeDefinition,
+            WellKnownTypes.safeGeneratorTypeDefinition,
+        )
         private val LIST_TYPES = setOf(
             WellKnownTypes.listTypeDefinition,
             WellKnownTypes.listBuilderTypeDefinition,

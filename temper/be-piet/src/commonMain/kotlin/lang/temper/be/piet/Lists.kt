@@ -25,19 +25,19 @@ const val LIST_LENGTH = 0
 const val LIST_CAPACITY = 1
 const val LIST_DATA = 2
 
-private fun FunctionWriter.field(slot: Int, offset: Int) {
+internal fun FunctionWriter.field(slot: Int, offset: Int) {
     frame.load(slot)
     frame.heapLoad(offset)
 }
 
-private fun FunctionWriter.setField(slot: Int, offset: Int, push: () -> Unit) {
+internal fun FunctionWriter.setField(slot: Int, offset: Int, push: () -> Unit) {
     push()
     frame.load(slot)
     frame.heapStore(offset)
 }
 
 /** Pushes element [index] of the list in [list]. */
-private fun FunctionWriter.element(list: Int, index: () -> Unit) {
+internal fun FunctionWriter.element(list: Int, index: () -> Unit) {
     field(list, LIST_DATA)
     index()
     e.op(Add)
@@ -60,7 +60,7 @@ private fun FunctionWriter.inc(slot: Int, by: Int = 1) {
 }
 
 /** `for (i = 0; i < length of list; ++i)`. */
-private fun FunctionWriter.forEachIndex(name: String, list: Int, i: Int, body: () -> Unit) {
+internal fun FunctionWriter.forEachIndex(name: String, list: Int, i: Int, body: () -> Unit) {
     e.const(0)
     frame.store(i)
     e.whileLoop(label(name).hint, {

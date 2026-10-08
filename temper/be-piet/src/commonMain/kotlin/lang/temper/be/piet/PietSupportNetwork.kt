@@ -139,6 +139,12 @@ enum class PietBuiltin(
     DivIntInt64Safe(BuiltinOperatorId.DivIntInt64Safe),
     ModIntInt64(BuiltinOperatorId.ModIntInt64),
     ModIntInt64Safe(BuiltinOperatorId.ModIntInt64Safe),
+    AdaptGeneratorFn(BuiltinOperatorId.AdaptGeneratorFn),
+    SafeAdaptGeneratorFn(BuiltinOperatorId.SafeAdaptGeneratorFn),
+    DoneResult(connectedKey = "core.doneResult()"),
+    Async(BuiltinOperatorId.Async),
+    AwakeUpon(builtinName = "awakeUpon"),
+    GetPromiseResultSync(builtinName = "getPromiseResultSync"),
     ;
 
     override val baseName = ParsedName(name)
