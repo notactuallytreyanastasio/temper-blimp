@@ -1,5 +1,6 @@
 package lang.temper.be.piet
 
+import lang.temper.value.connectedSymbol
 import lang.temper.be.piet.PietOp.Add
 import lang.temper.be.piet.PietOp.Divide
 import lang.temper.be.piet.PietOp.Duplicate
@@ -41,7 +42,12 @@ import lang.temper.value.TVoid
 /** Set to print each program's blocks before they are laid out. A debugging aid only. */
 var debugDump = false
 
-class PietTranslator(private val modules: List<TmpL.Module>, private val roots: Set<TmpL.Module> = modules.toSet()) {
+class PietTranslator(
+    private val modules: List<TmpL.Module>,
+    private val roots: Set<TmpL.Module> = modules.toSet(),
+    /** A library's own Piet assembly for its @connected functions, by name. */
+    private val connected: Map<String, Pasm.Routine> = mapOf(),
+) {
     private val program = AsmProgram()
     private val rt = Runtime(program)
 
@@ -86,6 +92,12 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     ) {
         val label = Label(name)
         val isClosure get() = captured != null
+
+        /** The name as written, without its uniquifying suffix. */
+        var simpleName: String = name
+
+        /** For a @connected function, the library's own Piet assembly, which replaces the body. */
+        var pasm: Pasm.Routine? = null
 
         /** Arguments a caller pushes, not counting a closure's own block. */
         val arity get() = parameters.size + if (rest != null) 1 else 0
@@ -219,6 +231,9 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     private val dispatchers = mutableMapOf<Pair<TypeDefinition, String>, Label>()
 
     private fun fnInfo(name: ResolvedName, parameters: TmpL.Parameters, body: TmpL.BlockStatement?, sig: Signature2) =
+        fnInfoOf(name, parameters, body, sig).also { it.simpleName = name.displayName }
+
+    private fun fnInfoOf(name: ResolvedName, parameters: TmpL.Parameters, body: TmpL.BlockStatement?, sig: Signature2) =
         FnInfo(
             name.toString(),
             parameters.parameters,
@@ -334,7 +349,13 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 is TmpL.SupportCodeDeclaration ->
                     builtins[topLevel.name.name] = topLevel.init.supportCode as? PietBuiltin ?: TODO("$topLevel")
                 is TmpL.ModuleFunctionDeclaration -> functions[topLevel.name.name] =
-                    fnInfo(topLevel.name.name, topLevel.parameters, topLevel.body, topLevel.sig)
+                    fnInfo(topLevel.name.name, topLevel.parameters, topLevel.body, topLevel.sig).also { fn ->
+                        // Temper gives a @connected function a body that panics;
+                        // the library's assembly, where it has some, replaces it.
+                        if (topLevel.metadata.any { it.key.symbol == connectedSymbol }) {
+                            fn.pasm = connected[fn.simpleName]
+                        }
+                    }
                 is TmpL.TypeDeclaration -> registerType(topLevel)
                 is TmpL.ModuleLevelDeclaration -> globals[topLevel.name.name] = globals.size
                 is TmpL.ModuleInitBlock -> {}
@@ -384,7 +405,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         }
 
         // An abstract member has no body and is never jumped to.
-        for (fn in allFunctions()) if (fn.body != null) translateFunction(fn)
+        for (fn in allFunctions()) if (fn.pasm != null || fn.body != null && !isAbstract(fn)) translateFunction(fn)
         while (pendingClosures.isNotEmpty()) translateFunction(pendingClosures.removeFirst())
         // Translating can ask for more dispatchers only from function
         // bodies, which are all done by now.
@@ -445,6 +466,12 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
     }
 
     private fun translateFunction(fn: FnInfo) {
+        val routine = fn.pasm
+        if (routine != null) {
+            check(routine.params.size == fn.arity) { "${fn.name}: pasm takes ${routine.params.size}, not ${fn.arity}" }
+            Pasm("").assemble(routine, FunctionWriter(program, fn.label.hint, fn.arity, fn.label))
+            return
+        }
         val params = fn.parameters
         // A closure's first parameter is itself: the block holding its row and environment.
         val envSlots = if (fn.isClosure) 1 else 0
@@ -857,6 +884,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     check(value(expr.expr))
                     e.op(PietOp.Duplicate)
                     typeTest(expr.expr, expr.checkedFrontendType)
+                    val unwrap = isAnyValue(expr.expr.type) && expr.checkedFrontendType.definition in ANY_TAGS
                     val ok = label("cast")
                     if (expr.canFail) {
                         val landing = bubbleLanding(e.depth - 1)
@@ -867,6 +895,8 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                         e.branch(ok, bubbleLanding(e.depth - 1))
                         e.startBlock(ok)
                     }
+                    // A wrapped value comes out of its box.
+                    if (unwrap) frame.heapLoad(1)
                 }
                 is TmpL.GetBackedProperty -> when (val subject = expr.subject) {
                     is TmpL.TypeName if subject.sourceDefinition !in types -> {
@@ -935,6 +965,35 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
          * T is Int, so `Int?` and `T?` pass between each other unchanged.
          */
         fun coerce(from: Type2, to: Type2) {
+            if (isAnyValue(to) && !isAnyValue(from)) {
+                anyValueTag(from)?.let { tag ->
+                    // [v] -> [tag, v] in a box; a null stays null.
+                    if (from.nullity == Nullity.OrNull) {
+                        val isNull = label("anynull")
+                        val wrap = label("anywrap")
+                        val join = label("anyjoin")
+                        e.op(Duplicate)
+                        e.const(NULL)
+                        e.op(Subtract)
+                        e.op(Not)
+                        val d0 = e.depth - 1
+                        e.branch(isNull, wrap)
+                        e.startBlock(wrap, d0)
+                        e.const(tag)
+                        e.swap()
+                        frame.alloc(2)
+                        e.jump(join)
+                        e.startBlock(isNull, d0)
+                        e.jump(join)
+                        e.startBlock(join)
+                    } else {
+                        e.const(tag)
+                        e.swap()
+                        frame.alloc(2)
+                    }
+                }
+                return
+            }
             val fromBoxed = isNullableInt(from) || isGenericNullable(from)
             val toBoxed = isNullableInt(to) || isGenericNullable(to)
             val fromNull = from.definition == WellKnownTypes.nullTypeDefinition
@@ -1940,8 +1999,15 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
             val from = source.type
             val to = target.definition
             val targetInfo = types[to]
-            val fromIsObject = types[from.definition] != null
+            val fromIsObject = types[from.definition] != null || isAnyValue(from)
+            val tag = ANY_TAGS[to]
             when {
+                isAnyValue(from) && tag != null -> nullGuarded(from) {
+                    frame.heapLoad()
+                    e.const(tag)
+                    e.op(Subtract)
+                    e.op(Not)
+                }
                 // An upcast: true unless null.
                 staticSubtype(from.definition, to) -> {
                     e.const(NULL)
@@ -2014,6 +2080,16 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
             test()
             e.jump(join)
             e.startBlock(join)
+        }
+
+        private fun anyValueTag(from: Type2): Int? {
+            val d = from.definition
+            return when {
+                d in types -> null
+                d == WellKnownTypes.nullTypeDefinition -> null
+                d is TypeFormal -> TODO("a type parameter's value into AnyValue: $from")
+                else -> ANY_TAGS[d] ?: TODO("$from into AnyValue")
+            }
         }
 
         /** `[a, b] -> [(a > b) - (b > a)]` for two Int64 boxes. */
@@ -2162,6 +2238,25 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         fun isNullableInt(t: Type2) = t.nullity == Nullity.OrNull && t.definition == WellKnownTypes.intTypeDefinition
 
         fun isGenericNullable(t: Type2) = t.nullity == Nullity.OrNull && t.definition is TypeFormal
+
+        fun isAnyValue(t: Type2) = t.definition == WellKnownTypes.anyValueTypeDefinition
+
+        /**
+         * An AnyValue is an object as it is, its first cell a positive class id.
+         * Anything else is wrapped: `tag, value` with a negative tag naming its
+         * type, so that a cast can tell what it holds. Null for no wrapping.
+         */
+        val ANY_TAGS = mapOf(
+            WellKnownTypes.intTypeDefinition to -100,
+            WellKnownTypes.booleanTypeDefinition to -101,
+            WellKnownTypes.stringTypeDefinition to -102,
+            WellKnownTypes.float64TypeDefinition to -103,
+            WellKnownTypes.int64TypeDefinition to -104,
+            WellKnownTypes.listTypeDefinition to -105,
+            WellKnownTypes.listBuilderTypeDefinition to -106,
+            WellKnownTypes.mapTypeDefinition to -107,
+            WellKnownTypes.mapBuilderTypeDefinition to -108,
+        )
 
         private val INDEX_TYPES = setOf(
             WellKnownTypes.stringIndexTypeDefinition,
