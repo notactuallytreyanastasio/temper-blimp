@@ -386,13 +386,20 @@ TODO(tjp, regex): Any static checking for stable frontend regex values?
 
   // Extension functions on some backends need the private `compiled` value
   // passed in directly.
+  // A backend with a regex engine of its own connects these to it. One
+  // without gets the bodies here: a backtracking matcher over `data`, with
+  // EcmaScript's semantics, which is what the other backends' engines have.
   @connected
-  private compiledFound(compiled: AnyValue, text: String): Boolean;
+  private compiledFound(compiled: AnyValue, text: String): Boolean {
+    new RegexMatcher(data, text).find(String.begin) != null
+  }
 
   @connected
   private compiledFind(
     compiled: AnyValue, text: String, begin: StringIndex, regexRefs: RegexRefs
-  ): Match throws Bubble;
+  ): Match throws Bubble {
+    new RegexMatcher(data, text).find(begin) ?? bubble()
+  }
 
   @connected
   private compiledReplace(
@@ -400,14 +407,64 @@ TODO(tjp, regex): Any static checking for stable frontend regex values?
     text: String,
     format: fn (Match): String,
     regexRefs: RegexRefs,
-  ): String;
+  ): String {
+    let matcher = new RegexMatcher(data, text);
+    let out = new StringBuilder();
+    var begin = String.begin;
+    var keepBegin = begin;
+    var any = false;
+    var more = true;
+    while (more) {
+      let found = matcher.find(begin);
+      when (found) {
+        is Match -> do {
+          any = true;
+          out.appendBetween(text, keepBegin, found.full.begin);
+          out.append(format(found));
+          keepBegin = found.full.end;
+          // An empty match still moves on.
+          if (keepBegin > begin) {
+            begin = keepBegin;
+          } else if (text.hasIndex(begin)) {
+            begin = text.next(begin);
+          } else {
+            more = false;
+          }
+        }
+        else -> more = false;
+      }
+    }
+    if (!any) { return text; }
+    out.appendBetween(text, keepBegin, text.end);
+    out.toString()
+  }
 
   @connected
   private compiledSplit(
     compiled: AnyValue,
     text: String,
     regexRefs: RegexRefs,
-  ): List<String>;
+  ): List<String> {
+    // EcmaScript's String.prototype.split with a regex, without captures.
+    let matcher = new RegexMatcher(data, text);
+    let out = new ListBuilder<String>();
+    var p = String.begin;
+    var q = p;
+    while (text.hasIndex(q)) {
+      let e = matcher.matchEnd(q);
+      if (e == null) {
+        q = text.next(q);
+      } else if (e == p) {
+        q = text.next(q);
+      } else {
+        out.add(text.slice(p, q));
+        p = e;
+        q = p;
+      }
+    }
+    out.add(text.slice(p, text.end));
+    out.toList()
+  }
 ```
 
 </details>
@@ -428,6 +485,269 @@ code if usage depends on dynamically constructed regexes. If all regex building
 is done as stable values, we hope to generated backend compiled regexes purely
 at Temper compile time.
 
+### RegexMatcher
+
+A backtracking matcher over the `RegexNode` tree itself, for backends with
+no regex engine to compile to. It follows EcmaScript: leftmost match, greedy
+or reluctant repetition, captures reset on each repetition, and the last
+iteration's capture kept.
+
+<details>
+
+```
+class RegexMatcher {
+  private data: RegexNode;
+  private text: String;
+  private captures: MapBuilder<String, Group> = new MapBuilder<String, Group>();
+  private names: ListBuilder<String> = new ListBuilder<String>();
+
+  public constructor(data: RegexNode, text: String) {
+    this.data = data;
+    this.text = text;
+    collectNames(data);
+  }
+
+  private collectNames(node: RegexNode): Void {
+    when (node) {
+      is Capture -> do { names.add(node.name); collectNames(node.item); }
+      is Or -> node.items.forEach { (item: RegexNode): Void => collectNames(item); };
+      is Repeat -> collectNames(node.item);
+      is Sequence -> node.items.forEach { (item: RegexNode): Void => collectNames(item); };
+      else -> do {}
+    }
+  }
+
+  /** The first match starting at or after begin, or null. */
+  public find(begin: StringIndex): Match? {
+    var start = begin;
+    while (true) {
+      let end = matchEnd(start);
+      if (end != null) {
+        let e = end;
+        let full = new Group("full", text.slice(start, e), start, e);
+        let groups = new MapBuilder<String, Group>();
+        for (var i = 0; i < names.length; i += 1) {
+          let name = names[i];
+          let group = captures.getOr(name, noGroup);
+          if (group.name != "") { groups[name] = group; }
+        }
+        return new Match(full, groups.toMap());
+      }
+      if (!text.hasIndex(start)) { return null; }
+      start = text.next(start);
+    }
+  }
+
+  /** Where a match anchored at `at` ends, or null; captures are left as it set them. */
+  public matchEnd(at: StringIndex): StringIndex? {
+    captures.clear();
+    var result: StringIndex? = null;
+    if (matchNode(data, at) { (end: StringIndex): Boolean => result = end; true }) {
+      result
+    } else {
+      null
+    }
+  }
+
+  private noGroup: Group = new Group("", "", String.begin, String.begin);
+
+  private matchNode(
+    node: RegexNode, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    when (node) {
+      is Capture -> matchCapture(node, at, k);
+      is CodePoints -> matchCodePoints(node.value, String.begin, at, k);
+      is CodeRange -> matchOne(at, k) { (c: Int): Boolean => node.min <= c && c <= node.max };
+      is CodeSet -> matchOne(at, k) { (c: Int): Boolean => inCodeSet(node, c) };
+      is Or -> matchOr(node.items, 0, at, k);
+      is Repeat -> matchRepeat(node, 0, at, k);
+      is Sequence -> matchSequence(node.items, 0, at, k);
+      Begin -> at == String.begin && k(at);
+      End -> !text.hasIndex(at) && k(at);
+      Dot -> matchOne(at, k) { (c: Int): Boolean =>
+        c != 0xA && c != 0xD && c != 0x2028 && c != 0x2029
+      };
+      WordBoundary -> do {
+        let before = text.hasIndex(String.begin) && at != String.begin &&
+          isWord(text[text.prev(at)]);
+        let after = text.hasIndex(at) && isWord(text[at]);
+        before != after && k(at)
+      }
+      Digit -> matchOne(at, k) { (c: Int): Boolean => isDigit(c) };
+      Space -> matchOne(at, k) { (c: Int): Boolean => isSpace(c) };
+      Word -> matchOne(at, k) { (c: Int): Boolean => isWord(c) };
+      else -> false;
+    }
+  }
+
+  private matchCapture(
+    node: Capture, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    let name = node.name;
+    let previous = captures.getOr(name, noGroup);
+    if (
+      matchNode(node.item, at) { (end: StringIndex): Boolean =>
+        let before = captures.getOr(name, noGroup);
+        captures[name] = new Group(name, text.slice(at, end), at, end);
+        if (k(end)) {
+          true
+        } else {
+          restore(name, before);
+          false
+        }
+      }
+    ) {
+      true
+    } else {
+      restore(name, previous);
+      false
+    }
+  }
+
+  private restore(name: String, group: Group): Void {
+    if (group.name == "") {
+      captures.remove(name) orelse do {};
+    } else {
+      captures[name] = group;
+    }
+  }
+
+  private matchOne(
+    at: StringIndex, k: fn (StringIndex): Boolean, accepts: fn (Int): Boolean
+  ): Boolean {
+    text.hasIndex(at) && accepts(text[at]) && k(text.next(at))
+  }
+
+  private matchCodePoints(
+    value: String, i: StringIndex, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    if (!value.hasIndex(i)) {
+      k(at)
+    } else if (
+      text.hasIndex(at) && text[at] == value[i]
+    ) {
+      matchCodePoints(value, value.next(i), text.next(at), k)
+    } else {
+      false
+    }
+  }
+
+  private matchOr(
+    items: List<RegexNode>, i: Int, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    i < items.length && (
+      matchNode(items[i], at, k) || matchOr(items, i + 1, at, k)
+    )
+  }
+
+  private matchSequence(
+    items: List<RegexNode>, i: Int, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    if (i >= items.length) {
+      k(at)
+    } else {
+      matchNode(items[i], at) { (end: StringIndex): Boolean =>
+        matchSequence(items, i + 1, end, k)
+      }
+    }
+  }
+
+  private matchRepeat(
+    node: Repeat, count: Int, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    let max = node.max ?? -1;
+    let canStop = count >= node.min;
+    let canMore = max < 0 || count < max;
+    if (node.reluctant) {
+      (canStop && k(at)) || (canMore && repeatOnce(node, count, at, k))
+    } else {
+      (canMore && repeatOnce(node, count, at, k)) || (canStop && k(at))
+    }
+  }
+
+  private repeatOnce(
+    node: Repeat, count: Int, at: StringIndex, k: fn (StringIndex): Boolean
+  ): Boolean {
+    // Captures inside the repeated item start each iteration unset.
+    let saved = captures.toMap();
+    clearCapturesIn(node.item);
+    if (
+      matchNode(node.item, at) { (end: StringIndex): Boolean =>
+        // An empty iteration past the minimum cannot help, and would never end.
+        if (end == at && count >= node.min) {
+          false
+        } else {
+          matchRepeat(node, count + 1, end, k)
+        }
+      }
+    ) {
+      true
+    } else {
+      captures.clear();
+      saved.forEach { (name: String, group: Group): Void => captures[name] = group; };
+      false
+    }
+  }
+
+  private clearCapturesIn(node: RegexNode): Void {
+    when (node) {
+      is Capture -> do {
+        captures.remove(node.name) orelse do {};
+        clearCapturesIn(node.item);
+      }
+      is Or -> node.items.forEach { (item: RegexNode): Void => clearCapturesIn(item); };
+      is Repeat -> clearCapturesIn(node.item);
+      is Sequence -> node.items.forEach { (item: RegexNode): Void => clearCapturesIn(item); };
+      else -> do {}
+    }
+  }
+
+  private inCodeSet(codeSet: CodeSet, c: Int): Boolean {
+    var found = false;
+    for (var i = 0; i < codeSet.items.length; i += 1) {
+      if (inCodePart(codeSet.items[i], c)) {
+        found = true;
+        break;
+      }
+    }
+    found != codeSet.negated
+  }
+
+  private inCodePart(part: CodePart, c: Int): Boolean {
+    when (part) {
+      is CodePoints -> do {
+        var found = false;
+        let value = part.value;
+        for (var i = String.begin; value.hasIndex(i); i = value.next(i)) {
+          if (value[i] == c) { found = true; break; }
+        }
+        found
+      }
+      is CodeRange -> part.min <= c && c <= part.max;
+      Digit -> isDigit(c);
+      Space -> isSpace(c);
+      Word -> isWord(c);
+      else -> false;
+    }
+  }
+
+  private isDigit(c: Int): Boolean { char'0' <= c && c <= char'9' }
+
+  private isWord(c: Int): Boolean {
+    (char'a' <= c && c <= char'z') || (char'A' <= c && c <= char'Z') ||
+      isDigit(c) || c == char'_'
+  }
+
+  private isSpace(c: Int): Boolean {
+    (0x9 <= c && c <= 0xD) || c == 0x20 || c == 0xA0 || c == 0x1680 ||
+      (0x2000 <= c && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+      c == 0x202F || c == 0x205F || c == 0x3000 || c == 0xFEFF
+  }
+}
+```
+
+</details>
+
 ### RegexFormatter
 
 <details>
@@ -439,7 +759,7 @@ class RegexFormatter {
   @connected
   public static regexCompileFormatted(
     data: RegexNode, formatted: String
-  ): AnyValue;
+  ): AnyValue { data }
 
   @connected
   public static regexFormat(data: RegexNode): String {
@@ -538,7 +858,9 @@ class RegexFormatter {
   } orelse panic() } // fromCodePoint bubbles
 
   @connected
-  private pushCodeTo(out: StringBuilder, code: Int, insideCodeSet: Boolean): Void;
+  private pushCodeTo(out: StringBuilder, code: Int, insideCodeSet: Boolean): Void {
+    out.append("\\u{${code.toString(16)}}");
+  }
 
   private pushCodePoints(codePoints: CodePoints, insideCodeSet: Boolean): Void {
     let value = codePoints.value;
