@@ -3,6 +3,7 @@ package lang.temper.be.piet
 import lang.temper.be.piet.PietOp.Add
 import lang.temper.be.piet.PietOp.Duplicate
 import lang.temper.be.piet.PietOp.Multiply
+import lang.temper.be.piet.PietOp.Not
 import lang.temper.be.piet.PietOp.Pop
 import lang.temper.be.piet.PietOp.Roll
 import lang.temper.be.piet.PietOp.Subtract
@@ -142,13 +143,22 @@ class Emitter(val program: AsmProgram) {
         endBlock()
     }
 
-    /** Pops a 0 or 1 and ends the block, going to [ifTrue] on 1. */
+    /**
+     * Pops a value and ends the block, going to [ifTrue] if it is not 0.
+     *
+     * The row is `ifFalse + c * (ifTrue - ifFalse)`, which is right only for
+     * c of exactly 0 or 1; any other c is a jump to some unrelated row, and
+     * nothing would say so. So c is first made 0 or 1 with `not not`, which
+     * costs two codels and means no caller has to get this right.
+     */
     fun branch(ifTrue: Label, ifFalse: Label) {
         if (!reachable) return
         depth -= 1
         expect(ifTrue, depth)
         expect(ifFalse, depth)
         depth += 1
+        op(Not)
+        op(Not)
         // ifFalse + c * (ifTrue - ifFalse)
         pushLabel(ifTrue)
         pushLabel(ifFalse)

@@ -132,6 +132,7 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.ControlFlowLoops,
         Ft.FunctionsAsValues,
         Ft.FunctionsConstructorCallbacks,
+        Ft.FunctionsDefaulting,
         Ft.FunctionsLocals,
         Ft.FunctionsRestFormal,
         Ft.FunctionsSimpleLocals,
@@ -141,12 +142,18 @@ val functionalTestStatus: Map<Ft, List<IssueCheck>> = buildMap {
         Ft.InterfacesPropertyMembers,
         Ft.InterfacesPureVirtual,
         Ft.NamesNonascii,
+        Ft.RegressionMinimalRepro,
         Ft.SemanticsConstness,
         Ft.SemanticsMutuallyReferencingTypes,
         Ft.SemanticsTypeCheckedLocals,
         Ft.TypesIntBasics,
         Ft.TypesListEmpty,
+        Ft.TypesListOperations,
+        Ft.TypesListReduce,
+        Ft.TypesStringBuild,
+        Ft.TypesStringIndices,
         Ft.TypesStringIsEmpty,
+        Ft.TypesStringRead,
     )
 }.mapValues { it.value.toList() }
 
