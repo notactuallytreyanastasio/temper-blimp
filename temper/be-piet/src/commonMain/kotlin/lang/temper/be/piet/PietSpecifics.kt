@@ -60,10 +60,9 @@ object NpietCommand : ToolSpecifics {
 }
 
 /**
- * npiet runs under a shell so that today's date can arrive on its stdin: a
- * Piet program has no clock, and Date.today() reads year, month and day with
- * three in(number) commands. Temper has no input of its own, so nothing
- * else reads stdin.
+ * npiet runs under [IO_SCRIPT], a shell script written beside the image,
+ * which answers the program's requests for what Piet cannot reach itself:
+ * today's date, and HTTP. See Io.kt.
  */
 object ShellCommand : ToolSpecifics {
     override val cliNames = listOf("sh")
@@ -144,7 +143,7 @@ private fun CliEnv.runImage(libraryName: DashedIdentifier, file: String, maxStep
         add(file)
     }
     val command = Command(
-        args = listOf("-c", "date -u '+%Y %m %d' | exec npiet ${npietArgs.joinToString(" ")}"),
+        args = listOf(IO_FILE) + npietArgs,
         aux = mapOf(Aux.Stderr to runDir.resolveFile("stderr.txt")),
         cwd = runDir,
     )
