@@ -21,6 +21,7 @@ import lang.temper.type2.Signature2
 import lang.temper.type2.Type2
 import lang.temper.value.TBoolean
 import lang.temper.value.TInt
+import lang.temper.value.TInt64
 import lang.temper.value.TNull
 import lang.temper.value.TString
 import lang.temper.value.TVoid
@@ -34,6 +35,9 @@ import lang.temper.value.TVoid
  * frame's depth is always the same and jumps between statements never need to
  * adjust the stack.
  */
+/** Set to print each program's blocks before they are laid out. A debugging aid only. */
+var debugDump = false
+
 class PietTranslator(private val modules: List<TmpL.Module>, private val roots: Set<TmpL.Module> = modules.toSet()) {
     private val program = AsmProgram()
     private val rt = Runtime(program)
@@ -356,6 +360,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
         // Translating can ask for more dispatchers only from function
         // bodies, which are all done by now.
         for ((key, label) in dispatchers) writeDispatcher(key, label)
+        if (debugDump) println("ASM>>>\n$program")
         return program.link(main.entry)
     }
 
@@ -762,6 +767,11 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                         TString -> frame.loadGlobal(literalGlobals.getValue(TString.unpack(v)))
                         TVoid -> return false
                         TNull -> e.const(NULL)
+                        TInt64 -> {
+                            val n = TInt64.unpack(v)
+                            if (n == Long.MIN_VALUE) e.constMin64() else e.const(n)
+                            frame.pack64()
+                        }
                         else -> TODO("value $v")
                     }
                 }
@@ -1100,6 +1110,11 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     args(actuals)
                     compareInts()
                 }
+                type == WellKnownTypes.intTypeDefinition && key == "m:toInt64" -> {
+                    check(value(subject))
+                    frame.pack64()
+                }
+                type == WellKnownTypes.int64TypeDefinition -> return int64Method(subject, key, actuals)
                 type == WellKnownTypes.intTypeDefinition && key == "m:toString" ->
                     call(frame, rt.intToStringRadix, 2, true) {
                         check(value(subject))
@@ -1227,7 +1242,58 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     0 -> rtCall(rt.stringToInt, subject, actuals, true, { e.const(10) })
                     else -> rtCall(rt.stringToInt, subject, actuals, true)
                 }
+                "m:toInt64" -> return when (actuals.size) {
+                    0 -> rtCall(rt.stringToInt64, subject, actuals, true, { e.const(10) })
+                    else -> rtCall(rt.stringToInt64, subject, actuals, true)
+                }
                 else -> TODO("$key on String")
+            }
+            return true
+        }
+
+        private fun int64Method(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            when (key) {
+                "m:toString" -> return when (actuals.size) {
+                    0 -> rtCall(rt.int64ToString, subject, actuals, true, { e.const(10) })
+                    else -> rtCall(rt.int64ToString, subject, actuals, true)
+                }
+                "m:toInt32Unsafe" -> {
+                    check(value(subject))
+                    frame.unpack64()
+                    wrapInt32()
+                }
+                "m:toInt32" -> {
+                    // Bubbles outside Int32: v - (v wrapped) is 0 exactly when it fits.
+                    check(value(subject))
+                    frame.unpack64()
+                    e.op(Duplicate)
+                    e.op(Duplicate)
+                    wrapInt32()
+                    e.op(Subtract)
+                    e.op(Not)
+                    val ok = label("fits")
+                    e.branch(ok, bubbleLanding(e.depth - 1))
+                    e.startBlock(ok)
+                }
+                "m:min", "m:max" -> {
+                    // Choose between the boxes themselves, which are small.
+                    check(value(subject))
+                    args(actuals)
+                    e.pick(2)
+                    e.pick(2)
+                    frame.unpackPair64(reversed = false)
+                    e.op(Greater)
+                    if (key == "m:max") e.op(Not)
+                    // [a, b, c] -> a + c * (b - a)
+                    e.pick(2)
+                    e.pick(4)
+                    e.op(Subtract)
+                    e.op(Multiply)
+                    e.swap()
+                    e.op(Pop)
+                    e.op(Add)
+                }
+                else -> TODO("$key on Int64")
             }
             return true
         }
@@ -1518,8 +1584,17 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                     if (b == PietBuiltin.IsNull) e.op(Not)
                 }
                 PietBuiltin.EqGeneric, PietBuiltin.NeGeneric -> {
-                    // Strings are interned, so equality on every type is equality of cells.
+                    // Strings are interned, so equality on every type except Int64,
+                    // whose boxes differ for equal values, is equality of cells.
                     val (l, r) = ps.map { it as TmpL.Expression }
+                    if (l.type.definition == WellKnownTypes.int64TypeDefinition) {
+                        args(ps)
+                        frame.unpackPair64(reversed = false)
+                        e.op(Subtract)
+                        e.op(Not)
+                        if (b == PietBuiltin.NeGeneric) e.op(Not)
+                        return true
+                    }
                     for (x in listOf(l, r)) identityComparable(x)
                     args(ps)
                     e.op(Subtract)
@@ -1541,6 +1616,10 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 -> {
                     val d = (ps[0] as TmpL.Expression).type.definition
                     when (d) {
+                        WellKnownTypes.int64TypeDefinition -> {
+                            args(ps)
+                            compareBoxes64()
+                        }
                         WellKnownTypes.stringTypeDefinition -> call(frame, rt.stringCompare, 2, true) { args(ps) }
                         WellKnownTypes.intTypeDefinition, in INDEX_TYPES -> {
                             args(ps)
@@ -1561,6 +1640,83 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
                 PietBuiltin.BitwiseAnd32 -> call(frame, rt.bitwise("and", 0, 1), 2, true) { args(ps) }
                 PietBuiltin.BitwiseOr32 -> call(frame, rt.bitwise("or", 1, -1), 2, true) { args(ps) }
                 PietBuiltin.BitwiseXor32 -> call(frame, rt.bitwise("xor", 1, -2), 2, true) { args(ps) }
+                PietBuiltin.PlusIntInt64, PietBuiltin.MinusIntInt64, PietBuiltin.TimesIntInt64 -> {
+                    args(ps)
+                    frame.unpackPair64(reversed = false)
+                    e.op(
+                        when (b) {
+                            PietBuiltin.PlusIntInt64 -> Add
+                            PietBuiltin.MinusIntInt64 -> Subtract
+                            else -> Multiply
+                        },
+                    )
+                    frame.pack64()
+                }
+                PietBuiltin.MinusInt64 -> {
+                    args(ps)
+                    frame.unpack64()
+                    e.const(-1)
+                    e.op(Multiply)
+                    frame.pack64()
+                }
+                PietBuiltin.DivIntInt64, PietBuiltin.ModIntInt64,
+                PietBuiltin.DivIntInt64Safe, PietBuiltin.ModIntInt64Safe,
+                -> {
+                    args(ps)
+                    frame.unpackPair64(reversed = false)
+                    if (b == PietBuiltin.DivIntInt64 || b == PietBuiltin.ModIntInt64) {
+                        val ok = label("nonzero")
+                        e.op(Duplicate)
+                        e.branch(ok, bubbleLanding(e.depth - 1))
+                        e.startBlock(ok)
+                    }
+                    e.op(if (b == PietBuiltin.DivIntInt64 || b == PietBuiltin.DivIntInt64Safe) Divide else Mod)
+                    frame.pack64()
+                }
+                PietBuiltin.BitwiseNegation32 -> {
+                    // ~x = -x - 1, which cannot overflow on top of the stack.
+                    args(ps)
+                    e.const(-1)
+                    e.op(Multiply)
+                    e.const(1)
+                    e.op(Subtract)
+                }
+                PietBuiltin.BitwiseNegation64 -> {
+                    args(ps)
+                    frame.unpack64()
+                    e.const(-1)
+                    e.op(Multiply)
+                    e.const(1)
+                    e.op(Subtract)
+                    frame.pack64()
+                }
+                PietBuiltin.BitwiseAnd64, PietBuiltin.BitwiseOr64, PietBuiltin.BitwiseXor64 -> {
+                    // Two's complement halves: each 32-bit half combines on its own.
+                    val op = when (b) {
+                        PietBuiltin.BitwiseAnd64 -> rt.bitwise("and", 0, 1)
+                        PietBuiltin.BitwiseOr64 -> rt.bitwise("or", 1, -1)
+                        else -> rt.bitwise("xor", 1, -2)
+                    }
+                    args(ps)
+                    for (half in 0..1) {
+                        call(frame, op, 2, true) {
+                            e.pick(5 + half)
+                            frame.heapLoad(half)
+                            e.pick(5 + half)
+                            frame.heapLoad(half)
+                        }
+                    }
+                    frame.alloc(2)
+                    e.dropUnder(2)
+                }
+                PietBuiltin.BitwiseShl32, PietBuiltin.BitwiseShl64, PietBuiltin.BitwiseShr32,
+                PietBuiltin.BitwiseShr64, PietBuiltin.BitwiseShrUnsigned32, PietBuiltin.BitwiseShrUnsigned64,
+                -> {
+                    val wide = b.name.endsWith("64")
+                    val left = b.name.startsWith("BitwiseShl")
+                    val unsigned = "Unsigned" in b.name
+                    call(frame, rt.shift(b.name, wide, left, unsigned), 2, true) { args(ps) }
+                }
                 PietBuiltin.PureVirtual, PietBuiltin.Panic -> {
                     repeat(args(ps)) { e.op(Pop) }
                     e.jumpAway(rt.panic)
@@ -1656,6 +1812,21 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
             e.startBlock(join)
         }
 
+        /** `[a, b] -> [(a > b) - (b > a)]` for two Int64 boxes. */
+        private fun compareBoxes64() {
+            e.pick(2)
+            e.pick(2)
+            frame.unpackPair64(reversed = false)
+            e.op(Greater)
+            // [a, b, a > b] -> [a > b, a, b]
+            e.const(3)
+            e.const(1)
+            e.op(PietOp.Roll)
+            frame.unpackPair64(reversed = true)
+            e.op(Greater)
+            e.op(Subtract)
+        }
+
         /** `[a, b] -> (a > b) - (b > a)` */
         private fun compareInts() {
             e.pick(2)
@@ -1711,6 +1882,7 @@ class PietTranslator(private val modules: List<TmpL.Module>, private val roots: 
          */
         private fun identityComparable(x: TmpL.Expression) {
             if (isNullableInt(x.type)) TODO("== on Int?: $x")
+            if (x.type.definition == WellKnownTypes.int64TypeDefinition) TODO("identity == on Int64: $x")
         }
 
         private fun int2(ps: List<TmpL.Actual>, op: PietOp) {

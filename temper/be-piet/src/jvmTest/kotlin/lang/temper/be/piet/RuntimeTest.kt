@@ -7,7 +7,11 @@ class RuntimeTest {
     private fun run(globals: Int = 0, body: MainWriter.(Runtime) -> Unit): String {
         val program = AsmProgram()
         val main = MainWriter(program, globals)
-        main.body(Runtime(program))
+        val rt = Runtime(program)
+        // As every program does: the intern table first, at address 0.
+        call(main.frame, rt.allocZeros, 1, true) { main.e.const(INTERN_BUCKETS) }
+        main.e.op(PietOp.Pop)
+        main.body(rt)
         main.halt()
         return runNpiet(program.link(main.entry).render())
     }

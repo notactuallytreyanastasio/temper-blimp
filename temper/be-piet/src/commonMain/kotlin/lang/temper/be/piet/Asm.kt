@@ -39,11 +39,12 @@ class AsmProgram {
     val halt = Label("halt")
 
     fun link(entry: Label): DispatchLayout {
+        val pieces = blocks.flatMap { split(it) }
         val index = mutableMapOf<Label, Int>()
-        blocks.forEachIndexed { i, b -> check(index.put(b.label, i) == null) { "duplicate ${b.label}" } }
-        index[halt] = blocks.size
+        pieces.forEachIndexed { i, b -> check(index.put(b.label, i) == null) { "duplicate ${b.label}" } }
+        index[halt] = pieces.size
         fun indexOf(label: Label) = index[label] ?: error("unplaced label $label")
-        val rows = blocks.map { block ->
+        val rows = pieces.map { block ->
             block.code.map { instr ->
                 when (instr) {
                     is AsmInstr.I -> instr.instr
@@ -52,6 +53,51 @@ class AsmProgram {
             }
         }
         return DispatchLayout(rows, indexOf(entry))
+    }
+
+    /**
+     * Cuts a block wider than [MAX_ROW_CODELS] into rows that each end by
+     * jumping to the next. The image is as wide as its widest row, so one
+     * long row (an unrolled loop is 8000 codels) made every row that wide:
+     * types/int/shifty was a 128 MB image, and writing it took longer than
+     * the test was allowed to run.
+     */
+    private fun split(block: AsmBlock): List<AsmBlock> {
+        val result = mutableListOf<AsmBlock>()
+        var label = block.label
+        var current = mutableListOf<AsmInstr>()
+        var width = 0
+        var n = 0
+        for (instr in block.code) {
+            val w = estimatedWidth(instr)
+            if (width + w + LABEL_WIDTH > MAX_ROW_CODELS && current.isNotEmpty()) {
+                val next = Label("${block.label}+${++n}")
+                current.add(AsmInstr.PushLabel(next))
+                result.add(AsmBlock(label, current))
+                label = next
+                current = mutableListOf()
+                width = 0
+            }
+            current.add(instr)
+            width += w
+        }
+        result.add(AsmBlock(label, current))
+        return result
+    }
+
+    private fun estimatedWidth(instr: AsmInstr): Int = when (instr) {
+        is AsmInstr.I -> when (val i = instr.instr) {
+            is PietInstr.Op -> 1
+            is PietInstr.Const -> lower(listOf(i)).sumOf { if (it.op == PietOp.Push) it.width else 1 }
+        }
+        is AsmInstr.PushLabel -> LABEL_WIDTH
+    }
+
+    companion object {
+        const val MAX_ROW_CODELS = 600
+
+        /** Generous for any row index a program will have. */
+        private const val LABEL_WIDTH = 40
     }
 
     override fun toString() = blocks.joinToString("\n")
