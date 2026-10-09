@@ -61,6 +61,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         val selfName: ResolvedName? = null,
         /** A rest parameter, which arrives as one List after the others. */
         val rest: ResolvedName? = null,
+        val returnType: Type2? = null,
     ) {
         val label = Label(name)
         val isClosure get() = captured != null
@@ -188,6 +189,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     private val staticProperties = mutableMapOf<Pair<TypeDefinition, String>, ResolvedName>()
     private val staticMethods = mutableMapOf<Pair<TypeDefinition, String>, FnInfo>()
 
+    private val fieldTypes = mutableMapOf<ResolvedName, Type2>()
+
     /** Heap offset of each backed property within its object. */
     private val fieldOffsets = mutableMapOf<ResolvedName, Int>()
 
@@ -201,6 +204,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             body,
             !sig.returnType2.isVoidLike,
             rest = parameters.restParameter?.name?.name,
+            returnType = sig.returnType2,
         )
 
     private fun registerType(decl: TmpL.TypeDeclaration) {
@@ -216,7 +220,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         var offset = 1
         for (member in decl.members) {
             when (member) {
-                is TmpL.InstanceProperty -> fieldOffsets[member.name.name] = offset++
+                is TmpL.InstanceProperty -> {
+                    fieldOffsets[member.name.name] = offset++
+                    member.descriptor?.let { fieldTypes[member.name.name] = it }
+                }
                 is TmpL.Constructor ->
                     info.constructor = fnInfo(member.name.name, member.parameters, member.body, member.sig)
                 is TmpL.NormalMethod -> info.own["m:${member.dotName.dotNameText}"] =
@@ -303,7 +310,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             for (topLevel in topLevels) {
                 when (topLevel) {
                     is TmpL.ModuleLevelDeclaration -> topLevel.init?.let { init ->
-                        if (value(init)) frame.storeGlobal(globals.getValue(topLevel.name.name))
+                        if (valueAs(init, topLevel.descriptor)) frame.storeGlobal(globals.getValue(topLevel.name.name))
                     }
                     is TmpL.ModuleInitBlock -> statement(topLevel.body)
                     // Static properties initialize where their type is declared.
@@ -378,6 +385,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             slotsFrom(locals, writer.param(envSlots + params.size + restSlots))
         val env = if (fn.isClosure) writer.param(0) else null
         Scope(writer.e, writer.frame, writer, slots, fn.returnsValue, env, fn.captured.orEmpty(), fn.selfName).apply {
+            returnType = fn.returnType
             allocateEntryBoxes(locals)
             // A boxed parameter moves into its box on entry.
             for (p in params) {
@@ -432,6 +440,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         captured: List<ResolvedName> = listOf(),
         val selfName: ResolvedName? = null,
     ) {
+        var returnType: Type2? = null
+
         /** Heap offset of each captured name within the closure's block. */
         private val envOffsets = captured.withIndex().associate { (i, name) -> name to i + 1 }
 
@@ -529,11 +539,11 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     val slot = slots.getValue(stmt.name.name)
                     if (stmt.name.name in boxed) {
                         val init = stmt.init
-                        if (init == null || !value(init)) e.const(0)
+                        if (init == null || !valueAs(init, stmt.descriptor)) e.const(0)
                         frame.alloc(1)
                         frame.store(slot)
                     } else {
-                        stmt.init?.let { init -> if (value(init)) frame.store(slot) }
+                        stmt.init?.let { init -> if (valueAs(init, stmt.descriptor)) frame.store(slot) }
                     }
                 }
                 is TmpL.LocalFunctionDeclaration -> {
@@ -546,6 +556,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                         !stmt.sig.returnType2.isVoidLike,
                         captured,
                         name,
+                        returnType = stmt.sig.returnType2,
                     )
                     pendingClosures.addLast(fn)
                     e.pushLabel(fn.label)
@@ -554,7 +565,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     if (name in boxedFromEntry) store(name) else frame.store(slots.getValue(name))
                 }
                 is TmpL.Assignment -> {
-                    check(value(stmt.right)) { "assigning nothing: $stmt" }
+                    check(valueAs(stmt.right, stmt.type)) { "assigning nothing: $stmt" }
                     store(stmt.left.name)
                 }
                 is TmpL.IfStatement -> {
@@ -592,7 +603,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     e.jump(jumpScope(stmt.label).continueTo ?: TODO("continue to a non-loop: $stmt"))
                 is TmpL.ReturnStatement -> {
                     val w = writer ?: TODO("return at top level: $stmt")
-                    val pushed = stmt.expression?.let { value(it) } ?: false
+                    val pushed = stmt.expression?.let { valueAs(it, returnType) } ?: false
                     if (pushed && !returnsValue) e.op(Pop)
                     check(pushed || !returnsValue) { "return without a value: $stmt" }
                     w.ret(returnsValue)
@@ -611,7 +622,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     if (e.knows(after)) e.startBlock(after)
                 }
                 is TmpL.SetBackedProperty -> {
-                    check(value(stmt.right))
+                    val fieldType = (stmt.left.property as? TmpL.InternalPropertyId)?.let { fieldTypes[it.name.name] }
+                    check(valueAs(stmt.right, fieldType))
                     check(value(stmt.left.subject as TmpL.Expression))
                     frame.heapStore(fieldOffset(stmt.left.property))
                 }
@@ -714,8 +726,9 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     else -> TODO("fun interface from $callable")
                 }
                 is TmpL.CallExpression -> return callExpression(expr)
-                is TmpL.This -> frame.load(slots[expr.id.name] ?: TODO("this outside a method: $expr"))
-                is TmpL.UncheckedNotNullExpression -> return value(expr.expression)
+                // A lambda in a method captures `this` like any other name.
+                is TmpL.This -> load(expr.id.name)
+                is TmpL.UncheckedNotNullExpression -> return valueAs(expr.expression, expr.passType)
                 is TmpL.InstanceOfExpression -> {
                     check(value(expr.expr))
                     typeTest(expr.expr, expr.checkedFrontendType)
@@ -763,15 +776,42 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             return true
         }
 
+        /**
+         * Pushes [expr] as a value of type [to]. A nullable Int is a box:
+         * no Int is free to mean null, so `Int?` is -1 or the address of a
+         * one-cell box. Every place the static type changes between Int and
+         * Int? boxes or unboxes here.
+         */
+        fun valueAs(expr: TmpL.Expression, to: Type2?): Boolean {
+            if (!value(expr)) return false
+            if (to != null) coerce(expr.type, to)
+            return true
+        }
+
+        fun coerce(from: Type2, to: Type2) {
+            val fromBoxed = isNullableInt(from)
+            val toBoxed = isNullableInt(to)
+            when {
+                toBoxed && !fromBoxed && from.definition == WellKnownTypes.intTypeDefinition -> frame.alloc(1)
+                fromBoxed && !toBoxed && to.definition == WellKnownTypes.intTypeDefinition -> frame.heapLoad()
+            }
+        }
+
         /** Pushes [actuals] for [fn], gathering any past its parameters into its rest List. */
         private fun argsFor(fn: FnInfo, actuals: List<TmpL.Actual>, skip: Int = 0) {
-            val fixed = fn.parameters.size - skip
-            if (fn.rest == null) {
-                args(actuals)
-                return
+            val formals = fn.parameters.drop(skip)
+            for ((i, formal) in formals.withIndex()) {
+                val actual = actuals.getOrNull(i)
+                if (actual == null) {
+                    // An omitted optional argument; the callee defaults a null.
+                    e.const(NULL)
+                } else {
+                    check(valueAs(actual as? TmpL.Expression ?: TODO("actual $actual"), formal.descriptor)) {
+                        "void argument $actual"
+                    }
+                }
             }
-            args(actuals.take(fixed))
-            listOf(actuals.drop(fixed))
+            if (fn.rest != null) listOf(actuals.drop(formals.size))
         }
 
         /** Pushes a new List of [actuals]. */
@@ -1271,10 +1311,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             }
         }
 
-        private fun requireNullable(x: TmpL.Expression) {
-            val t = x.type
-            if (t.definition == WellKnownTypes.intTypeDefinition) TODO("nullable Int: $x")
-        }
+        @Suppress("UnusedParameter") // A nullable Int is a box, so -1 still means null.
+        private fun requireNullable(x: TmpL.Expression) {}
 
         /** Types whose == is ==, by value or by address. */
         private fun identityComparable(x: TmpL.Expression) {
@@ -1353,6 +1391,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     }
 
     companion object {
+        fun isNullableInt(t: Type2) = t.nullity == Nullity.OrNull && t.definition == WellKnownTypes.intTypeDefinition
+
         private val LIST_TYPES = setOf(
             WellKnownTypes.listTypeDefinition,
             WellKnownTypes.listBuilderTypeDefinition,
