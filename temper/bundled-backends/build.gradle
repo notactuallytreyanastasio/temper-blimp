@@ -43,6 +43,7 @@ kotlin {
                 // loading to catch them.
                 implementation project(':be-cpp')
                 implementation project(':be-cppv')
+                implementation project(':be-piet')
                 implementation project(':be-csharp')
                 implementation project(':be-data')
                 implementation project(':be-java')

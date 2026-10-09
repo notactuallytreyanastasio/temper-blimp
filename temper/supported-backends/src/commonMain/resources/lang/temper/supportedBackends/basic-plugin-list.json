@@ -8,6 +8,7 @@
 "lang.temper.be.java.JavaBackend$Java17",
 "lang.temper.be.js.JsBackend$Factory",
 "lang.temper.be.lua.LuaBackend$Lua51",
+"lang.temper.be.piet.PietBackend$Factory",
 "lang.temper.be.py.PyBackend$MypyC",
 "lang.temper.be.py.PyBackend$Python3",
 "lang.temper.be.rust.RustBackend$Factory"
