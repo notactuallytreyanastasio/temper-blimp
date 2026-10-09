@@ -43,8 +43,86 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         val parameters: List<TmpL.Formal>,
         val body: TmpL.BlockStatement?,
         val returnsValue: Boolean,
+        /** For a local function: what it captures, in environment order, and its own name. */
+        val captured: List<ResolvedName>? = null,
+        val selfName: ResolvedName? = null,
     ) {
         val label = Label(name)
+        val isClosure get() = captured != null
+    }
+
+    /** Local functions met while translating, translated after everything else. */
+    private val pendingClosures = ArrayDeque<FnInfo>()
+
+    /** Adapters that let a module function be called as a function value. */
+    private val adapters = mutableMapOf<ResolvedName, Label>()
+
+    /**
+     * Locals that a local function captures and that something assigns.
+     * Each lives in a one-cell heap box so the closure and its maker share it;
+     * the slot holds the box's address.
+     */
+    private val boxed = mutableSetOf<ResolvedName>()
+
+    /** What each local function captures. */
+    private val captures = mutableMapOf<ResolvedName, List<ResolvedName>>()
+
+    /**
+     * Works out [captures] and [boxed]. A local function captures every name
+     * it mentions that some other function declares as a local. Globals and
+     * module functions are reachable without capture.
+     */
+    private fun analyzeClosures(topLevels: List<TmpL.TopLevel>) {
+        val localDecls = mutableMapOf<ResolvedName, Boolean>() // name -> mutable
+        val localFunctions = mutableListOf<TmpL.LocalFunctionDeclaration>()
+        fun walk(node: TmpL.Tree) {
+            when (node) {
+                is TmpL.LocalDeclaration -> localDecls[node.name.name] = !node.assignOnce
+                is TmpL.Formal -> localDecls[node.name.name] = !node.assignOnce
+                is TmpL.LocalFunctionDeclaration -> {
+                    localDecls[node.name.name] = false
+                    localFunctions.add(node)
+                }
+                else -> {}
+            }
+            for (i in 0 until node.childCount) node.childOrNull(i)?.let { walk(it) }
+        }
+        topLevels.forEach { walk(it) }
+        for (fn in localFunctions) {
+            val inside = mutableSetOf<ResolvedName>()
+            val mentioned = linkedSetOf<ResolvedName>()
+            fun collect(node: TmpL.Tree) {
+                when (node) {
+                    is TmpL.LocalDeclaration -> inside.add(node.name.name)
+                    is TmpL.Formal -> inside.add(node.name.name)
+                    is TmpL.LocalFunctionDeclaration -> inside.add(node.name.name)
+                    is TmpL.Id -> (node.nameContent as? lang.temper.common.Either.Left)?.let {
+                        mentioned.add(it.item)
+                    }
+                    else -> {}
+                }
+                for (i in 0 until node.childCount) node.childOrNull(i)?.let { collect(it) }
+            }
+            fn.parameters.parameters.forEach { collect(it) }
+            collect(fn.body)
+            val captured = mentioned.filter { it in localDecls && it !in inside && it != fn.name.name }
+            captures[fn.name.name] = captured
+            boxed.addAll(captured.filter { localDecls[it] == true })
+        }
+    }
+
+    private fun adapterFor(name: ResolvedName): Label = adapters.getOrPut(name) {
+        val fn = functions.getValue(name)
+        val n = fn.parameters.size
+        // [ret, fail, D, closure, args...] -> drop the closure and go.
+        val writer = FunctionWriter(program, "${fn.name}\$value", n + 1)
+        writer.begin(0)
+        writer.e.const(n + 1)
+        writer.e.const(-1)
+        writer.e.op(PietOp.Roll)
+        writer.e.op(Pop)
+        writer.e.jumpAway(fn.label)
+        writer.entry
     }
 
     /**
@@ -120,6 +198,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             }
         }
 
+        analyzeClosures(topLevels)
         val main = MainWriter(program, globals.size)
         val mainLocals = topLevels.filterIsInstance<TmpL.ModuleInitBlock>().flatMap { localsOf(it.body) }
         Scope(main.e, main.frame, writer = null, slotsFrom(mainLocals, 0)).apply {
@@ -138,6 +217,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         }
 
         for (fn in allFunctions()) translateFunction(fn)
+        while (pendingClosures.isNotEmpty()) translateFunction(pendingClosures.removeFirst())
         // Translating can ask for more dispatchers only from function
         // bodies, which are all done by now.
         for ((key, label) in dispatchers) writeDispatcher(key, label)
@@ -183,13 +263,25 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
 
     private fun translateFunction(fn: FnInfo) {
         val params = fn.parameters
-        val writer = FunctionWriter(program, fn.label.hint, params.size, fn.label)
+        // A closure's first parameter is itself: the block holding its row and environment.
+        val envSlots = if (fn.isClosure) 1 else 0
+        val writer = FunctionWriter(program, fn.label.hint, envSlots + params.size, fn.label)
         val body = fn.body ?: TODO("${fn.name} has no body")
         val locals = localsOf(body)
         writer.begin(locals.size)
-        val slots = slotsFrom(params.map { it.name.name }, writer.param(0)) +
-            slotsFrom(locals, writer.param(params.size))
-        Scope(writer.e, writer.frame, writer, slots, fn.returnsValue).apply {
+        val slots = slotsFrom(params.map { it.name.name }, writer.param(envSlots)) +
+            slotsFrom(locals, writer.param(envSlots + params.size))
+        val env = if (fn.isClosure) writer.param(0) else null
+        Scope(writer.e, writer.frame, writer, slots, fn.returnsValue, env, fn.captured.orEmpty(), fn.selfName).apply {
+            // A boxed parameter moves into its box on entry.
+            for (p in params) {
+                val slot = slots.getValue(p.name.name)
+                if (p.name.name in boxed) {
+                    frame.load(slot)
+                    frame.alloc(1)
+                    frame.store(slot)
+                }
+            }
             statement(body)
             if (fn.returnsValue) {
                 // Falling off the end of a function that returns a value does
@@ -209,6 +301,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         fun walk(s: TmpL.Statement) {
             when (s) {
                 is TmpL.LocalDeclaration -> add(s.name.name)
+                is TmpL.LocalFunctionDeclaration -> add(s.name.name)
                 is TmpL.NestingStatement -> s.nestedStatements.forEach { walk(it) }
                 else -> {}
             }
@@ -228,7 +321,41 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         val writer: FunctionWriter?,
         val slots: Map<ResolvedName, Int>,
         val returnsValue: Boolean = false,
+        /** The slot holding this closure's own block, if this is a closure. */
+        val envSlot: Int? = null,
+        captured: List<ResolvedName> = listOf(),
+        val selfName: ResolvedName? = null,
     ) {
+        /** Heap offset of each captured name within the closure's block. */
+        private val envOffsets = captured.withIndex().associate { (i, name) -> name to i + 1 }
+
+        /** Pushes what the variable's storage holds: a box's address if it is boxed. */
+        fun loadRaw(name: ResolvedName) {
+            val slot = slots[name]
+            val offset = envOffsets[name]
+            when {
+                slot != null -> frame.load(slot)
+                offset != null -> {
+                    frame.load(envSlot!!)
+                    frame.heapLoad(offset)
+                }
+                name == selfName -> frame.load(envSlot!!)
+                else -> frame.loadGlobal(globals[name] ?: TODO("reference to $name"))
+            }
+        }
+
+        fun load(name: ResolvedName) {
+            val fn = functions[name]
+            if (fn != null && name !in slots && name !in globals) {
+                // A module function as a value: a block holding its adapter's row.
+                e.pushLabel(adapterFor(name))
+                frame.alloc(1)
+                return
+            }
+            loadRaw(name)
+            if (name in boxed) frame.heapLoad()
+        }
+
         private val jumps = ArrayDeque<JumpScope>()
         private val handlers = ArrayDeque<Handler>()
 
@@ -276,8 +403,33 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             when (stmt) {
                 is TmpL.BlockStatement -> stmt.statements.forEach { statement(it) }
                 is TmpL.ExpressionStatement -> if (value(stmt.expression)) e.op(Pop)
-                is TmpL.LocalDeclaration -> stmt.init?.let { init ->
-                    if (value(init)) frame.store(slots.getValue(stmt.name.name))
+                is TmpL.LocalDeclaration -> {
+                    val slot = slots.getValue(stmt.name.name)
+                    if (stmt.name.name in boxed) {
+                        val init = stmt.init
+                        if (init == null || !value(init)) e.const(0)
+                        frame.alloc(1)
+                        frame.store(slot)
+                    } else {
+                        stmt.init?.let { init -> if (value(init)) frame.store(slot) }
+                    }
+                }
+                is TmpL.LocalFunctionDeclaration -> {
+                    val name = stmt.name.name
+                    val captured = captures.getValue(name)
+                    val fn = FnInfo(
+                        name.toString(),
+                        stmt.parameters.parameters,
+                        stmt.body,
+                        !stmt.sig.returnType2.isVoidLike,
+                        captured,
+                        name,
+                    )
+                    pendingClosures.addLast(fn)
+                    e.pushLabel(fn.label)
+                    for (c in captured) loadRaw(c)
+                    frame.alloc(1 + captured.size)
+                    frame.store(slots.getValue(name))
                 }
                 is TmpL.Assignment -> {
                     check(value(stmt.right)) { "assigning nothing: $stmt" }
@@ -373,8 +525,16 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         } ?: TODO("no jump target for $label")
 
         private fun store(name: ResolvedName) {
+            if (name in boxed) {
+                loadRaw(name)
+                frame.heapStore()
+                return
+            }
             when (val slot = slots[name]) {
-                null -> frame.storeGlobal(globals[name] ?: TODO("store to $name"))
+                null -> {
+                    check(name !in envOffsets) { "assigning captured $name, which is not boxed" }
+                    frame.storeGlobal(globals[name] ?: TODO("store to $name"))
+                }
                 else -> frame.store(slot)
             }
         }
@@ -397,12 +557,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                         else -> TODO("value $v")
                     }
                 }
-                is TmpL.Reference -> {
-                    val name = expr.id.name
-                    when (val slot = slots[name]) {
-                        null -> frame.loadGlobal(globals[name] ?: TODO("reference to $name"))
-                        else -> frame.load(slot)
-                    }
+                is TmpL.Reference -> load(expr.id.name)
+                is TmpL.FunInterfaceExpression -> when (val callable = expr.callable) {
+                    is TmpL.FnReference -> load(callable.id.name)
+                    else -> TODO("fun interface from $callable")
                 }
                 is TmpL.CallExpression -> return callExpression(expr)
                 is TmpL.This -> frame.load(slots[expr.id.name] ?: TODO("this outside a method: $expr"))
@@ -434,13 +592,17 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 is TmpL.FnReference -> {
                     val name = fn.id.name
                     builtins[name]?.let { return builtin(it, expr) }
-                    val info = functions[name] ?: TODO("call to $name")
+                    val info = functions[name]
+                    if (info == null || name in slots || name in envOffsets || name == selfName) {
+                        return callValue(expr) { load(name) }
+                    }
                     val landing = bubbleLanding()
                     call(frame, info.label, expr.parameters.size, info.returnsValue, landing) {
                         args(expr.parameters)
                     }
                     return info.returnsValue
                 }
+                is TmpL.FunInterfaceCallable -> return callValue(expr) { check(value(fn.expr)) }
                 is TmpL.MethodReference -> {
                     val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
                     return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters)
@@ -460,6 +622,29 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 }
                 else -> TODO("${fn::class.simpleName}: $expr")
             }
+        }
+
+        /**
+         * Calls a function value: the block [loadFn] pushes goes in as the
+         * callee's first argument, and its first cell is the row to go to.
+         */
+        private fun callValue(expr: TmpL.CallExpression, loadFn: () -> Unit): Boolean {
+            val returnsValue = !expr.passType.isVoidLike
+            if (!e.reachable) return returnsValue
+            val n = expr.parameters.size
+            val d0 = e.depth
+            val back = label("back")
+            val landing = bubbleLanding()
+            e.pushLabel(back)
+            e.pushLabel(landing)
+            frame.pushD(d0)
+            loadFn()
+            args(expr.parameters)
+            e.pick(n + 1)
+            frame.heapLoad()
+            e.jumpToTop()
+            e.startBlock(back, d0 + if (returnsValue) 1 else 0)
+            return returnsValue
         }
 
         private fun dotName(property: TmpL.PropertyId) =
