@@ -1,5 +1,8 @@
 # Build output
 build/
+# ...except these, which are test *inputs* that happen to be named build/
+!temper/cli/src/test/resources/build/
+!temper/functional-test-suite/src/commonMain/resources/types/string/build/
 .gradle/
 zig-out/
 .zig-cache/
