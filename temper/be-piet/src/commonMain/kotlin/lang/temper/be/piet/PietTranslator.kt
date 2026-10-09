@@ -12,8 +12,10 @@ import lang.temper.be.piet.PietOp.Subtract
 import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLOperator
 import lang.temper.name.ResolvedName
+import lang.temper.type.TypeDefinition
 import lang.temper.type.WellKnownTypes
 import lang.temper.type.isVoidLike
+import lang.temper.type2.Signature2
 import lang.temper.value.TBoolean
 import lang.temper.value.TInt
 import lang.temper.value.TString
@@ -36,7 +38,72 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     private val functions = mutableMapOf<ResolvedName, FnInfo>()
     private val builtins = mutableMapOf<ResolvedName, PietBuiltin>()
 
-    private class FnInfo(val decl: TmpL.ModuleFunctionDeclaration, val label: Label, val returnsValue: Boolean)
+    private class FnInfo(
+        val name: String,
+        val parameters: List<TmpL.Formal>,
+        val body: TmpL.BlockStatement?,
+        val returnsValue: Boolean,
+    ) {
+        val label = Label(name)
+    }
+
+    /**
+     * A class or interface. An object is a heap block `classId, fields...`;
+     * [own] holds the methods, getters and setters declared here, keyed by
+     * [key].
+     */
+    private class TypeInfo(val decl: TmpL.TypeDeclaration, val classId: Int?) {
+        val fieldCount get() = decl.members.count { it is TmpL.InstanceProperty }
+        val own = mutableMapOf<String, FnInfo>()
+        var constructor: FnInfo? = null
+    }
+
+    private val types = mutableMapOf<TypeDefinition, TypeInfo>()
+
+    /** Heap offset of each backed property within its object. */
+    private val fieldOffsets = mutableMapOf<ResolvedName, Int>()
+
+    /** Method keys called through an interface, which need a dispatcher. */
+    private val dispatchers = mutableMapOf<String, Label>()
+
+    private fun fnInfo(name: ResolvedName, parameters: TmpL.Parameters, body: TmpL.BlockStatement?, sig: Signature2) =
+        FnInfo(name.toString(), parameters.parameters, body, !sig.returnType2.isVoidLike)
+
+    private fun registerType(decl: TmpL.TypeDeclaration) {
+        val classId = if (decl.kind ==
+            TmpL.TypeDeclarationKind.Class
+        ) {
+            types.values.count { it.classId != null } + 1
+        } else {
+            null
+        }
+        val info = TypeInfo(decl, classId)
+        types[decl.typeShape] = info
+        var offset = 1
+        for (member in decl.members) {
+            when (member) {
+                is TmpL.InstanceProperty -> fieldOffsets[member.name.name] = offset++
+                is TmpL.Constructor ->
+                    info.constructor = fnInfo(member.name.name, member.parameters, member.body, member.sig)
+                is TmpL.NormalMethod -> info.own["m:${member.dotName.dotNameText}"] =
+                    fnInfo(member.name.name, member.parameters, member.body, member.sig)
+                is TmpL.Getter -> info.own["g:${member.dotName.dotNameText}"] =
+                    fnInfo(member.name.name, member.parameters, member.body, member.sig)
+                is TmpL.Setter -> info.own["s:${member.dotName.dotNameText}"] =
+                    fnInfo(member.name.name, member.parameters, member.body, member.sig)
+                else -> TODO("${member::class.simpleName}: $member")
+            }
+        }
+    }
+
+    /** The implementation of [key] a value of [info]'s type runs: its own, or a super type's default. */
+    private fun resolve(info: TypeInfo, key: String): FnInfo? =
+        info.own[key] ?: info.decl.superTypes.firstNotNullOfOrNull { superType ->
+            types[superType.typeName.sourceDefinition]?.let { resolve(it, key) }
+        }
+
+    private fun allFunctions(): List<FnInfo> =
+        functions.values.toList() + types.values.flatMap { listOfNotNull(it.constructor) + it.own.values }
 
     fun translate(): DispatchLayout {
         val topLevels = modules.flatMap { it.topLevels }
@@ -44,11 +111,9 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             when (topLevel) {
                 is TmpL.SupportCodeDeclaration ->
                     builtins[topLevel.name.name] = topLevel.init.supportCode as? PietBuiltin ?: TODO("$topLevel")
-                is TmpL.ModuleFunctionDeclaration -> functions[topLevel.name.name] = FnInfo(
-                    topLevel,
-                    Label(topLevel.name.name.toString()),
-                    !topLevel.sig.returnType2.isVoidLike,
-                )
+                is TmpL.ModuleFunctionDeclaration -> functions[topLevel.name.name] =
+                    fnInfo(topLevel.name.name, topLevel.parameters, topLevel.body, topLevel.sig)
+                is TmpL.TypeDeclaration -> registerType(topLevel)
                 is TmpL.ModuleLevelDeclaration -> globals[topLevel.name.name] = globals.size
                 is TmpL.ModuleInitBlock -> {}
                 else -> TODO("$topLevel")
@@ -72,14 +137,54 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             finish()
         }
 
-        for (fn in functions.values) translateFunction(fn)
+        for (fn in allFunctions()) translateFunction(fn)
+        // Translating can ask for more dispatchers only from function
+        // bodies, which are all done by now.
+        for ((key, label) in dispatchers) writeDispatcher(key, label)
         return program.link(main.entry)
     }
 
+    /**
+     * Jumps to the implementation of [key] for the class of `this`, with the
+     * caller's frame left exactly as it was: the implementation takes the
+     * same frame. The class id is h(this), and the row is a sum of
+     * `(id == k) * (row_k - halt)` over every class that has [key], plus
+     * halt, so an unknown class halts rather than running row 0.
+     */
+    private fun writeDispatcher(key: String, label: Label) {
+        val impls = types.values.filter { it.classId != null }.mapNotNull { c ->
+            resolve(c, key)?.let {
+                c.classId!! to
+                    it
+            }
+        }
+        val paramCount = impls.map { it.second.parameters.size }.distinct().singleOrNull()
+            ?: TODO("dispatch $key over ${impls.map { it.second.name }}")
+        val writer = FunctionWriter(program, "dispatch_$key", paramCount, label)
+        val e = writer.e
+        writer.begin(0)
+        writer.frame.load(writer.param(0))
+        writer.frame.heapLoad()
+        e.pushLabel(program.halt)
+        for ((classId, impl) in impls) {
+            e.pick(2)
+            e.const(classId)
+            e.op(Subtract)
+            e.op(Not)
+            e.pushLabel(impl.label)
+            e.pushLabel(program.halt)
+            e.op(Subtract)
+            e.op(Multiply)
+            e.op(Add)
+        }
+        e.dropUnder(1)
+        e.jumpToTop()
+    }
+
     private fun translateFunction(fn: FnInfo) {
-        val params = fn.decl.parameters.parameters
+        val params = fn.parameters
         val writer = FunctionWriter(program, fn.label.hint, params.size, fn.label)
-        val body = fn.decl.body ?: TODO("$fn.decl")
+        val body = fn.body ?: TODO("${fn.name} has no body")
         val locals = localsOf(body)
         writer.begin(locals.size)
         val slots = slotsFrom(params.map { it.name.name }, writer.param(0)) +
@@ -89,7 +194,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             if (fn.returnsValue) {
                 // Falling off the end of a function that returns a value does
                 // not happen in TmpL; if it does, say so here.
-                if (e.reachable) TODO("${fn.decl.name} falls off its end")
+                if (e.reachable) TODO("${fn.name} falls off its end")
             } else {
                 writer.ret(false)
             }
@@ -231,6 +336,15 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     e.jump(after)
                     if (e.knows(after)) e.startBlock(after)
                 }
+                is TmpL.SetBackedProperty -> {
+                    check(value(stmt.right))
+                    check(value(stmt.left.subject as TmpL.Expression))
+                    frame.heapStore(fieldOffset(stmt.left.property))
+                }
+                is TmpL.SetAbstractProperty -> {
+                    val subject = stmt.left.subject as? TmpL.Expression ?: TODO("static set $stmt")
+                    methodCall(subject, "s:${dotName(stmt.left.property)}", listOf(stmt.right))
+                }
                 is TmpL.ThrowStatement -> bubble()
                 is TmpL.ModuleInitFailed -> e.jumpAway(program.halt)
                 is TmpL.EmbeddedComment, is TmpL.BoilerplateCodeFoldBoundary -> {}
@@ -291,6 +405,12 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     }
                 }
                 is TmpL.CallExpression -> return callExpression(expr)
+                is TmpL.This -> frame.load(slots[expr.id.name] ?: TODO("this outside a method: $expr"))
+                is TmpL.GetBackedProperty -> {
+                    check(value(expr.subject as? TmpL.Expression ?: TODO("static get $expr")))
+                    frame.heapLoad(fieldOffset(expr.property))
+                }
+                is TmpL.GetAbstractProperty -> return methodCall(expr.subject, "g:${dotName(expr.property)}", listOf())
                 is TmpL.InfixOperation -> infix(expr)
                 is TmpL.PrefixOperation -> {
                     // Bang is the only prefix operator TmpL has.
@@ -322,18 +442,79 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     return info.returnsValue
                 }
                 is TmpL.MethodReference -> {
-                    val subject = fn.subject as? TmpL.Expression ?: TODO("method on ${fn.subject}")
-                    return when (fn.methodName.dotNameText) {
-                        "toString" if subject.type.definition == WellKnownTypes.intTypeDefinition -> {
-                            check(expr.parameters.isEmpty())
-                            call(frame, rt.intToString, 1, true) { check(value(subject)) }
-                            true
-                        }
-                        else -> TODO("method ${fn.methodName.dotNameText} on ${subject.type}: $expr")
+                    val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
+                    return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters)
+                }
+                is TmpL.ConstructorReference -> {
+                    val info = types[fn.typeShape] ?: TODO("new ${fn.typeShape}")
+                    val ctor = info.constructor ?: TODO("no constructor: $expr")
+                    e.const(info.classId ?: TODO("new interface $expr"))
+                    repeat(info.fieldCount) { e.const(0) }
+                    frame.alloc(1 + info.fieldCount)
+                    call(frame, ctor.label, 1 + expr.parameters.size, false, bubbleLanding()) {
+                        // ret, fail and D are above the new object.
+                        e.pick(4)
+                        args(expr.parameters)
                     }
+                    return true
                 }
                 else -> TODO("${fn::class.simpleName}: $expr")
             }
+        }
+
+        private fun dotName(property: TmpL.PropertyId) =
+            (property as? TmpL.ExternalPropertyId)?.name?.dotNameText ?: TODO("internal property $property")
+
+        private fun fieldOffset(property: TmpL.PropertyId) =
+            fieldOffsets[(property as? TmpL.InternalPropertyId)?.name?.name ?: TODO("external $property")]
+                ?: TODO("unknown field $property")
+
+        /**
+         * Calls the method, getter or setter [key] on [subject]: directly when
+         * its static type is a class, which Temper does not let anything
+         * extend, and through a dispatcher when it is an interface.
+         */
+        fun methodCall(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            val type = subject.type.definition
+            val info = types[type] ?: return builtinMethod(subject, key, actuals)
+            val impl = resolve(info, key) ?: TODO("$key on ${info.decl.name}")
+            val target = when (info.classId) {
+                null -> dispatchers.getOrPut(key) { Label("dispatch_$key") }
+                else -> impl.label
+            }
+            call(frame, target, 1 + actuals.size, impl.returnsValue, bubbleLanding()) {
+                check(value(subject))
+                args(actuals)
+            }
+            return impl.returnsValue
+        }
+
+        /** Methods of types the runtime provides. */
+        private fun builtinMethod(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            val type = subject.type.definition
+            when {
+                type == WellKnownTypes.intTypeDefinition && key == "m:toString" && actuals.isEmpty() ->
+                    call(frame, rt.intToString, 1, true) { check(value(subject)) }
+                type == WellKnownTypes.intTypeDefinition && (key == "m:min" || key == "m:max") -> {
+                    // [a, b] -> a > b chooses: min is b when a > b.
+                    check(value(subject))
+                    args(actuals)
+                    e.pick(2)
+                    e.pick(2)
+                    e.op(Greater)
+                    if (key == "m:max") e.op(Not)
+                    // [a, b, c]: keep b if c else a, as a + c * (b - a)
+                    e.pick(3)
+                    e.pick(3)
+                    e.swap()
+                    e.op(Subtract)
+                    e.op(Multiply)
+                    e.dropUnder(1)
+                    e.op(Add)
+                }
+                else -> TODO("$key on ${subject.type}")
+            }
+            return true
         }
 
         private fun builtin(b: PietBuiltin, expr: TmpL.CallExpression): Boolean {
@@ -418,6 +599,11 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 PietBuiltin.BooleanNegation -> {
                     args(ps)
                     e.op(Not)
+                }
+                PietBuiltin.PureVirtual -> {
+                    // An abstract method's body. Dispatch never reaches one.
+                    bubble()
+                    return false
                 }
             }
             return true

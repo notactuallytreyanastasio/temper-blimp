@@ -37,7 +37,7 @@ object PietSupportNetwork : SupportNetwork {
     override fun representationOfVoid(genre: Genre) = RepresentationOfVoid.DoNotReifyVoid
 
     override fun getSupportCode(pos: Position, builtin: NamedBuiltinFun, genre: Genre): SupportCode? =
-        builtin.builtinOperatorId?.let { PietBuiltin.byOperator[it] }
+        builtin.builtinOperatorId?.let { PietBuiltin.byOperator[it] } ?: PietBuiltin.byName[builtin.name]
 
     override fun optionalSupportCode(
         optionalSupportCodeKind: OptionalSupportCodeKind,
@@ -61,6 +61,7 @@ object PietSupportNetwork : SupportNetwork {
 enum class PietBuiltin(
     override val builtinOperatorId: BuiltinOperatorId? = null,
     val connectedKey: String? = null,
+    val builtinName: String? = null,
 ) : NamedSupportCode, FunctionSupportCode {
     GetConsole(connectedKey = "core.getConsole()"),
     ConsoleLog(connectedKey = "core.type Console.log()"),
@@ -80,6 +81,7 @@ enum class PietBuiltin(
     EqIntInt(BuiltinOperatorId.EqIntInt),
     NeIntInt(BuiltinOperatorId.NeIntInt),
     BooleanNegation(BuiltinOperatorId.BooleanNegation),
+    PureVirtual(builtinName = "pureVirtual"),
     ;
 
     override val baseName = ParsedName(name)
@@ -88,5 +90,6 @@ enum class PietBuiltin(
     companion object {
         val byOperator = entries.mapNotNull { b -> b.builtinOperatorId?.let { it to b } }.toMap()
         val byConnectedKey = entries.mapNotNull { b -> b.connectedKey?.let { it to b } }.toMap()
+        val byName = entries.mapNotNull { b -> b.builtinName?.let { it to b } }.toMap()
     }
 }
