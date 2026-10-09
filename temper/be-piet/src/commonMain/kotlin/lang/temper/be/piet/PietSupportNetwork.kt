@@ -64,6 +64,22 @@ enum class PietBuiltin(
 ) : NamedSupportCode, FunctionSupportCode {
     GetConsole(connectedKey = "core.getConsole()"),
     ConsoleLog(connectedKey = "core.type Console.log()"),
+    StrCat(BuiltinOperatorId.StrCat),
+    PlusIntInt(BuiltinOperatorId.PlusIntInt),
+    MinusIntInt(BuiltinOperatorId.MinusIntInt),
+    MinusInt(BuiltinOperatorId.MinusInt),
+    TimesIntInt(BuiltinOperatorId.TimesIntInt),
+    DivIntInt(BuiltinOperatorId.DivIntInt),
+    DivIntIntSafe(BuiltinOperatorId.DivIntIntSafe),
+    ModIntInt(BuiltinOperatorId.ModIntInt),
+    ModIntIntSafe(BuiltinOperatorId.ModIntIntSafe),
+    LtIntInt(BuiltinOperatorId.LtIntInt),
+    GtIntInt(BuiltinOperatorId.GtIntInt),
+    LeIntInt(BuiltinOperatorId.LeIntInt),
+    GeIntInt(BuiltinOperatorId.GeIntInt),
+    EqIntInt(BuiltinOperatorId.EqIntInt),
+    NeIntInt(BuiltinOperatorId.NeIntInt),
+    BooleanNegation(BuiltinOperatorId.BooleanNegation),
     ;
 
     override val baseName = ParsedName(name)
