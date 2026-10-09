@@ -58,9 +58,14 @@ object NpietCommand : ToolSpecifics {
     override val cliNames = listOf("npiet")
 }
 
-internal fun runPiet(cliEnv: CliEnv, request: ToolchainRequest): List<ToolchainResult> =
+/**
+ * [maxSteps] bounds how many colour blocks npiet may visit. A Piet program
+ * that loops forever is indistinguishable from a slow one, so tests pass a
+ * budget and a program that exhausts it fails on its output.
+ */
+internal fun runPiet(cliEnv: CliEnv, request: ToolchainRequest, maxSteps: Long? = null): List<ToolchainResult> =
     when (request) {
-        is RunLibraryRequest -> listOf(cliEnv.runMain(request.libraryName))
+        is RunLibraryRequest -> listOf(cliEnv.runMain(request.libraryName, maxSteps))
         is RunTestsRequest -> unavailable(cliEnv, "Piet backend does not run tests yet")
         is RunBackendSpecificCompilationStepRequest -> error(request)
         is ExecInteractiveRepl -> unavailable(cliEnv, "Piet has no REPL")
@@ -75,11 +80,20 @@ private fun unavailable(cliEnv: CliEnv, message: String) =
         ),
     )
 
-private fun CliEnv.runMain(libraryName: DashedIdentifier): ToolchainResult {
+private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult {
     val runDir = relativeOutputDirectoryForLibrary(PietBackend.Factory.backendId, libraryName)
     val npiet = this[NpietCommand]
     val command = Command(
-        args = listOf("-q", "-cs", "1", PietBackend.MAIN_FILE),
+        args = buildList {
+            add("-q")
+            add("-cs")
+            add("1")
+            if (maxSteps != null) {
+                add("-e")
+                add("$maxSteps")
+            }
+            add(PietBackend.MAIN_FILE)
+        },
         aux = mapOf(Aux.Stderr to runDir.resolveFile("stderr.txt")),
         cwd = runDir,
     )

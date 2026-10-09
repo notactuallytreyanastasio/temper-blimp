@@ -185,7 +185,61 @@ class FunctionWriter(
         e.jumpToTop()
     }
 
-    fun label(hint: String) = Label("$name.$hint")
+    fun label(hint: String) = Label("$name.$hint${labelCount++}")
+
+    private var labelCount = 0
+    private val failLandings = mutableListOf<Pair<Label, Int>>()
+
+    /** A row that fails this function from the current depth. Written by [end]. */
+    fun failLanding(depth: Int = e.depth): Label {
+        val landing = label("fail")
+        failLandings.add(landing to depth)
+        return landing
+    }
+
+    /** Writes the failure landings asked for. */
+    fun end() {
+        check(!e.reachable) { "$name falls off its end" }
+        for ((landing, depth) in failLandings) {
+            e.startBlock(landing, depth)
+            fail()
+        }
+        failLandings.clear()
+    }
+}
+
+/**
+ * Calls the function value [loadFn] pushes, with [argCount] arguments from
+ * [args]: the value goes in as the first argument, and its first cell is the
+ * row to go to.
+ */
+fun callClosure(
+    frame: Frame,
+    argCount: Int,
+    returnsValue: Boolean,
+    onFail: Label?,
+    loadFn: () -> Unit,
+    args: () -> Unit,
+) {
+    val e = frame.e
+    if (!e.reachable) return
+    val d0 = e.depth
+    val back = Label("closure.ret")
+    e.pushLabel(back)
+    if (onFail != null) {
+        e.expect(onFail, d0)
+        e.pushLabel(onFail)
+    } else {
+        e.pushLabel(frame.program.halt)
+    }
+    frame.pushD(d0)
+    loadFn()
+    args()
+    check(e.depth == d0 + 4 + argCount)
+    e.pick(argCount + 1)
+    frame.heapLoad()
+    e.jumpToTop()
+    e.startBlock(back, d0 + if (returnsValue) 1 else 0)
 }
 
 /**
@@ -259,4 +313,19 @@ fun Emitter.swap() {
     const(2)
     const(1)
     op(Roll)
+}
+
+/** A loop whose [body] may jump to the exit label it is given. */
+fun Emitter.loop(name: String, cond: () -> Unit, body: (exit: Label) -> Unit) {
+    val head = Label("$name.head")
+    val bodyLabel = Label("$name.body")
+    val exit = Label("$name.exit")
+    val d0 = depth
+    startBlock(head, d0)
+    cond()
+    branch(bodyLabel, exit)
+    startBlock(bodyLabel, d0)
+    body(exit)
+    jump(head)
+    startBlock(exit, d0)
 }
