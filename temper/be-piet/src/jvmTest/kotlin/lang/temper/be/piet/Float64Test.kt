@@ -127,15 +127,26 @@ class Float64Test {
         assertEquals(listOf<String>(), wrong)
     }
 
+    // Split up, because together they took 26 of the 30 seconds a test may.
     @Test
-    fun parseRoundsCorrectly() {
-        val inputs = listOf(
-            "-1.5", "-0", "2.0", "2", " 2 ", "5e-1", "NaN", "-Infinity", "Infinity", "0.1", "0.3",
-            "123456789012345678901234567890", "1e-300", "2.2250738585072014e-308", "4.9e-324",
-            "1e400", "1.7976931348623157e308", "0.30000000000000004", "9007199254740993",
-            "18014398509481985", "1E22", "1e23", "3.14159265358979323846264338327950288",
-            "0.000001", "7e-10", "2.5e-324", "123.456e-2",
-        )
+    fun parseRoundsCorrectlyFast() = parseRoundsCorrectly(
+        "-1.5", "-0", "2.0", "2", " 2 ", "5e-1", "NaN", "-Infinity", "Infinity", "0.1", "0.3",
+        "0.30000000000000004", "9007199254740993", "18014398509481985", "1E22", "1e23",
+        "0.000001", "7e-10", "123.456e-2",
+    )
+
+    /** Inputs off Clinger's fast path, which take the bignum division. */
+    @Test
+    fun parseRoundsCorrectlySlow() = parseRoundsCorrectly(
+        "123456789012345678901234567890", "1e-300", "2.2250738585072014e-308", "4.9e-324",
+    )
+
+    @Test
+    fun parseRoundsCorrectlySlower() = parseRoundsCorrectly(
+        "1e400", "1.7976931348623157e308", "3.14159265358979323846264338327950288", "2.5e-324",
+    )
+
+    private fun parseRoundsCorrectly(vararg inputs: String) {
         val program = AsmProgram()
         val main = MainWriter(program, 0)
         val rt = Runtime(program)
