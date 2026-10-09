@@ -10,6 +10,7 @@ import lang.temper.frontend.Module
 import lang.temper.fs.ResourceDescriptor
 import lang.temper.log.FilePath
 import lang.temper.log.filePath
+import lang.temper.log.resolveFile
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
 import lang.temper.name.DashedIdentifier
@@ -49,7 +50,16 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
      */
     override fun translate(finished: TmpL.ModuleSet): List<OutputFileSpecification> {
         val moduleSets = dependencyLibrariesInOrder().mapNotNull { siblingModuleSets[it] } + finished
-        val image = PietTranslator(moduleSets.flatMap { it.modules }, finished.modules.toSet()).translate().render()
+        // Each module's `_connected.pasm`, if it has one.
+        val connected = moduleSets.flatMap { it.modules }.mapNotNull { module ->
+            val path = module.codeLocation.codeLocation.sourceFile.resolveFile(Pasm.CONNECTED_FILE)
+            rawBackendFiles[path]?.let { Pasm(it) }
+        }
+        val image = PietTranslator(
+            moduleSets.flatMap { it.modules },
+            finished.modules.toSet(),
+            connected.flatMap { it.routines.values }.associateBy { it.name },
+        ).translate().render()
         return listOf(ByteArrayFileSpecification(filePath(MAIN_FILE), image.toPpm()))
     }
 
@@ -117,6 +127,9 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
                 fileExtensionMap = mapOf(
                     FileType.Module to FILE_EXTENSION,
                     FileType.Script to FILE_EXTENSION,
+                    // Not output: the extension of a library's own Piet
+                    // assembly, which is how the build hands it to us.
+                    FileType.Header to ".pasm",
                 ),
                 mimeTypeMap = mapOf(
                     FileType.Module to mimeType,
