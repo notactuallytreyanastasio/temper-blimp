@@ -24,9 +24,10 @@ import lang.temper.value.NamedBuiltinFun
 object PietSupportNetwork : SupportNetwork {
     override val backendDescription = "Piet Backend"
 
-    // TODO Choose once calls exist. Results keeps every call an ordinary
-    //  return, which suits a stack machine better than unwinding frames.
-    override val bubbleStrategy = BubbleBranchStrategy.Results
+    // A failure cannot be a value: no Int is free to mean it, and npiet keeps
+    // only 32 bits of anything it rolls. So a bubble is control flow, and
+    // every frame carries a row to return to on failure.
+    override val bubbleStrategy = BubbleBranchStrategy.Exceptions
     override val coroutineStrategy = CoroutineStrategy.TranslateToRegularFunction
     override val functionTypeStrategy = FunctionTypeStrategy.ToFunctionType
 
