@@ -83,6 +83,7 @@ enum class PietBuiltin(
     NeIntInt(BuiltinOperatorId.NeIntInt),
     BooleanNegation(BuiltinOperatorId.BooleanNegation),
     PureVirtual(builtinName = "pureVirtual"),
+    Panic(BuiltinOperatorId.Panic),
     Listify(BuiltinOperatorId.Listify),
     IsNull(BuiltinOperatorId.IsNull),
     NotNull(BuiltinOperatorId.NotNull),

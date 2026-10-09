@@ -99,6 +99,7 @@ val Runtime.stringSlice: Label get() = routine("str_slice", 3) {
     }
     frame.fillLength { ld(header) }
     ld(header)
+    this@stringSlice.internTop(frame)
     ret(true)
 }
 
@@ -283,6 +284,7 @@ val Runtime.stringFromCodePoint: Label get() = routine("str_from_cp", 1) {
     e.const(1)
     ld(cp)
     frame.alloc(2)
+    this@stringFromCodePoint.internTop(frame)
     ret(true)
     end()
 }
@@ -324,6 +326,7 @@ val Runtime.stringFromCodePoints: Label get() = routine("str_from_cps", 1) {
     }
     frame.fillLength { ld(header) }
     ld(header)
+    this@stringFromCodePoints.internTop(frame)
     ret(true)
     end()
 }
@@ -556,6 +559,7 @@ val Runtime.stringBuilderToString: Label get() = routine("sb_to_string", 1) {
     }
     frame.fillLength { ld(header) }
     ld(header)
+    this@stringBuilderToString.internTop(frame)
     ret(true)
 }
 
@@ -642,5 +646,114 @@ val Runtime.intToStringRadix: Label get() = routine("itoa_radix", 2) {
     }
     frame.fillLength { ld(header) }
     ld(header)
+    this@intToStringRadix.internTop(frame)
     ret(true)
+}
+
+/*
+ * Every string is interned, so equal strings are one address and `==` on
+ * any type, generic ones included, compares cells. A generic `T` might be
+ * a String or an Int at run time and nothing in a cell says which, so
+ * without this, `a == b` on two Ts could compare neither correctly.
+ *
+ * The table is the first thing the program allocates, so it is at heap
+ * address 0: INTERN_BUCKETS cells, each 0 or the address of a list of the
+ * strings that hash there. No bucket list can be at address 0, since the
+ * table is.
+ */
+const val INTERN_BUCKETS = 256
+
+val Runtime.intern: Label get() {
+    val compare = stringCompare
+    val add = listBuilderAdd
+    return routine("intern", 1) {
+        begin(4)
+        val s = param(0)
+        val h = param(1)
+        val i = param(2)
+        val bucket = param(3)
+        val found = param(4)
+        whileLess("hash", { ld(i) }, { length(s) }) {
+            st(h) {
+                ld(h)
+                e.const(31)
+                e.op(Multiply)
+                codePoint(s) { ld(i) }
+                e.op(Add)
+                e.const(INTERN_BUCKETS)
+                e.op(Mod)
+            }
+            inc(i)
+        }
+        st(bucket) {
+            ld(h)
+            frame.heapLoad()
+        }
+        e.ifThen(label("new").hint, {
+            ld(bucket)
+            e.op(Not)
+        }) {
+            st(bucket) {
+                e.const(0)
+                e.const(0)
+                e.const(PietTranslator.NULL)
+                frame.alloc(3)
+            }
+            ld(bucket)
+            ld(h)
+            frame.heapStore()
+        }
+        st(found) { ld(s) }
+        st(i) { e.const(0) }
+        e.loop(label("scan").hint, {
+            ld(bucket)
+            frame.heapLoad(LIST_LENGTH)
+            ld(i)
+            e.op(Greater)
+        }) { exit ->
+            val hit = label("hit")
+            val miss = label("miss")
+            call(frame, compare, 2, true) {
+                ld(bucket)
+                frame.heapLoad(LIST_DATA)
+                ld(i)
+                e.op(Add)
+                frame.heapLoad()
+                ld(s)
+            }
+            e.op(Not)
+            e.branch(hit, miss)
+            e.startBlock(hit)
+            st(found) {
+                ld(bucket)
+                frame.heapLoad(LIST_DATA)
+                ld(i)
+                e.op(Add)
+                frame.heapLoad()
+            }
+            e.jump(exit)
+            e.startBlock(miss)
+            inc(i)
+        }
+        e.ifThen(label("add").hint, {
+            ld(found)
+            ld(s)
+            e.op(Subtract)
+            e.op(Not)
+        }) {
+            call(frame, add, 2, false) {
+                ld(bucket)
+                ld(s)
+            }
+        }
+        ld(found)
+        ret(true)
+    }
+}
+
+/** `[s] -> [interned s]`, from any frame. */
+fun Runtime.internTop(frame: Frame) {
+    val target = intern
+    call(frame, target, 1, true) { frame.e.pick(4) }
+    frame.e.dropUnder(1)
 }

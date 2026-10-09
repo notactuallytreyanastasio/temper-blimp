@@ -2,6 +2,7 @@ package lang.temper.be.piet
 
 import lang.temper.be.Backend
 import lang.temper.be.BackendSetup
+import lang.temper.be.SiblingData
 import lang.temper.be.tmpl.TmpL
 import lang.temper.be.tmpl.TmpLTranslator
 import lang.temper.common.MimeType
@@ -11,6 +12,7 @@ import lang.temper.log.FilePath
 import lang.temper.log.filePath
 import lang.temper.name.BackendId
 import lang.temper.name.BackendMeta
+import lang.temper.name.DashedIdentifier
 import lang.temper.name.FileType
 import lang.temper.name.LanguageLabel
 
@@ -40,9 +42,45 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
             ::tentativeOutputPathFor,
         )
 
+    /**
+     * One image holds the library and everything it depends on, dependencies
+     * first so that their module-level code runs first. Piet has nothing to
+     * link with, so a dependency is translated again into each dependent.
+     */
     override fun translate(finished: TmpL.ModuleSet): List<OutputFileSpecification> {
-        val image = PietTranslator(finished.modules).translate().render()
+        val moduleSets = dependencyLibrariesInOrder().mapNotNull { siblingModuleSets[it] } + finished
+        val image = PietTranslator(moduleSets.flatMap { it.modules }, finished.modules.toSet()).translate().render()
         return listOf(ByteArrayFileSpecification(filePath(MAIN_FILE), image.toPpm()))
+    }
+
+    /**
+     * Every sibling library's TmpL, by library root. A library is translated
+     * before the libraries it depends on, so their own backends have produced
+     * nothing yet; [finishTmpL] is the one place every sibling's TmpL is
+     * available. (The Blimp backend meets the same problem the same way.)
+     */
+    private var siblingModuleSets: Map<FilePath, TmpL.ModuleSet> = mapOf()
+
+    override fun finishTmpL(tentative: TmpL.ModuleSet, siblings: SiblingData<TmpL.ModuleSet>): TmpL.ModuleSet {
+        siblingModuleSets = siblings.dataByLibraryRoot.filterKeys {
+            it != libraryConfigurations.currentLibraryConfiguration.libraryRoot
+        }
+        return super.finishTmpL(tentative, siblings)
+    }
+
+    /** Library roots this one depends on, transitively, each after its own dependencies. */
+    private fun dependencyLibrariesInOrder(): List<FilePath> {
+        val current = libraryConfigurations.currentLibraryConfiguration.libraryName
+        val shallow = dependenciesBuilder.build().shallowDependencies
+        val order = mutableListOf<FilePath>()
+        val visited = mutableSetOf(current)
+        fun visit(name: DashedIdentifier) {
+            if (!visited.add(name)) return
+            shallow[name].orEmpty().sorted().forEach(::visit)
+            libraryConfigurations.byLibraryName[name]?.libraryRoot?.let(order::add)
+        }
+        shallow[current].orEmpty().sorted().forEach(::visit)
+        return order
     }
 
     override val supportNetwork = PietSupportNetwork

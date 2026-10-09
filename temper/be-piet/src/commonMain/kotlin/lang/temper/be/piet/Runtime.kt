@@ -17,7 +17,7 @@ import lang.temper.be.piet.PietOp.Subtract
  * A string is a heap address `a` with its length at h(a) and its code points
  * at h(a+1) .. h(a+len).
  */
-class Runtime(private val program: AsmProgram) {
+class Runtime(val program: AsmProgram) {
     private val placed = mutableMapOf<String, Label>()
 
     internal fun routine(name: String, paramCount: Int, write: FunctionWriter.() -> Unit): Label =
@@ -195,6 +195,7 @@ class Runtime(private val program: AsmProgram) {
         }
         fillLength(header)
         frame.load(header)
+        this@Runtime.internTop(frame)
         ret(true)
     }
 
@@ -398,4 +399,20 @@ fun Runtime.bitwise(name: String, c1: Int, c2: Int): Label = routine("bit_$name"
     e.op(PietOp.Multiply)
     e.op(PietOp.Subtract)
     ret(true)
+}
+
+/**
+ * Piet has no stderr and no exit status: npiet exits 0 however a program
+ * ends. A panic therefore writes [PANIC_MARKER] to stdout and halts, and
+ * the runner turns output carrying it into a failed run.
+ */
+const val PANIC_MARKER = "\u0000PANIC"
+
+val Runtime.panic: Label get() = routine("panic", 0) {
+    begin(0)
+    for (c in PANIC_MARKER) {
+        e.const(c.code)
+        e.op(OutChar)
+    }
+    e.jumpAway(program.halt)
 }
