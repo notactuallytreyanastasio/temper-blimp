@@ -133,11 +133,13 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
             get() = BackendMeta(
                 backendId = backendId,
                 languageLabel = LanguageLabel(backendId.uniqueId),
+                // The build reads every source file with one of these
+                // extensions as text and hands it to the backend, so this
+                // lists what be-piet reads, not what it writes: a library's
+                // own Piet assembly. Listing ".ppm" here made a Piet image
+                // kept beside a library's source fail the build with
+                // MalformedInputException.
                 fileExtensionMap = mapOf(
-                    FileType.Module to FILE_EXTENSION,
-                    FileType.Script to FILE_EXTENSION,
-                    // Not output: the extension of a library's own Piet
-                    // assembly, which is how the build hands it to us.
                     FileType.Header to ".pasm",
                 ),
                 mimeTypeMap = mapOf(
