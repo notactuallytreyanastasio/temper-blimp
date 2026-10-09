@@ -145,6 +145,10 @@ enum class PietBuiltin(
     Async(BuiltinOperatorId.Async),
     AwakeUpon(builtinName = "awakeUpon"),
     GetPromiseResultSync(builtinName = "getPromiseResultSync"),
+    NetSend(connectedKey = "std/net.sendRequest()"),
+    NetStatus(connectedKey = "std/net.type NetResponse.get status()"),
+    NetContentType(connectedKey = "std/net.type NetResponse.get contentType()"),
+    NetBodyContent(connectedKey = "std/net.type NetResponse.get bodyContent()"),
     ;
 
     override val baseName = ParsedName(name)

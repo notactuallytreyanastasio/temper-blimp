@@ -392,7 +392,7 @@ fun Runtime.bitwise(name: String, c1: Int, c2: Int): Label = routine("bit_$name"
  * ends. A panic therefore writes [PANIC_MARKER] to stdout and halts, and
  * the runner turns output carrying it into a failed run.
  */
-const val PANIC_MARKER = "\u0000PANIC"
+const val PANIC_MARKER = "\u0001PANIC"
 
 val Runtime.panic: Label get() = routine("panic", 0) {
     begin(0)

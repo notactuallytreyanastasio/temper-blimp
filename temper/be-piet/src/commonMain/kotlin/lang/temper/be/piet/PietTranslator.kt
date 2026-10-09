@@ -1288,7 +1288,10 @@ class PietTranslator(
             when {
                 // The date comes in on stdin: the runner pipes `date -u '+%Y %m %d'`.
                 info != null && name == "today" && "${info.decl.name}" == "Date" ->
-                    newObject(info) { repeat(3) { e.op(PietOp.InNumber) } }
+                    newObject(info) {
+                        e.requestDate()
+                        repeat(3) { e.op(PietOp.InNumber) }
+                    }
                 type == WellKnownTypes.listTypeDefinition && name == "of" -> listOf(expr.parameters)
                 type == WellKnownTypes.stringTypeDefinition && name == "fromCodePoint" ->
                     call(frame, rt.stringFromCodePoint, 1, true, bubbleLanding()) { args(expr.parameters) }
@@ -1842,6 +1845,17 @@ class PietTranslator(
                 PietBuiltin.AwakeUpon -> {
                     call(frame, rt.awakeUpon, 2, false) { check(args(ps) == 2) }
                     return false
+                }
+                PietBuiltin.NetSend -> call(frame, rt.netSend, 4, true) { check(args(ps) == 4) }
+                PietBuiltin.NetStatus, PietBuiltin.NetContentType, PietBuiltin.NetBodyContent -> {
+                    check(args(ps) == 1)
+                    frame.heapLoad(
+                        when (b) {
+                            PietBuiltin.NetStatus -> NET_STATUS
+                            PietBuiltin.NetContentType -> NET_CONTENT_TYPE
+                            else -> NET_BODY
+                        },
+                    )
                 }
                 PietBuiltin.GetPromiseResultSync ->
                     call(frame, rt.promiseResult, 1, true, bubbleLanding()) { check(args(ps) == 1) }

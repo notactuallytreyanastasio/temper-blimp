@@ -65,6 +65,8 @@ class PietBackend(setup: BackendSetup<PietBackend>) : Backend<PietBackend>(Facto
         val hasTests = finished.modules.any { m -> m.topLevels.any { it is TmpL.Test } }
         return listOfNotNull(
             ByteArrayFileSpecification(filePath(MAIN_FILE), image(false)),
+            // What runs an image, answering its requests for the date and for HTTP.
+            ByteArrayFileSpecification(filePath(IO_FILE), IO_SCRIPT.encodeToByteArray()),
             if (hasTests) ByteArrayFileSpecification(filePath(TEST_FILE), image(true)) else null,
         )
     }
