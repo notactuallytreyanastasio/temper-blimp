@@ -20,6 +20,9 @@ import lang.temper.be.piet.PietOp.Subtract
 class Runtime(val program: AsmProgram) {
     private val placed = mutableMapOf<String, Label>()
 
+    /** The global holding async's run queue, when the program uses async; see Async.kt. */
+    var runQueueGlobal: Int = -1
+
     init {
         // Placed up front: every call that cannot bubble names it as its failure row.
         program.unexpectedFailure = panic
@@ -443,4 +446,38 @@ val Runtime.panicAt: Label get() = placedBlock("panic_at") { e ->
     }
     e.op(PietOp.OutNumber)
     e.jumpAway(program.halt)
+}
+
+/** A generator is a block `fn, done`, where fn is the state machine Temper made of a generator function. */
+const val GEN_FN = 0
+const val GEN_DONE = 1
+
+/**
+ * `[generator] -> [result]`. A ValueResult is a box holding the value and
+ * a DoneResult is null, so the state machine's own result is the answer;
+ * the generator is done once that is null, and fn is not called again.
+ */
+val Runtime.generatorNext: Label get() = routine("gen_next", 1) {
+    begin(0)
+    e.ifElseValue(label("done").hint, {
+        frame.load(param(0))
+        frame.heapLoad(GEN_DONE)
+    }, { e.const(PietTranslator.NULL) }) {
+        // The state machine takes its own generator.
+        callClosure(frame, 1, true, null, {
+            frame.load(param(0))
+            frame.heapLoad(GEN_FN)
+        }) { frame.load(param(0)) }
+        e.ifThen(label("finished").hint, {
+            e.op(PietOp.Duplicate)
+            e.const(PietTranslator.NULL)
+            e.op(PietOp.Subtract)
+            e.op(PietOp.Not)
+        }) {
+            e.const(1)
+            frame.load(param(0))
+            frame.heapStore(GEN_DONE)
+        }
+    }
+    ret(true)
 }
