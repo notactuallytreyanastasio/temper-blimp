@@ -52,11 +52,21 @@ object PietSpecifics : RunnerSpecifics {
 
     override val backendId get() = PietBackend.Factory.backendId
 
-    override val tools: List<ToolSpecifics> = listOf(NpietCommand)
+    override val tools: List<ToolSpecifics> = listOf(NpietCommand, ShellCommand)
 }
 
 object NpietCommand : ToolSpecifics {
     override val cliNames = listOf("npiet")
+}
+
+/**
+ * npiet runs under a shell so that today's date can arrive on its stdin: a
+ * Piet program has no clock, and Date.today() reads year, month and day with
+ * three in(number) commands. Temper has no input of its own, so nothing
+ * else reads stdin.
+ */
+object ShellCommand : ToolSpecifics {
+    override val cliNames = listOf("sh")
 }
 
 /**
@@ -93,21 +103,22 @@ private fun panicked(result: RResult<EffortSuccess, CliFailure>, cliEnv: CliEnv)
 
 private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult {
     val runDir = relativeOutputDirectoryForLibrary(PietBackend.Factory.backendId, libraryName)
-    val npiet = this[NpietCommand]
+    val shell = this[ShellCommand]
+    val npietArgs = buildList {
+        add("-q")
+        add("-cs")
+        add("1")
+        if (maxSteps != null) {
+            add("-e")
+            add("$maxSteps")
+        }
+        add(PietBackend.MAIN_FILE)
+    }
     val command = Command(
-        args = buildList {
-            add("-q")
-            add("-cs")
-            add("1")
-            if (maxSteps != null) {
-                add("-e")
-                add("$maxSteps")
-            }
-            add(PietBackend.MAIN_FILE)
-        },
+        args = listOf("-c", "date -u '+%Y %m %d' | exec npiet ${npietArgs.joinToString(" ")}"),
         aux = mapOf(Aux.Stderr to runDir.resolveFile("stderr.txt")),
         cwd = runDir,
     )
-    command.maybeLogBeforeRunning(npiet, shellPreferences)
-    return ToolchainResult(libraryName = libraryName, result = panicked(npiet.run(command), this))
+    command.maybeLogBeforeRunning(shell, shellPreferences)
+    return ToolchainResult(libraryName = libraryName, result = panicked(shell.run(command), this))
 }

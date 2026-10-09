@@ -65,9 +65,14 @@ private fun MutableList<Step>.pushConst(n: Long) {
             add(Step(PietOp.Push, 1))
             add(Step(PietOp.Not))
         }
+        n == Long.MIN_VALUE -> {
+            // No positive counterpart to negate: -MAX - 1.
+            pushConst(-Long.MAX_VALUE)
+            add(Step(PietOp.Push, 1))
+            add(Step(PietOp.Subtract))
+        }
         n < 0L -> {
-            // 0 - |n|. Long.MIN_VALUE has no positive counterpart.
-            require(n != Long.MIN_VALUE) { "cannot push $n" }
+            // 0 - |n|
             pushConst(0L)
             pushConst(-n)
             add(Step(PietOp.Subtract))

@@ -112,6 +112,8 @@ class Frame(val e: Emitter, private val constantD: Int?) {
      */
     fun alloc(count: Int) {
         require(count >= 1)
+        // Nothing after a jump is emitted, so nothing here would add up.
+        if (!e.reachable) return
         val below = e.depth - count
         // Roll the cells under everything down to and including N.
         pushD(e.depth + 1)
@@ -230,7 +232,7 @@ fun callClosure(
         e.expect(onFail, d0)
         e.pushLabel(onFail)
     } else {
-        e.pushLabel(frame.program.halt)
+        e.pushLabel(frame.program.unexpectedFailure)
     }
     frame.pushD(d0)
     loadFn()
@@ -266,7 +268,7 @@ fun call(
         e.expect(onFail, d0)
         e.pushLabel(onFail)
     } else {
-        e.pushLabel(frame.program.halt)
+        e.pushLabel(frame.program.unexpectedFailure)
     }
     frame.pushD(d0)
     args()
