@@ -329,3 +329,56 @@ fun Emitter.loop(name: String, cond: () -> Unit, body: (exit: Label) -> Unit) {
     jump(head)
     startBlock(exit, d0)
 }
+
+/** `[a, b] -> [min(a, b)]` as `a + (a > b) * (b - a)`, with no branch. */
+fun Emitter.minTop() {
+    pick(2)
+    pick(2)
+    op(PietOp.Greater)
+    minMaxTail()
+}
+
+/** `[a, b] -> [max(a, b)]` as `a + (b > a) * (b - a)`. */
+fun Emitter.maxTop() {
+    op(PietOp.Duplicate)
+    pick(3)
+    op(PietOp.Greater)
+    minMaxTail()
+}
+
+/** `[a, b, c] -> [a + c * (b - a)]` */
+private fun Emitter.minMaxTail() {
+    pick(2)
+    pick(4)
+    op(PietOp.Subtract)
+    op(PietOp.Multiply)
+    swap()
+    op(Pop)
+    op(PietOp.Add)
+}
+
+/** `[x] -> [clamp(x, lo, hi)]` where lo and hi are pushed by the lambdas. */
+fun Emitter.clampTop(lo: () -> Unit, hi: () -> Unit) {
+    lo()
+    maxTop()
+    hi()
+    minTop()
+}
+
+/** Like [ifElse], but each branch leaves one value. */
+fun Emitter.ifElseValue(name: String, cond: () -> Unit, then: () -> Unit, otherwise: () -> Unit) {
+    cond()
+    val yes = Label("$name.then")
+    val no = Label("$name.else")
+    val join = Label("$name.join")
+    val d0 = depth - 1
+    branch(yes, no)
+    startBlock(yes, d0)
+    then()
+    expect(join, d0 + 1)
+    jump(join)
+    startBlock(no, d0)
+    otherwise()
+    jump(join)
+    startBlock(join, d0 + 1)
+}

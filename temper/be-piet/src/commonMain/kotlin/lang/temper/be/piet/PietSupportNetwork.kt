@@ -65,6 +65,7 @@ enum class PietBuiltin(
 ) : NamedSupportCode, FunctionSupportCode {
     GetConsole(connectedKey = "core.getConsole()"),
     ConsoleLog(connectedKey = "core.type Console.log()"),
+    Ignore(connectedKey = "core.ignore()"),
     StrCat(BuiltinOperatorId.StrCat),
     PlusIntInt(BuiltinOperatorId.PlusIntInt),
     MinusIntInt(BuiltinOperatorId.MinusIntInt),

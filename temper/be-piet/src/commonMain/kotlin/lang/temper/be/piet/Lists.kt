@@ -351,3 +351,347 @@ val Runtime.listSort: Label get() = routine("list_sort", 2) {
     ret(false)
     end()
 }
+
+/** An absent optional Int argument to a list routine; no valid index or count is this negative. */
+const val ABSENT = -(1L shl 31)
+
+private fun FunctionWriter.ld(slot: Int) = frame.load(slot)
+
+private fun FunctionWriter.st(slot: Int, push: () -> Unit) {
+    push()
+    frame.store(slot)
+}
+
+private fun FunctionWriter.length(l: Int) = field(l, LIST_LENGTH)
+
+/** Fails unless `lo <= index < length + extra`. */
+private fun FunctionWriter.boundsCheck(list: Int, index: Int, extra: Int = 0) {
+    val ok = label("inbounds")
+    e.const(0)
+    ld(index)
+    e.op(Greater)
+    length(list)
+    e.const(extra)
+    e.op(Add)
+    ld(index)
+    e.op(Greater)
+    e.op(Not)
+    e.op(Add)
+    e.op(Not)
+    e.branch(ok, failLanding(e.depth - 1))
+    e.startBlock(ok)
+}
+
+/** If [slot] holds [ABSENT], replaces it with what [default] pushes. */
+private fun FunctionWriter.defaultIfAbsent(slot: Int, default: () -> Unit) {
+    e.ifThen(label("absent").hint, {
+        ld(slot)
+        e.const(ABSENT)
+        e.op(Subtract)
+        e.op(Not)
+    }) {
+        st(slot, default)
+    }
+}
+
+val Runtime.listBuilderSet: Label get() = routine("lb_set", 3) {
+    begin(0)
+    val lb = param(0)
+    val i = param(1)
+    val v = param(2)
+    boundsCheck(lb, i)
+    ld(v)
+    setElement(lb) { ld(i) }
+    ret(false)
+    end()
+}
+
+/** `lb.add(x, at)`: append, then shift everything from [at] up by one. */
+val Runtime.listBuilderInsert: Label get() {
+    val add = listBuilderAdd
+    return routine("lb_insert", 3) {
+        begin(1)
+        val lb = param(0)
+        val x = param(1)
+        val at = param(2)
+        val j = param(3)
+        defaultIfAbsent(at) { length(lb) }
+        boundsCheck(lb, at, extra = 1)
+        call(frame, add, 2, false) {
+            ld(lb)
+            ld(x)
+        }
+        st(j) {
+            length(lb)
+            e.const(1)
+            e.op(Subtract)
+        }
+        e.whileLoop(label("shift").hint, {
+            ld(j)
+            ld(at)
+            e.op(Greater)
+        }) {
+            element(lb) {
+                ld(j)
+                e.const(1)
+                e.op(Subtract)
+            }
+            setElement(lb) { ld(j) }
+            inc(j, -1)
+        }
+        ld(x)
+        setElement(lb) { ld(at) }
+        ret(false)
+        end()
+    }
+}
+
+/** `lb.addAll(list, at)`, reading list's length first in case it is lb. */
+val Runtime.listBuilderAddAll: Label get() {
+    val insert = listBuilderInsert
+    return routine("lb_add_all", 3) {
+        begin(2)
+        val lb = param(0)
+        val list = param(1)
+        val at = param(2)
+        val i = param(3)
+        val n = param(4)
+        defaultIfAbsent(at) { length(lb) }
+        st(n) { length(list) }
+        e.whileLoop(label("each").hint, {
+            ld(n)
+            ld(i)
+            e.op(Greater)
+        }) {
+            call(frame, insert, 3, false, failLanding()) {
+                ld(lb)
+                element(list) { ld(i) }
+                ld(at)
+                ld(i)
+                e.op(Add)
+            }
+            inc(i)
+        }
+        ret(false)
+        end()
+    }
+}
+
+val Runtime.listBuilderRemoveLast: Label get() = routine("lb_remove_last", 1) {
+    begin(0)
+    val lb = param(0)
+    val ok = label("nonempty")
+    length(lb)
+    e.branch(ok, failLanding(e.depth - 1))
+    e.startBlock(ok)
+    setField(lb, LIST_LENGTH) {
+        length(lb)
+        e.const(1)
+        e.op(Subtract)
+    }
+    element(lb) { length(lb) }
+    ret(true)
+    end()
+}
+
+val Runtime.listBuilderReverse: Label get() = routine("lb_reverse", 1) {
+    begin(3)
+    val lb = param(0)
+    val i = param(1)
+    val j = param(2)
+    val t = param(3)
+    st(j) {
+        length(lb)
+        e.const(1)
+        e.op(Subtract)
+    }
+    e.whileLoop(label("swap").hint, {
+        ld(j)
+        ld(i)
+        e.op(Greater)
+    }) {
+        st(t) { element(lb) { ld(i) } }
+        element(lb) { ld(j) }
+        setElement(lb) { ld(i) }
+        ld(t)
+        setElement(lb) { ld(j) }
+        inc(i)
+        inc(j, -1)
+    }
+    ret(false)
+}
+
+/** A new list of elements [a, b), both clamped. */
+val Runtime.listSlice: Label get() {
+    val zeros = allocZeros
+    return routine("list_slice", 3) {
+        begin(2)
+        val l = param(0)
+        val a = param(1)
+        val b = param(2)
+        val data = param(3)
+        val i = param(4)
+        st(a) {
+            ld(a)
+            e.clampTop({ e.const(0) }, { length(l) })
+        }
+        st(b) {
+            ld(b)
+            e.clampTop({ ld(a) }, { length(l) })
+        }
+        st(data) {
+            call(frame, zeros, 1, true) {
+                ld(b)
+                ld(a)
+                e.op(Subtract)
+            }
+        }
+        e.whileLoop(label("copy").hint, {
+            ld(b)
+            ld(a)
+            ld(i)
+            e.op(Add)
+            e.op(Greater)
+        }) {
+            element(l) {
+                ld(a)
+                ld(i)
+                e.op(Add)
+            }
+            ld(data)
+            ld(i)
+            e.op(Add)
+            frame.heapStore()
+            inc(i)
+        }
+        newHeader({
+            ld(b)
+            ld(a)
+            e.op(Subtract)
+        }, {
+            ld(b)
+            ld(a)
+            e.op(Subtract)
+        }, { ld(data) })
+        ret(true)
+    }
+}
+
+/**
+ * `lb.splice(index, removeCount, newValues)`: removes and returns
+ * removeCount elements from index, putting newValues there. index
+ * defaults to 0 and removeCount to everything after index.
+ */
+val Runtime.listBuilderSplice: Label get() {
+    val slice = listSlice
+    val addAll = listBuilderAddAll
+    return routine("lb_splice", 4) {
+        begin(2)
+        val lb = param(0)
+        val index = param(1)
+        val count = param(2)
+        val values = param(3)
+        val removed = param(4)
+        val rest = param(5)
+        defaultIfAbsent(index) { e.const(0) }
+        st(index) {
+            ld(index)
+            e.clampTop({ e.const(0) }, { length(lb) })
+        }
+        defaultIfAbsent(count) {
+            length(lb)
+            ld(index)
+            e.op(Subtract)
+        }
+        st(count) {
+            ld(count)
+            e.clampTop({ e.const(0) }, {
+                length(lb)
+                ld(index)
+                e.op(Subtract)
+            })
+        }
+        st(removed) {
+            call(frame, slice, 3, true) {
+                ld(lb)
+                ld(index)
+                ld(index)
+                ld(count)
+                e.op(Add)
+            }
+        }
+        st(rest) {
+            call(frame, slice, 3, true) {
+                ld(lb)
+                ld(index)
+                ld(count)
+                e.op(Add)
+                length(lb)
+            }
+        }
+        setField(lb, LIST_LENGTH) { ld(index) }
+        e.ifThen(label("values").hint, {
+            ld(values)
+            e.const(PietTranslator.NULL)
+            e.op(Subtract)
+        }) {
+            call(frame, addAll, 3, false, failLanding()) {
+                ld(lb)
+                ld(values)
+                e.const(ABSENT)
+            }
+        }
+        call(frame, addAll, 3, false, failLanding()) {
+            ld(lb)
+            ld(rest)
+            e.const(ABSENT)
+        }
+        ld(removed)
+        ret(true)
+        end()
+    }
+}
+
+val Runtime.listGetOr: Label get() = routine("list_get_or", 3) {
+    begin(0)
+    val l = param(0)
+    val i = param(1)
+    val fallback = param(2)
+    e.ifElseValue(label("in").hint, {
+        // !(0 > i) * (length > i)
+        e.const(0)
+        ld(i)
+        e.op(Greater)
+        e.op(Not)
+        length(l)
+        ld(i)
+        e.op(Greater)
+        e.op(Multiply)
+    }, { element(l) { ld(i) } }) { ld(fallback) }
+    ret(true)
+}
+
+/** reduceFrom(init, f); reduce is reduceFrom of the first element over the rest, and bubbles if empty. */
+val Runtime.listReduceFrom: Label get() = routine("list_reduce_from", 4) {
+    begin(0)
+    val l = param(0)
+    val acc = param(1)
+    val f = param(2)
+    val i = param(3)
+    e.whileLoop(label("each").hint, {
+        length(l)
+        ld(i)
+        e.op(Greater)
+    }) {
+        st(acc) {
+            callClosure(frame, 2, true, failLanding(), { ld(f) }) {
+                ld(acc)
+                element(l) { ld(i) }
+            }
+        }
+        inc(i)
+    }
+    ld(acc)
+    ret(true)
+    end()
+}

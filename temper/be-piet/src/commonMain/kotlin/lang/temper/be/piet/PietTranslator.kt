@@ -268,6 +268,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         return null
     }
 
+    /** Whether every [from] is a [to], from declared super types alone. */
+    private fun staticSubtype(from: TypeDefinition, to: TypeDefinition): Boolean =
+        from == to || from.superTypes.any { staticSubtype(it.definition, to) }
+
     /** Whether [c] is [target] or has it among its super types. */
     private fun isSubtype(c: TypeInfo, target: TypeDefinition): Boolean {
         if (c.decl.typeShape == target) return true
@@ -749,6 +753,14 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     }
                 }
                 is TmpL.GetBackedProperty -> when (val subject = expr.subject) {
+                    is TmpL.TypeName if subject.sourceDefinition !in types -> {
+                        val name = (expr.property as? TmpL.ExternalPropertyId)?.name?.dotNameText
+                        when (subject.sourceDefinition to name) {
+                            WellKnownTypes.stringTypeDefinition to "begin" -> e.const(0)
+                            WellKnownTypes.stringIndexTypeDefinition to "none" -> e.const(NULL)
+                            else -> TODO("static $expr")
+                        }
+                    }
                     is TmpL.TypeName -> {
                         val name = when (val p = expr.property) {
                             is TmpL.InternalPropertyId -> p.name.name
@@ -867,7 +879,8 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     val subject = fn.subject as? TmpL.Expression ?: TODO("static method $expr")
                     return methodCall(subject, "m:${fn.methodName.dotNameText}", expr.parameters)
                 }
-                is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.listBuilderTypeDefinition -> {
+                is TmpL.ConstructorReference if fn.typeShape == WellKnownTypes.listBuilderTypeDefinition ||
+                    fn.typeShape == WellKnownTypes.stringBuilderTypeDefinition -> {
                     if (expr.parameters.isNotEmpty()) TODO("$expr")
                     e.const(0)
                     e.const(0)
@@ -949,6 +962,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         private fun staticBuiltin(type: TypeDefinition, name: String, expr: TmpL.CallExpression): Boolean {
             when {
                 type == WellKnownTypes.listTypeDefinition && name == "of" -> listOf(expr.parameters)
+                type == WellKnownTypes.stringTypeDefinition && name == "fromCodePoint" ->
+                    call(frame, rt.stringFromCodePoint, 1, true, bubbleLanding()) { args(expr.parameters) }
+                type == WellKnownTypes.stringTypeDefinition && name == "fromCodePoints" ->
+                    call(frame, rt.stringFromCodePoints, 1, true, bubbleLanding()) { args(expr.parameters) }
                 else -> TODO("static $name on $type: $expr")
             }
             return true
@@ -992,15 +1009,177 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     e.jump(join)
                     e.startBlock(join)
                 }
-                type == WellKnownTypes.stringTypeDefinition && key == "g:isEmpty" -> {
+                type == WellKnownTypes.stringTypeDefinition -> return stringMethod(subject, key, actuals)
+                type == WellKnownTypes.stringBuilderTypeDefinition -> return stringBuilderMethod(subject, key, actuals)
+                type in INDEX_TYPES && key == "m:compareTo" -> {
                     check(value(subject))
-                    frame.heapLoad()
-                    e.op(Not)
+                    args(actuals)
+                    compareInts()
                 }
+                type == WellKnownTypes.intTypeDefinition && key == "m:toString" ->
+                    call(frame, rt.intToStringRadix, 2, true) {
+                        check(value(subject))
+                        args(actuals)
+                    }
                 type in LIST_TYPES -> return listMethod(subject, key, actuals)
                 else -> TODO("$key on ${subject.type}")
             }
             return true
+        }
+
+        /** Calls [target] with the subject and actuals, padding absent optionals with [defaults]. */
+        private fun rtCall(
+            target: Label,
+            subject: TmpL.Expression,
+            actuals: List<TmpL.Actual>,
+            returnsValue: Boolean,
+            vararg defaults: () -> Unit,
+        ): Boolean {
+            call(frame, target, 1 + actuals.size + defaults.size, returnsValue, bubbleLanding()) {
+                check(value(subject))
+                args(actuals)
+                for (d in defaults) d()
+            }
+            return returnsValue
+        }
+
+        private fun stringMethod(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            fun len() {
+                check(value(subject))
+                frame.heapLoad()
+            }
+            fun arg(i: Int) = check(value(actuals[i] as TmpL.Expression))
+            when (key) {
+                "g:isEmpty" -> {
+                    len()
+                    e.op(Not)
+                }
+                "g:end" -> len()
+                "m:toString" -> check(value(subject))
+                "m:countBetween" -> {
+                    arg(1)
+                    arg(0)
+                    e.op(Subtract)
+                    e.const(0)
+                    e.maxTop()
+                }
+                "m:hasAtLeast" -> {
+                    // !(n > b - a)
+                    arg(2)
+                    arg(1)
+                    arg(0)
+                    e.op(Subtract)
+                    e.op(Greater)
+                    e.op(Not)
+                }
+                "m:hasIndex" -> {
+                    // !(0 > i) * (len > i)
+                    e.const(0)
+                    arg(0)
+                    e.op(Greater)
+                    e.op(Not)
+                    len()
+                    arg(0)
+                    e.op(Greater)
+                    e.op(Multiply)
+                }
+                "m:next" -> {
+                    arg(0)
+                    e.const(1)
+                    e.op(Add)
+                    len()
+                    e.minTop()
+                }
+                "m:prev" -> {
+                    arg(0)
+                    e.const(1)
+                    e.op(Subtract)
+                    e.const(0)
+                    e.maxTop()
+                }
+                "m:step" -> {
+                    arg(0)
+                    arg(1)
+                    e.op(Add)
+                    e.clampTop({ e.const(0) }, { len() })
+                }
+                "m:get" -> return rtCall(rt.stringGet, subject, actuals, true)
+                "m:slice" -> return rtCall(rt.stringSlice, subject, actuals, true)
+                "m:indexOf" -> return when (actuals.size) {
+                    1 -> rtCall(rt.stringIndexOf, subject, actuals, true, { e.const(0) })
+                    else -> rtCall(rt.stringIndexOf, subject, actuals, true)
+                }
+                "m:split" -> return rtCall(rt.stringSplit, subject, actuals, true)
+                "m:forEach" -> return rtCall(rt.stringForEach, subject, actuals, false)
+                "m:toInt32" -> return when (actuals.size) {
+                    0 -> rtCall(rt.stringToInt, subject, actuals, true, { e.const(10) })
+                    else -> rtCall(rt.stringToInt, subject, actuals, true)
+                }
+                else -> TODO("$key on String")
+            }
+            return true
+        }
+
+        private fun stringBuilderMethod(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
+            when (key) {
+                "m:append" -> return rtCall(
+                    rt.stringBuilderAppendBetween,
+                    subject,
+                    actuals,
+                    false,
+                    { e.const(0) },
+                    { e.const(1 shl 30) },
+                )
+                "m:appendBetween" -> return rtCall(rt.stringBuilderAppendBetween, subject, actuals, false)
+                "m:appendCodePoint" -> return rtCall(rt.stringBuilderAppendCodePoint, subject, actuals, false)
+                "m:toString" -> return rtCall(rt.stringBuilderToString, subject, actuals, true)
+                "g:end" -> {
+                    check(value(subject))
+                    frame.heapLoad(LIST_LENGTH)
+                }
+                "m:clear" -> {
+                    e.const(0)
+                    check(value(subject))
+                    frame.heapStore(LIST_LENGTH)
+                    return false
+                }
+                else -> TODO("$key on StringBuilder")
+            }
+            return true
+        }
+
+        /**
+         * Calls a list routine whose leading optional arguments are Ints:
+         * an absent one, or a literal null, is pushed as [ABSENT]. [arity]
+         * counts the arguments after the subject; the first [intArgs] of
+         * them are the optional Ints, any others follow them.
+         */
+        private fun optionalIntCall(
+            target: Label,
+            subject: TmpL.Expression,
+            actuals: List<TmpL.Actual>,
+            arity: Int,
+            returnsValue: Boolean,
+            intArgs: Int = -1,
+        ) {
+            // add(x, at) and addAll(list, at) put the optional last; splice puts it first.
+            call(frame, target, 1 + arity, returnsValue, bubbleLanding()) {
+                check(value(subject))
+                for (i in 0 until arity) {
+                    val actual = actuals.getOrNull(i) as TmpL.Expression?
+                    val isOptionalInt = if (intArgs < 0) i == arity - 1 else i < intArgs
+                    when {
+                        actual == null && isOptionalInt -> e.const(ABSENT)
+                        actual == null -> e.const(NULL)
+                        isOptionalInt && (
+                            actual.type.definition == WellKnownTypes.nullTypeDefinition ||
+                                (actual as? TmpL.ValueReference)?.value?.typeTag == TNull
+                            ) -> e.const(ABSENT)
+                        isOptionalInt && isNullableInt(actual.type) -> TODO("Int? argument $actual")
+                        else -> check(value(actual))
+                    }
+                }
+            }
         }
 
         private fun listMethod(subject: TmpL.Expression, key: String, actuals: List<TmpL.Actual>): Boolean {
@@ -1022,9 +1201,52 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 }
                 "m:get" -> rtCall(rt.listGet, true)
                 "m:add" -> {
-                    if (actuals.size != 1) TODO("$key with ${actuals.size} arguments")
-                    rtCall(rt.listBuilderAdd, false)
+                    if (actuals.size == 1) {
+                        rtCall(rt.listBuilderAdd, false)
+                    } else {
+                        optionalIntCall(rt.listBuilderInsert, subject, actuals, 2, false)
+                    }
                     return false
+                }
+                "m:set" -> {
+                    rtCall(rt.listBuilderSet, false)
+                    return false
+                }
+                "m:addAll" -> {
+                    optionalIntCall(rt.listBuilderAddAll, subject, actuals, 2, false)
+                    return false
+                }
+                "m:removeLast" -> rtCall(rt.listBuilderRemoveLast, true)
+                "m:reverse" -> {
+                    rtCall(rt.listBuilderReverse, false)
+                    return false
+                }
+                "m:clear" -> {
+                    e.const(0)
+                    check(value(subject))
+                    frame.heapStore(LIST_LENGTH)
+                    return false
+                }
+                "m:splice" -> optionalIntCall(rt.listBuilderSplice, subject, actuals, 3, true, intArgs = 2)
+                "m:slice" -> rtCall(rt.listSlice, true)
+                "m:getOr" -> rtCall(rt.listGetOr, true)
+                "m:reduceFrom" -> call(frame, rt.listReduceFrom, 4, true, bubbleLanding()) {
+                    check(value(subject))
+                    args(actuals)
+                    e.const(0)
+                }
+                "m:reduce" -> {
+                    // The first element is the start; empty bubbles, as get(0) does.
+                    call(frame, rt.listReduceFrom, 4, true, bubbleLanding()) {
+                        check(value(subject))
+                        call(frame, rt.listGet, 2, true, bubbleLanding()) {
+                            // The list, under this call's ret, fail and D.
+                            e.pick(4)
+                            e.const(0)
+                        }
+                        args(actuals)
+                        e.const(1)
+                    }
                 }
                 "m:toList", "m:toListBuilder" -> rtCall(rt.listCopy, true)
                 "m:map" -> rtCall(rt.listMap, true)
@@ -1059,6 +1281,10 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                 PietBuiltin.GetConsole -> {
                     // There is one console; it is not a value anyone inspects.
                     e.const(0)
+                }
+                PietBuiltin.Ignore -> {
+                    repeat(args(ps)) { e.op(Pop) }
+                    return false
                 }
                 PietBuiltin.ConsoleLog -> {
                     check(ps.size == 2)
@@ -1174,7 +1400,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                     val d = (ps[0] as TmpL.Expression).type.definition
                     when (d) {
                         WellKnownTypes.stringTypeDefinition -> call(frame, rt.stringCompare, 2, true) { args(ps) }
-                        WellKnownTypes.intTypeDefinition -> {
+                        WellKnownTypes.intTypeDefinition, in INDEX_TYPES -> {
                             args(ps)
                             compareInts()
                         }
@@ -1214,6 +1440,18 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
             val targetInfo = types[to]
             val fromIsObject = types[from.definition] != null
             when {
+                // An upcast: true unless null.
+                staticSubtype(from.definition, to) -> {
+                    e.const(NULL)
+                    e.op(Subtract)
+                    if (from.nullity != Nullity.OrNull) {
+                        e.op(Pop)
+                        e.const(1)
+                    } else {
+                        e.op(Not)
+                        e.op(Not)
+                    }
+                }
                 targetInfo != null && fromIsObject -> {
                     val classes = types.values.filter { it.classId != null && isSubtype(it, to) }.map { it.classId!! }
                     nullGuarded(from) {
@@ -1229,6 +1467,16 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
                         }
                         e.dropUnder(1)
                     }
+                }
+                from.definition in INDEX_TYPES && to == WellKnownTypes.stringIndexTypeDefinition -> {
+                    // An index is never negative; none is -1.
+                    e.const(-1)
+                    e.op(Greater)
+                }
+                from.definition in INDEX_TYPES && to == WellKnownTypes.noStringIndexTypeDefinition -> {
+                    e.const(0)
+                    e.swap()
+                    e.op(Greater)
                 }
                 to == from.definition && from.nullity == Nullity.OrNull -> {
                     requireNullable(source)
@@ -1318,7 +1566,7 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
         private fun identityComparable(x: TmpL.Expression) {
             val d = x.type.definition
             val ok = d == WellKnownTypes.intTypeDefinition || d == WellKnownTypes.booleanTypeDefinition ||
-                d == WellKnownTypes.nullTypeDefinition || d in types
+                d == WellKnownTypes.nullTypeDefinition || d in types || d in INDEX_TYPES
             if (!ok) TODO("== on ${x.type}: $x")
         }
 
@@ -1393,6 +1641,12 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
     companion object {
         fun isNullableInt(t: Type2) = t.nullity == Nullity.OrNull && t.definition == WellKnownTypes.intTypeDefinition
 
+        private val INDEX_TYPES = setOf(
+            WellKnownTypes.stringIndexTypeDefinition,
+            WellKnownTypes.stringIndexOptionTypeDefinition,
+            WellKnownTypes.noStringIndexTypeDefinition,
+        )
+
         private val LIST_TYPES = setOf(
             WellKnownTypes.listTypeDefinition,
             WellKnownTypes.listBuilderTypeDefinition,
@@ -1411,8 +1665,4 @@ class PietTranslator(private val modules: List<TmpL.Module>) {
 }
 
 /** Pops a value and goes to [ifNonZero] if it is not 0, else to [ifZero]. */
-fun Emitter.ifThenElseJump(ifNonZero: Label, ifZero: Label) {
-    op(Not)
-    op(Not)
-    branch(ifNonZero, ifZero)
-}
+fun Emitter.ifThenElseJump(ifNonZero: Label, ifZero: Label) = branch(ifNonZero, ifZero)
