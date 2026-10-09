@@ -2,6 +2,7 @@ package lang.temper.be.piet
 
 import lang.temper.be.FunctionalTestRunner
 import lang.temper.be.assertRunOutput
+import lang.temper.be.assertTestingTest
 import lang.temper.be.cli.CliEnv
 import lang.temper.be.cli.ShellPreferences
 import lang.temper.be.cli.ToolchainRequest
@@ -32,7 +33,7 @@ class PietFunctionalTest : FunctionalTestRunner<PietBackend>(PietBackend.Factory
             val result = runPiet(this, request, maxSteps = MAX_STEPS).first().result
             var pass = false
             try {
-                test.assertRunOutput(result)
+                if (test.runAsTest) assertTestingTest(test, result) else test.assertRunOutput(result)
                 pass = true
             } finally {
                 if (!pass) {

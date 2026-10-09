@@ -77,7 +77,7 @@ object ShellCommand : ToolSpecifics {
 internal fun runPiet(cliEnv: CliEnv, request: ToolchainRequest, maxSteps: Long? = null): List<ToolchainResult> =
     when (request) {
         is RunLibraryRequest -> listOf(cliEnv.runMain(request.libraryName, maxSteps))
-        is RunTestsRequest -> unavailable(cliEnv, "Piet backend does not run tests yet")
+        is RunTestsRequest -> request.libraries.orEmpty().map { cliEnv.runTests(it, maxSteps) }
         is RunBackendSpecificCompilationStepRequest -> error(request)
         is ExecInteractiveRepl -> unavailable(cliEnv, "Piet has no REPL")
     }
@@ -101,7 +101,36 @@ private fun panicked(result: RResult<EffortSuccess, CliFailure>, cliEnv: CliEnv)
     )
 }
 
-private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult {
+private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult =
+    ToolchainResult(libraryName = libraryName, result = runImage(libraryName, PietBackend.MAIN_FILE, maxSteps))
+
+/**
+ * The test image prints std/testing's JUnit XML after whatever the
+ * library's own module code logs; the XML goes where test reporting looks.
+ */
+private fun CliEnv.runTests(libraryName: DashedIdentifier, maxSteps: Long?): ToolchainResult {
+    val result = runImage(libraryName, PietBackend.TEST_FILE, maxSteps)
+    val effort = (result as? RSuccess)?.result as? Effort
+        ?: return ToolchainResult(libraryName = libraryName, result = result)
+    val start = effort.stdout.indexOf(JUNIT_START)
+    val end = effort.stdout.lastIndexOf(JUNIT_END)
+    if (start < 0 || end < start) {
+        return ToolchainResult(
+            libraryName = libraryName,
+            result = RFailure(CliFailure("no test report in the output", effort = effort.copy(exitCode = 1))),
+        )
+    }
+    val junit = effort.stdout.substring(start, end + JUNIT_END.length)
+    return ToolchainResult(
+        libraryName = libraryName,
+        result = RSuccess(effort.copy(stdout = effort.stdout.substring(0, start)).withAux(Aux.JunitXml, junit)),
+    )
+}
+
+private const val JUNIT_START = "<testsuites>"
+private const val JUNIT_END = "</testsuites>"
+
+private fun CliEnv.runImage(libraryName: DashedIdentifier, file: String, maxSteps: Long?): RResult<EffortSuccess, CliFailure> {
     val runDir = relativeOutputDirectoryForLibrary(PietBackend.Factory.backendId, libraryName)
     val shell = this[ShellCommand]
     val npietArgs = buildList {
@@ -112,7 +141,7 @@ private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): Tool
             add("-e")
             add("$maxSteps")
         }
-        add(PietBackend.MAIN_FILE)
+        add(file)
     }
     val command = Command(
         args = listOf("-c", "date -u '+%Y %m %d' | exec npiet ${npietArgs.joinToString(" ")}"),
@@ -120,5 +149,5 @@ private fun CliEnv.runMain(libraryName: DashedIdentifier, maxSteps: Long?): Tool
         cwd = runDir,
     )
     command.maybeLogBeforeRunning(shell, shellPreferences)
-    return ToolchainResult(libraryName = libraryName, result = panicked(shell.run(command), this))
+    return panicked(shell.run(command), this)
 }
