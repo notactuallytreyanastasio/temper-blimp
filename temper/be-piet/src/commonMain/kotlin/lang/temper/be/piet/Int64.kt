@@ -563,14 +563,13 @@ fun Runtime.shift(name: String, wide: Boolean, left: Boolean, unsigned: Boolean)
         ret(true)
     }
 
-/** `[v] -> [v wrapped to Int32]`, all on top of the stack. */
+/**
+ * `[v] -> [v wrapped to Int32]`, all on top of the stack: `1 1 roll` moves
+ * the top through npiet's C int, which keeps its low 32 bits, signed. (See
+ * PietTranslator's wrapInt32.)
+ */
 fun FunctionWriter.wrap32() {
-    e.const(TWO_32)
-    e.op(Mod)
-    e.const(TWO_32 + (1L shl 31))
-    e.op(Add)
-    e.const(TWO_32)
-    e.op(Mod)
-    e.const(1L shl 31)
-    e.op(Subtract)
+    e.const(1)
+    e.const(1)
+    e.op(PietOp.Roll)
 }

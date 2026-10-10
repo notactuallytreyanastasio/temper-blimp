@@ -2364,23 +2364,23 @@ class PietTranslator(
         }
 
         /**
-         * Brings the top into Int32 range the way two's complement wraps. The
-         * value is at most 2^62 in size, and stays on top of the stack the
-         * whole time: npiet's roll would cut it to 32 bits anyway, but
-         * silently, and only once stored.
+         * `[v] -> [v wrapped to Int32]`. npiet's roll moves the element it
+         * rolls through a C int, which keeps the low 32 bits as a signed
+         * value: exactly Int32's wrap. A roll of depth 1 moves only the top,
+         * so `1 1 roll` wraps it and touches nothing else. Checked against
+         * npiet: 2^32 + 5 -> 5, 2^31 + 3 -> -2147483645, -2^31 - 3 ->
+         * 2147483645.
          *
-         * Two mods because npiet's mod truncates: after the first the value
-         * is within (-2^32, 2^32), and adding 2^32 + 2^31 makes it positive.
+         * It was two mods and a shift by 2^31, four constants that took
+         * dozens of Piet commands to push, after every +, - and *: most of
+         * the steps an arithmetic-heavy function took (40,700 for one call
+         * of piet-programs/life's rule, of which the arithmetic was about 80
+         * operations).
          */
         private fun wrapInt32() {
-            e.const(TWO_32)
-            e.op(Mod)
-            e.const(TWO_32 + TWO_31)
-            e.op(Add)
-            e.const(TWO_32)
-            e.op(Mod)
-            e.const(TWO_31)
-            e.op(Subtract)
+            e.const(1)
+            e.const(1)
+            e.op(PietOp.Roll)
         }
     }
 
@@ -2436,8 +2436,6 @@ class PietTranslator(
          * nullable Int has no value free to mean null and is a TODO.
          */
         const val NULL = -1L
-        private const val TWO_31 = 1L shl 31
-        private const val TWO_32 = 1L shl 32
     }
 }
 
